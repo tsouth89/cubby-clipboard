@@ -65,13 +65,13 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
             } else if theme_str == "dark" {
                 tauri::Theme::Dark
             } else {
-                match dark_light::detect() {
-                    Ok(Mode::Dark) => tauri::Theme::Dark,
-                    Ok(_) => tauri::Theme::Light,
-                    Err(e) => {
-                        log::error!("save_settings: dark_light::detect() failed: {:?}", e);
-                        tauri::Theme::Light
-                    }
+                let mode = dark_light::detect().map_err(|e| {
+                    log::error!("save_settings: dark_light::detect() failed: {:?}", e);
+                    e.to_string()
+                })?;
+                match mode {
+                    Mode::Dark => tauri::Theme::Dark,
+                    _ => tauri::Theme::Light,
                 }
             };
             crate::apply_window_effect(&win, &mica_effect, &current_theme);
