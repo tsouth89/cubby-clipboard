@@ -15,6 +15,15 @@ jobs:
       release_id: ${{ steps.create-release.outputs.id }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
 
       - name: Create Release
         id: create-release
@@ -23,13 +32,13 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: 'PastePaw ${{ github.ref_name }}'
           body: |
-            ## What's Changed
+            ## What's Changed / 更新内容
 
-            See the [CHANGELOG.md](./CHANGELOG.md) for details.
+            ${{ steps.changelog.outputs.content }}
 
-            ## Installation
+            ## Installation / 安装
 
-            **Windows:** Download the `.msi` or `.exe` installer.
+            **Windows:** Download the `.msi` or `.exe` installer. / 下载 `.msi` 或 `.exe` 安装包。
           draft: false
           prerelease: false
 
