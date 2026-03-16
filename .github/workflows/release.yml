@@ -7,44 +7,117 @@ on:
 
 jobs:
   create-release:
-    if: github.event_name != 'workflow_dispatch'
     permissions:
       contents: write
     runs-on: ubuntu-latest
     outputs:
-      release_id: ${{ steps.create-release.outputs.id }}
+      release_id: ${{ steps.create-release.outputs.id || steps.create-draft-release.outputs.id }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Generate changelog
+        if: github.event_name != 'workflow_dispatch'
         id: changelog
         uses: orhun/git-cliff-action@v4
         with:
           config: cliff.toml
           args: --latest --strip header
 
+      - name: Translate changelog to Chinese
+        if: github.event_name != 'workflow_dispatch'
+        id: changelog_zh
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          ENGLISH_CHANGELOG="${{ steps.changelog.outputs.content }}"
+          if [ -z "$ENGLISH_CHANGELOG" ] || [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "content=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          ESCAPED=$(echo "$ENGLISH_CHANGELOG" | jq -Rs .)
+
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "content-type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "{
+              \"model\": \"claude-haiku-4-5-20251001\",
+              \"max_tokens\": 1024,
+              \"messages\": [{
+                \"role\": \"user\",
+                \"content\": \"Translate the following changelog to Chinese. Keep the same markdown format (### headers and - bullet points). Translate both headers and content naturally. Only output the translated markdown, nothing else.\n\n\"
+              }, {
+                \"role\": \"user\",
+                \"content\": $ESCAPED
+              }]
+            }")
+
+          ZH_CONTENT=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
+
+          if [ -n "$ZH_CONTENT" ]; then
+            EOF_MARKER=$(openssl rand -hex 8)
+            echo "content<<$EOF_MARKER" >> $GITHUB_OUTPUT
+            echo "$ZH_CONTENT" >> $GITHUB_OUTPUT
+            echo "$EOF_MARKER" >> $GITHUB_OUTPUT
+          else
+            echo "content=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build release body
+        if: github.event_name != 'workflow_dispatch'
+        id: release_body
+        run: |
+          ENGLISH="${{ steps.changelog.outputs.content }}"
+          CHINESE="${{ steps.changelog_zh.outputs.content }}"
+
+          EOF_MARKER=$(openssl rand -hex 8)
+          echo "body<<$EOF_MARKER" >> $GITHUB_OUTPUT
+
+          echo "## What's Changed" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          echo "$ENGLISH" >> $GITHUB_OUTPUT
+
+          if [ -n "$CHINESE" ]; then
+            echo "" >> $GITHUB_OUTPUT
+            echo "## 更新内容" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo "$CHINESE" >> $GITHUB_OUTPUT
+          fi
+
+          echo "" >> $GITHUB_OUTPUT
+          echo "---" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          echo "**Windows:** Download the \`.msi\` or \`.exe\` installer. / 下载 \`.msi\` 或 \`.exe\` 安装包。" >> $GITHUB_OUTPUT
+
+          echo "$EOF_MARKER" >> $GITHUB_OUTPUT
+
       - name: Create Release
+        if: github.event_name != 'workflow_dispatch'
         id: create-release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: 'PastePaw ${{ github.ref_name }}'
-          body: |
-            ## What's Changed / 更新内容
-
-            ${{ steps.changelog.outputs.content }}
-
-            ## Installation / 安装
-
-            **Windows:** Download the `.msi` or `.exe` installer. / 下载 `.msi` 或 `.exe` 安装包。
+          body: ${{ steps.release_body.outputs.body }}
           draft: false
           prerelease: false
 
+      - name: Create Draft Release (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        id: create-draft-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: draft-${{ github.sha }}
+          name: 'Draft Build (${{ github.ref_name }} @ ${{ github.sha }})'
+          body: 'Test build from `${{ github.ref_name }}` at `${{ github.sha }}`'
+          draft: true
+          prerelease: true
+
   release:
     needs: create-release
-    if: always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
     permissions:
       contents: write
     strategy:
@@ -101,7 +174,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: src-tauri
-          releaseId: ${{ needs.create-release.outputs.release_id || '' }}
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target ${{ matrix.target }}
 
       - name: Trigger Apps Gallery Update
