@@ -101,3 +101,14 @@ jobs:
           repository: XueshiQiao/XueshiQiao.github.io
           event-type: app_released
 
+  publish-winget:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish to winget-pkgs
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: XueshiQiao.PastePaw
+          installers-regex: '\.msi$'
+          token: ${{ secrets.WINGET_TOKEN }}
+
