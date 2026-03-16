@@ -110,6 +110,12 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
         }
     }
 
+    log::info!(
+        "save_settings: auto_paste={}, language={}, theme={}",
+        new_settings.auto_paste,
+        new_settings.language,
+        new_settings.theme
+    );
     manager.save(new_settings)?;
     Ok(())
 }

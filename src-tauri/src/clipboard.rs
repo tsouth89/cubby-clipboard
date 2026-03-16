@@ -1010,6 +1010,7 @@ unsafe fn extract_icon(path: &str) -> Option<String> {
 
 #[cfg(target_os = "windows")]
 pub fn send_paste_input() {
+    log::info!("send_paste_input: sending Shift+Insert");
     unsafe {
         let inputs = vec![
             INPUT {
@@ -1052,7 +1053,8 @@ pub fn send_paste_input() {
             },
         ];
 
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        let result = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        log::info!("send_paste_input: SendInput returned {}", result);
     }
 }
 

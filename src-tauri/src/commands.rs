@@ -591,6 +591,7 @@ pub async fn paste_clip(
                 let manager = app.state::<Arc<SettingsManager>>();
                 let settings = manager.get();
                 let auto_paste = settings.auto_paste;
+                log::info!("paste_clip: auto_paste={}", auto_paste);
 
                 if auto_paste {
                     // Auto-Paste Logic
