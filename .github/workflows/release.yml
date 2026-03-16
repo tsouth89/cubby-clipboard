@@ -29,7 +29,6 @@ jobs:
             ## Installation
 
             **Windows:** Download the `.msi` or `.exe` installer.
-            **macOS:** Download the `.dmg` installer.
           draft: false
           prerelease: false
 
@@ -45,10 +44,6 @@ jobs:
             target: 'x86_64-pc-windows-msvc'
           - platform: 'windows-latest'
             target: 'aarch64-pc-windows-msvc'
-          - platform: 'macos-latest'
-            target: 'aarch64-apple-darwin'
-          - platform: 'macos-latest'
-            target: 'x86_64-apple-darwin'
 
     runs-on: ${{ matrix.platform }}
 
@@ -87,30 +82,12 @@ jobs:
         run: echo "VERSION=${{ github.ref_name }}" >> $GITHUB_OUTPUT
         shell: bash
 
-      - name: Build the app (Windows)
-        if: matrix.platform == 'windows-latest'
+      - name: Build the app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          projectPath: src-tauri
-          releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: --target ${{ matrix.target }}
-
-      - name: Build, sign and notarize the app (macOS)
-        if: matrix.platform == 'macos-latest'
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: src-tauri
           releaseId: ${{ needs.create-release.outputs.release_id }}
@@ -124,11 +101,3 @@ jobs:
           repository: XueshiQiao/XueshiQiao.github.io
           event-type: app_released
 
-      - name: Trigger Homebrew Tap Update
-        if: success()
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.HOMEBREW_TAP_PAT }}
-          repository: XueshiQiao/homebrew_tap
-          event-type: update_cask
-          client-payload: '{"app_token": "pastepaw"}'
