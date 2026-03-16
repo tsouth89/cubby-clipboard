@@ -7,6 +7,7 @@ on:
 
 jobs:
   create-release:
+    if: github.event_name != 'workflow_dispatch'
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -34,6 +35,7 @@ jobs:
 
   release:
     needs: create-release
+    if: always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
     permissions:
       contents: write
     strategy:
@@ -90,11 +92,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: src-tauri
-          releaseId: ${{ needs.create-release.outputs.release_id }}
+          releaseId: ${{ needs.create-release.outputs.release_id || '' }}
           args: --target ${{ matrix.target }}
 
       - name: Trigger Apps Gallery Update
-        if: success()
+        if: success() && github.event_name != 'workflow_dispatch'
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.GALLERY_UPDATE_PAT }}
@@ -103,6 +105,7 @@ jobs:
 
   publish-winget:
     needs: release
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Publish to winget-pkgs
