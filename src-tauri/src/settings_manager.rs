@@ -145,6 +145,9 @@ impl SettingsManager {
         }
         // TODO - what happens if multiple threads call save at the same time?
         let json = serde_json::to_string_pretty(&new_settings).map_err(|e| e.to_string())?;
+        if let Some(parent) = self.file_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
         fs::write(&self.file_path, json).map_err(|e| e.to_string())?;
 
         Ok(())
