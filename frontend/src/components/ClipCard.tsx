@@ -3,7 +3,7 @@ import { clsx } from 'clsx';
 import { useMemo, memo, useState, forwardRef } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
-import { LAYOUT, TOTAL_COLUMN_WIDTH, PREVIEW_CHAR_LIMIT } from '../constants';
+import { LAYOUT, COLUMN_WIDTH, PREVIEW_CHAR_LIMIT } from '../constants';
 import { Copy, Check } from 'lucide-react';
 
 interface ClipCardProps {
@@ -141,8 +141,8 @@ export const ClipCard = memo(
       <div
         ref={ref}
         style={{
-          width: TOTAL_COLUMN_WIDTH - LAYOUT.CARD_GAP,
-          height: 'calc(100% - 32px)',
+          width: COLUMN_WIDTH - LAYOUT.CARD_GAP,
+          height: `calc(100% - ${LAYOUT.CARD_VERTICAL_PADDING * 2}px)`,
         }}
         className="flex-shrink-0"
       >

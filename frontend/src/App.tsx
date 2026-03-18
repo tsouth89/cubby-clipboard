@@ -706,6 +706,7 @@ function App() {
           )}
 
           <ControlBar
+            style={{ height: LAYOUT.CONTROL_BAR_HEIGHT, flexShrink: 0 }}
             folders={folders}
             selectedFolder={selectedFolder}
             onSelectFolder={handleSelectFolder}

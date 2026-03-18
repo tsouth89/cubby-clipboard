@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Grid, GridProps, useGridCallbackRef } from 'react-window';
 import { ClipboardItem } from '../types';
 import { ClipCard } from './ClipCard';
-import { TOTAL_COLUMN_WIDTH } from '../constants';
+import { COLUMN_WIDTH } from '../constants';
 
 interface ClipListProps {
   clips: ClipboardItem[];
@@ -89,7 +89,7 @@ export function ClipList({
 
     // Smaller per-notch travel with a single RAF-driven animation target.
     const scrollStep = deltaPx * 0.52;
-    const estimatedMax = Math.max(0, clips.length * TOTAL_COLUMN_WIDTH - element.clientWidth);
+    const estimatedMax = Math.max(0, clips.length * COLUMN_WIDTH - element.clientWidth);
     const measuredMax = Math.max(0, element.scrollWidth - element.clientWidth);
     const maxScrollLeft = Math.max(estimatedMax, measuredMax);
 
@@ -175,14 +175,14 @@ export function ClipList({
 
   return (
     <Grid
-      className="no-scrollbar h-full w-full flex-1 overflow-x-auto overflow-y-hidden px-4"
+      className="no-scrollbar h-full w-full flex-1 overflow-x-auto overflow-y-hidden"
       defaultHeight={240}
       defaultWidth={1000}
       gridRef={setGridApi}
       rowCount={1}
       rowHeight="100%"
       columnCount={clips.length}
-      columnWidth={TOTAL_COLUMN_WIDTH}
+      columnWidth={COLUMN_WIDTH}
       overscanCount={4}
       cellComponent={({ columnIndex, style }) => <Cell columnIndex={columnIndex} style={style} />}
       cellProps={{}}

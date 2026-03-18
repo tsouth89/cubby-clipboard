@@ -21,6 +21,7 @@ interface ControlBarProps {
   totalClipCount: number;
   onFolderContextMenu?: (e: React.MouseEvent, folderId: string) => void;
   theme?: 'light' | 'dark';
+  style?: React.CSSProperties;
 }
 
 export function ControlBar({
@@ -40,6 +41,7 @@ export function ControlBar({
   totalClipCount,
   onFolderContextMenu,
   theme = 'dark',
+  style,
 }: ControlBarProps) {
   const { t } = useTranslation();
 
@@ -226,7 +228,7 @@ export function ControlBar({
   };
 
   return (
-    <div className="drag-area flex min-h-[44px] items-center gap-4 px-6 pt-2">
+    <div className="drag-area flex items-end gap-4 px-6 pb-0" style={style}>
       {/* Search Toggle / Input */}
       <div
         className={clsx(
