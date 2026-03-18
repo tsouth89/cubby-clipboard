@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::TrayIconBuilder,
+    tray::{TrayIcon, TrayIconBuilder},
     Manager,
 };
 use tauri_plugin_aptabase::EventTracker;
@@ -117,6 +117,11 @@ pub fn run_app() {
                     let app_handle = window.app_handle().clone();
                     let theme_ = theme.clone();
 
+                    // Update tray icon to match new system theme
+                    if let Some(tray) = app_handle.tray_by_id("main") {
+                        update_tray_icon(&tray, &theme_);
+                    }
+
                     // Use SettingsManager
                     let manager = window.state::<Arc<SettingsManager>>();
                     let settings = manager.get();
@@ -221,13 +226,19 @@ pub fn run_app() {
             let separator_i = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(app, &[&title_i, &show_i, &separator_i, &quit_i])?;
 
-            let icon_data = include_bytes!("../icons/tray.png");
+            // Pick icon based on current system theme: white for dark, black for light
+            let is_dark = dark_light::detect().map(|m| m == dark_light::Mode::Dark).unwrap_or(false);
+            let icon_data: &[u8] = if is_dark {
+                include_bytes!("../icons/tray_white.png")
+            } else {
+                include_bytes!("../icons/tray.png")
+            };
             let icon = Image::from_bytes(icon_data).map_err(|e| {
                 log::info!("Failed to load icon: {:?}", e);
                 e
             })?;
 
-            let tray_builder = TrayIconBuilder::new()
+            let tray_builder = TrayIconBuilder::with_id("main")
                 .icon(icon)
                 .menu(&menu);
 
@@ -601,5 +612,15 @@ pub fn apply_window_effect(window: &tauri::WebviewWindow, effect: &str, theme: &
             }
             log::info!("THEME:Applied Tabbed effect (Theme: {})", theme);
         }
+    }
+}
+
+pub fn update_tray_icon(tray: &TrayIcon, theme: &tauri::Theme) {
+    let icon_data: &[u8] = match theme {
+        tauri::Theme::Dark => include_bytes!("../icons/tray_white.png"),
+        _ => include_bytes!("../icons/tray.png"),
+    };
+    if let Ok(icon) = Image::from_bytes(icon_data) {
+        let _ = tray.set_icon(Some(icon));
     }
 }
