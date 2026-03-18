@@ -38,7 +38,7 @@
 - ⚙️ **高度可自定义 AI** - 支持在设置中完全自定义 AI 功能的名称以及系统提示词 (Prompt)，打造专属您的 AI 工作流。
 
 ## 应用截图
-
+![docs/paste_paw_dark.png](docs/screenshot_win_panes.png)
 ### Light theme
 ![docs/paste_paw_dark.png](docs/screenshot_win_light.png)
 ### Dark theme
