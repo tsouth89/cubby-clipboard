@@ -24,6 +24,7 @@
         "shadow": false,
         "visible": false,
         "center": false,
+        "skipTaskbar": true,
         "label": "main"
       }
     ],
