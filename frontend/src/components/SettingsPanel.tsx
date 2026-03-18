@@ -134,7 +134,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
           if (updates.hotkey) {
             await invoke('register_global_shortcut', { hotkey: updates.hotkey });
           }
-          if ('round_corners' in updates) {
+          if ('round_corners' in updates || 'mica_effect' in updates || 'float_above_taskbar' in updates) {
             await invoke('refresh_window');
           }
         } catch (error) {
@@ -517,6 +517,19 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
 
                     <div className="flex items-center justify-between rounded-lg border border-border bg-accent/20 p-3">
                       <div>
+                        <span className="text-sm font-medium">{t('settings.floatAboveTaskbar')}</span>
+                        <p className="text-xs text-muted-foreground">{t('settings.floatAboveTaskbarDesc')}</p>
+                      </div>
+                      <button
+                        onClick={() => updateSetting('float_above_taskbar', !(settings.float_above_taskbar ?? true))}
+                        className={`h-6 w-11 rounded-full transition-colors ${(settings.float_above_taskbar ?? true) ? 'bg-primary' : 'bg-accent'}`}
+                      >
+                        <span className={`block h-4 w-4 rounded-full bg-white transition-transform ${(settings.float_above_taskbar ?? true) ? 'translate-x-6' : 'translate-x-1'}`} />
+                      </button>
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-lg border border-border bg-accent/20 p-3">
+                      <div>
                         <span className="text-sm font-medium">{t('settings.roundCorners')}</span>
                         <p className="text-xs text-muted-foreground">{t('settings.roundCornersDesc')}</p>
                       </div>
@@ -524,9 +537,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         onClick={() => updateSetting('round_corners', !(settings.round_corners ?? false))}
                         className={`h-6 w-11 rounded-full transition-colors ${(settings.round_corners ?? false) ? 'bg-primary' : 'bg-accent'}`}
                       >
-                        <span
-                          className={`block h-4 w-4 translate-x-1 rounded-full bg-white transition-transform ${(settings.round_corners ?? false) ? 'translate-x-6' : 'translate-x-1'}`}
-                        />
+                        <span className={`block h-4 w-4 rounded-full bg-white transition-transform ${(settings.round_corners ?? false) ? 'translate-x-6' : 'translate-x-1'}`} />
                       </button>
                     </div>
 

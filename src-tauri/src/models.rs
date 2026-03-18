@@ -17,6 +17,7 @@ pub struct AppSettings {
     pub ignore_ghost_clips: bool,
     pub startup_with_windows: bool,
     pub round_corners: bool,
+    pub float_above_taskbar: bool,
 
     // AI
     pub ai_provider: String,
@@ -49,6 +50,7 @@ impl Default for AppSettings {
             ignore_ghost_clips: false,
             startup_with_windows: false,
             round_corners: false,
+            float_above_taskbar: true,
 
             ai_provider: "openai".to_string(),
             ai_api_key: "".to_string(),

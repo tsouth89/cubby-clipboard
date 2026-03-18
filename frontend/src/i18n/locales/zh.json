@@ -63,6 +63,8 @@
     "themeSystem": "跟随系统",
     "language": "语言",
     "windowEffect": "窗口效果",
+    "floatAboveTaskbar": "浮于任务栏",
+    "floatAboveTaskbarDesc": "将窗口显示在任务栏上方",
     "launchAtLogin": "开机启动",
     "launchAtLoginDesc": "登录时自动启动",
     "accessibilityPermission": "辅助功能权限",

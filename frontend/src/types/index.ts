@@ -29,6 +29,7 @@ export interface Settings {
   language?: string;
   mica_effect?: string;
   round_corners?: boolean;
+  float_above_taskbar?: boolean;
   auto_paste: boolean;
   ignore_ghost_clips: boolean;
   ai_provider?: string;

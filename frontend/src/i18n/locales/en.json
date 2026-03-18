@@ -63,6 +63,8 @@
     "themeSystem": "System",
     "language": "Language",
     "windowEffect": "Window Effect",
+    "floatAboveTaskbar": "Float Above Taskbar",
+    "floatAboveTaskbarDesc": "Show the window on top of the taskbar",
     "launchAtLogin": "Launch at Login",
     "launchAtLoginDesc": "Automatically start when you log in",
     "accessibilityPermission": "Accessibility Permission",
