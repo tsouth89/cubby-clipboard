@@ -127,6 +127,6 @@ jobs:
         uses: vedantmgoyal9/winget-releaser@v2
         with:
           identifier: XueshiQiao.PastePaw
-          installers-regex: '\.msi$'
+          installers-regex: '.*-setup\.exe$'
           token: ${{ secrets.WINGET_TOKEN }}
 
