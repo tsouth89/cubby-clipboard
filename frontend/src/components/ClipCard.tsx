@@ -5,6 +5,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
 import { LAYOUT, COLUMN_WIDTH, PREVIEW_CHAR_LIMIT } from '../constants';
 import { Copy, Check } from 'lucide-react';
+import { useMotionValue, useMotionTemplate, motion } from 'framer-motion';
 
 interface ClipCardProps {
   clip: ClipboardItem;
@@ -23,7 +24,12 @@ export const ClipCard = memo(
   ) {
     const { t } = useTranslation();
     const [copied, setCopied] = useState(false);
+    const [hovered, setHovered] = useState(false);
     const title = clip.source_app || clip.clip_type.toUpperCase();
+
+    const mouseX = useMotionValue(0);
+    const mouseY = useMotionValue(0);
+
     const imageSrc = useMemo(() => {
       if (clip.clip_type !== 'image' || !clip.content) return null;
       const value = clip.content;
@@ -98,6 +104,8 @@ export const ClipCard = memo(
       return Math.round(index * hueStep);
     }, [title]);
 
+    const glowBackground = useMotionTemplate`radial-gradient(180px circle at ${mouseX}px ${mouseY}px, hsl(${appHue} 90% 64% / 0.9), transparent 65%)`;
+
     const handleMouseDown = (e: React.MouseEvent) => {
       // Only left click
       if (e.button !== 0) return;
@@ -109,32 +117,10 @@ export const ClipCard = memo(
       onContextMenu?.(e);
     };
 
-    const handleAmbientMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
       const rect = e.currentTarget.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-
-      const leftDistance = x;
-      const rightDistance = rect.width - x;
-      const topDistance = y;
-      const bottomDistance = rect.height - y;
-      const minDistance = Math.min(leftDistance, rightDistance, topDistance, bottomDistance);
-
-      let edgeX = x;
-      let edgeY = y;
-
-      if (minDistance === leftDistance) {
-        edgeX = 0;
-      } else if (minDistance === rightDistance) {
-        edgeX = rect.width;
-      } else if (minDistance === topDistance) {
-        edgeY = 0;
-      } else {
-        edgeY = rect.height;
-      }
-
-      e.currentTarget.style.setProperty('--edge-x', `${edgeX}px`);
-      e.currentTarget.style.setProperty('--edge-y', `${edgeY}px`);
+      mouseX.set(e.clientX - rect.left);
+      mouseY.set(e.clientY - rect.top);
     };
 
     return (
@@ -148,14 +134,14 @@ export const ClipCard = memo(
       >
         <div
           onMouseDown={handleMouseDown}
-          onMouseMove={handleAmbientMove}
+          onMouseMove={handleMouseMove}
+          onMouseEnter={() => setHovered(true)}
+          onMouseLeave={() => setHovered(false)}
           onClick={onSelect}
           onDoubleClick={onPaste}
           onContextMenu={handleContextMenu}
           style={
             {
-              '--edge-x': '50%',
-              '--edge-y': '0%',
               '--app-hue': `${appHue}`,
               borderColor: isSelected ? `hsl(${appHue} 82% 60%)` : undefined,
               borderWidth: isSelected ? '2px' : undefined,
@@ -167,26 +153,20 @@ export const ClipCard = memo(
             'group'
           )}
         >
-          <div
-            className={clsx(
-              'pointer-events-none absolute -inset-px z-20 rounded-[17px] p-[2.5px] transition-opacity duration-200 dark:p-[1.5px]',
-              isSelected ? 'opacity-0' : 'opacity-0 group-hover:opacity-100'
-            )}
-            style={
-              {
-                background: `
-              radial-gradient(170px circle at var(--edge-x) var(--edge-y), hsl(var(--app-hue) 90% 64% / 0.92), transparent 62%),
-              radial-gradient(120px circle at var(--edge-x) var(--edge-y), hsl(var(--app-hue) 86% 58% / 0.52), transparent 70%),
-              radial-gradient(95px circle at var(--edge-x) var(--edge-y), hsl(var(--app-hue) 82% 50% / 0.46), transparent 76%),
-              linear-gradient(hsl(var(--app-hue) 84% 56% / 0.28), hsl(var(--app-hue) 84% 56% / 0.28))
-            `,
+          {/* Framer-motion spotlight border glow */}
+          {!isSelected && (
+            <motion.div
+              className="pointer-events-none absolute -inset-px z-20 rounded-[17px] p-[2px]"
+              style={{
+                background: glowBackground,
                 WebkitMask: 'linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)',
                 WebkitMaskComposite: 'xor',
                 maskComposite: 'exclude',
-                filter: 'saturate(1.2) blur(0.2px)',
-              } as React.CSSProperties
-            }
-          />
+                opacity: hovered ? 1 : 0,
+                transition: 'opacity 200ms',
+              }}
+            />
+          )}
 
           <div
             className="relative z-10 flex flex-shrink-0 items-center gap-2 px-2 py-1.5"

@@ -21,6 +21,7 @@
     "@tauri-apps/plugin-updater": "^2.10.0",
     "clsx": "^2.0.0",
     "date-fns": "^2.30.0",
+    "framer-motion": "^12.38.0",
     "i18next": "^23.7.0",
     "i18next-browser-languagedetector": "^7.2.0",
     "lucide-react": "^0.294.0",
