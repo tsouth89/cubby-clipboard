@@ -19,7 +19,7 @@
 
 一款为 Windows 打造的精美剪贴板历史管理工具，基于 Rust + Tauri + React + TypeScript 构建。
 
-**macOS** 版本已上架 [App Store（中国区）](https://apps.apple.com/cn/app/pastepaw/id6759132043?mt=12)（[美区](https://apps.apple.com/us/app/pastepaw/id6759132043?mt=12)），更多信息请访问 [pastepaw.com](https://pastepaw.com/)。
+**macOS** 版本已上架 [App Store](https://apps.apple.com/cn/app/pastepaw/id6759132043?mt=12)，更多信息请访问 [pastepaw.com](https://pastepaw.com/)。
 
 ## 功能特性
 
