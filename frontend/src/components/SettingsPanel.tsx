@@ -16,6 +16,7 @@ import { useTheme } from '../hooks/useTheme';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
+import { FlaskConical } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getVersion } from '@tauri-apps/api/app';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -959,6 +960,28 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
             </div>
           </div>
         </div>
+
+        {/* Debug Tools — dev build only */}
+        {import.meta.env.DEV && (
+          <div className="border-t border-border px-4 py-3">
+            <p className="mb-2 text-xs font-medium text-muted-foreground">Debug</p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => emit('load-demo-data')}
+                className="flex items-center gap-2 rounded-md border border-dashed border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-primary hover:text-primary"
+              >
+                <FlaskConical size={12} />
+                Load 20 demo clips
+              </button>
+              <button
+                onClick={() => emit('restore-actual-data')}
+                className="flex items-center gap-2 rounded-md border border-dashed border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-destructive hover:text-destructive"
+              >
+                Restore actual data
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Footer */}
         <div className="flex flex-col items-center gap-1 border-t border-border bg-background px-4 py-3 text-center">
