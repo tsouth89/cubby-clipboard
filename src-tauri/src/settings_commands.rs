@@ -22,19 +22,6 @@ pub async fn get_settings(app: AppHandle) -> Result<serde_json::Value, String> {
         }
     }
 
-    #[cfg(all(feature = "app-store", target_os = "macos"))]
-    {
-        use smappservice_rs::{AppService, ServiceStatus, ServiceType};
-        let app_service = AppService::new(ServiceType::MainApp);
-        let is_enabled = matches!(app_service.status(), ServiceStatus::Enabled);
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert(
-                "startup_with_windows".to_string(),
-                serde_json::json!(is_enabled),
-            );
-        }
-    }
-
     Ok(value)
 }
 
@@ -95,21 +82,6 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
             }
         }
     }
-    #[cfg(all(feature = "app-store", target_os = "macos"))]
-    {
-        let startup = new_settings.startup_with_windows;
-        use smappservice_rs::{AppService, ServiceStatus, ServiceType};
-        let app_service = AppService::new(ServiceType::MainApp);
-        let current_state = matches!(app_service.status(), ServiceStatus::Enabled);
-        if startup != current_state {
-            if startup {
-                let _ = app_service.register();
-            } else {
-                let _ = app_service.unregister();
-            }
-        }
-    }
-
     log::info!(
         "save_settings: auto_paste={}, language={}, theme={}",
         new_settings.auto_paste,

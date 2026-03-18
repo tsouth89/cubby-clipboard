@@ -16,7 +16,6 @@ import { useLanguage } from './hooks/useLanguage';
 import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
 import { LAYOUT } from './constants';
-import { isMacOS } from './utils/platform';
 
 const base64ToBlob = (base64: string, mimeType: string = 'image/png'): Blob => {
   const byteCharacters = atob(base64);
@@ -415,7 +414,7 @@ function App() {
   const handlePaste = async (clipId: string) => {
     try {
       const clip = clips.find((c) => c.id === clipId);
-      if (clip && clip.clip_type === 'image' && !isMacOS()) {
+      if (clip && clip.clip_type === 'image') {
         try {
           const blob = await getFullImageBlob(clipId, clip);
           await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
@@ -433,7 +432,7 @@ function App() {
   const handleCopy = async (clipId: string) => {
     try {
       const clip = clips.find((c) => c.id === clipId);
-      if (clip && clip.clip_type === 'image' && !isMacOS()) {
+      if (clip && clip.clip_type === 'image') {
         const blob = await getFullImageBlob(clipId, clip);
         await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
       }
@@ -621,20 +620,16 @@ function App() {
     }
   };
 
-  const mac = isMacOS();
-
   return (
     <div className="relative h-screen w-full overflow-hidden">
-      {/* Blur layer: Windows only */}
-      {!mac && (
-        <div
-          className="absolute inset-0"
-          style={{
-            backgroundColor: 'transparent',
-            backdropFilter: 'blur(2px)',
-          }}
-        />
-      )}
+      {/* Blur layer */}
+      <div
+        className="absolute inset-0"
+        style={{
+          backgroundColor: 'transparent',
+          backdropFilter: 'blur(2px)',
+        }}
+      />
 
       {/* Content Container */}
       <div

@@ -43,12 +43,7 @@ impl Default for AppSettings {
             language: "en".to_string(),
             max_items: 1000,
             auto_delete_days: 30,
-            hotkey: if cfg!(target_os = "macos") {
-                "Cmd+Shift+V"
-            } else {
-                "Ctrl+Shift+V"
-            }
-            .to_string(),
+            hotkey: "Ctrl+Shift+V".to_string(),
             auto_paste: false,
             ignore_ghost_clips: false,
             startup_with_windows: false,

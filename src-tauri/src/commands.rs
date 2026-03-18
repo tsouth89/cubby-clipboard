@@ -522,22 +522,7 @@ pub async fn paste_clip(
 
             if clip.clip_type == "image" {
                 crate::clipboard::set_ignore_hash(content_hash.clone());
-                //crate::clipboard::set_last_stable_hash(content_hash.clone());
-
-                #[cfg(target_os = "macos")]
-                {
-                    let full_image_bytes = load_full_image_content(pool, &mut clip).await?;
-                    // Write PNG to temp file + file URL on pasteboard (fast path via disk)
-                    if let Err(e) = crate::clipboard::write_png_to_pasteboard(&full_image_bytes) {
-                        final_res = Err(format!("Failed to write image to clipboard: {}", e));
-                    }
-                }
-
-                #[cfg(not(target_os = "macos"))]
-                {
-                    // On Windows, frontend already writes image via navigator.clipboard API.
-                    // Avoid redundant backend file read to keep paste path fast.
-                }
+                // Frontend writes image via navigator.clipboard API.
             } else {
                 let content_str = String::from_utf8_lossy(&clip.content).to_string();
                 crate::clipboard::set_ignore_hash(content_hash.clone());
@@ -600,17 +585,9 @@ pub async fn paste_clip(
                         &window,
                         Some(Box::new(move || {
                             // 2. Callback executed AFTER window is hidden
-                            #[cfg(target_os = "windows")]
-                            {
-                                // Small buffer to ensure OS focus switch is complete
-                                std::thread::sleep(std::time::Duration::from_millis(200));
-                                crate::clipboard::send_paste_input();
-                            }
-                            #[cfg(target_os = "macos")]
-                            {
-                                std::thread::sleep(std::time::Duration::from_millis(100));
-                                crate::clipboard::send_paste_input();
-                            }
+                            // Small buffer to ensure OS focus switch is complete
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                            crate::clipboard::send_paste_input();
                         })),
                     );
                 } else {
@@ -1090,27 +1067,3 @@ pub fn get_layout_config() -> serde_json::Value {
     })
 }
 
-#[tauri::command]
-pub async fn check_accessibility_permissions() -> Result<bool, String> {
-    #[cfg(target_os = "macos")]
-    {
-        Ok(crate::source_app_macos::is_accessibility_enabled())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Ok(true)
-    }
-}
-
-#[tauri::command]
-pub async fn request_accessibility_permissions() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        crate::source_app_macos::open_accessibility_settings();
-        Ok(())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Ok(())
-    }
-}

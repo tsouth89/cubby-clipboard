@@ -1,7 +1,5 @@
-import { isMacOS } from './utils/platform';
-
 export const LAYOUT = {
-  WINDOW_HEIGHT: isMacOS() ? 293 : 330, // keep sync with backend (constants.rs)
+  WINDOW_HEIGHT: 330, // keep sync with backend (constants.rs)
   CONTROL_BAR_HEIGHT: 64,
   CARD_WIDTH: 210,
   CARD_GAP: 24,
