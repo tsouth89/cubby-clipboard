@@ -6,7 +6,7 @@ export const LAYOUT = {
   SIDE_PADDING: 20,
   CARD_VERTICAL_PADDING: 16,
   PADDING_OPACITY: 0.2,
-  WINDOW_PADDING: 16, // In pixels
+  WINDOW_PADDING: 8, // In pixels
   BLUR_AMOUNT: '8px', // Intensity of the blur
 };
 
