@@ -40,6 +40,7 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
     // Window effect
     let theme_str = new_settings.theme.clone();
     let mica_effect = new_settings.mica_effect.clone();
+    let round_corners = new_settings.round_corners;
     log::info!(
         "save_settings: mica_effect={}, theme={}",
         mica_effect,
@@ -61,7 +62,7 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
                     _ => tauri::Theme::Light,
                 }
             };
-            crate::apply_window_effect(&win, &mica_effect, &current_theme);
+            crate::apply_window_effect(&win, &mica_effect, &current_theme, round_corners);
         }
         None => {
             log::warn!("save_settings: main window not found, skipping window effect");

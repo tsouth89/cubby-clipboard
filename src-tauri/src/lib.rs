@@ -129,12 +129,13 @@ pub fn run_app() {
                     tauri::async_runtime::spawn(async move {
                         let current_theme = settings.theme;
                         let mica_effect = settings.mica_effect;
+                        let round_corners = settings.round_corners;
 
                         log::info!("THEME:Re-applying window effect due to theme change. Current theme setting: {:?}, system theme: {:?}, mica_effect setting: {:?}", current_theme, theme_, mica_effect);
                         // If app is set to follow system, we re-apply based on the NEW system theme
                         if current_theme == "system" {
                             if let Some(webview_win) = app_handle.get_webview_window(&label) {
-                                crate::apply_window_effect(&webview_win, &mica_effect, &theme_);
+                                crate::apply_window_effect(&webview_win, &mica_effect, &theme_, round_corners);
                             }
                         }
                     });
@@ -270,6 +271,7 @@ pub fn run_app() {
                 let settings = manager.get();
                 let mica_effect = settings.mica_effect;
                 let theme = settings.theme;
+                let round_corners = settings.round_corners;
 
                 // get current system theme
                 let current_theme = if theme == "light" {
@@ -285,7 +287,7 @@ pub fn run_app() {
 
                 log::info!("THEME:Applying window effect: {} with theme: {:?} (setting:{:?})", mica_effect, current_theme, theme);
 
-                crate::apply_window_effect(&win, &mica_effect, &current_theme);
+                crate::apply_window_effect(&win, &mica_effect, &current_theme, round_corners);
             }
 
             // Load saved hotkey from database or use default
@@ -357,7 +359,8 @@ pub fn run_app() {
             commands::get_layout_config,
             commands::test_log,
             commands::ai_process_clip,
-            commands::focus_window
+            commands::focus_window,
+            commands::refresh_window
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -380,13 +383,19 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
 
     let window = window.clone();
 
+    let effective_margin = {
+        let manager = window.state::<Arc<crate::settings_manager::SettingsManager>>();
+        let s = manager.get();
+        if s.mica_effect != "clear" && !s.round_corners { 0.0 } else { constants::WINDOW_MARGIN }
+    };
+
     std::thread::spawn(move || {
         if let Some(monitor) = get_monitor_at_cursor(&window) {
             let scale_factor = monitor.scale_factor();
             let work_area = monitor.work_area();
 
             let window_height_px = (constants::WINDOW_HEIGHT * scale_factor) as u32;
-            let window_margin_px = (constants::WINDOW_MARGIN * scale_factor) as i32;
+            let window_margin_px = (effective_margin * scale_factor) as i32;
 
             let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize {
                 width: work_area.size.width - (window_margin_px as u32 * 2),
@@ -442,6 +451,12 @@ pub fn animate_window_hide(
         return;
     }
 
+    let effective_margin = {
+        let manager = window.state::<Arc<crate::settings_manager::SettingsManager>>();
+        let s = manager.get();
+        if s.mica_effect != "clear" && !s.round_corners { 0.0 } else { constants::WINDOW_MARGIN }
+    };
+
     let window = window.clone();
 
     std::thread::spawn(move || {
@@ -450,7 +465,7 @@ pub fn animate_window_hide(
             let work_area = monitor.work_area();
 
             let window_height_px = (constants::WINDOW_HEIGHT * scale_factor) as u32;
-            let window_margin_px = (constants::WINDOW_MARGIN * scale_factor) as i32;
+            let window_margin_px = (effective_margin * scale_factor) as i32;
 
             let start_y = work_area.position.y + (work_area.size.height as i32)
                 - (window_height_px as i32)
@@ -538,12 +553,12 @@ pub fn animate_window_hide(
                 }
 
                 let _ = window.hide();
-
-                if let Some(callback) = on_done {
-                    callback();
-                }
             }
             IS_ANIMATING.store(false, Ordering::SeqCst);
+
+            if let Some(callback) = on_done {
+                callback();
+            }
         });
 }
 
@@ -579,11 +594,12 @@ pub fn get_monitor_at_cursor(window: &tauri::WebviewWindow) -> Option<tauri::Mon
     found.or_else(|| window.current_monitor().ok().flatten())
 }
 
-pub fn apply_window_effect(window: &tauri::WebviewWindow, effect: &str, theme: &tauri::Theme) {
+pub fn apply_window_effect(window: &tauri::WebviewWindow, effect: &str, theme: &tauri::Theme, round_corners: bool) {
     log::info!(
-        "THEME:apply_window_effect called: effect={}, theme={:?}",
+        "THEME:apply_window_effect called: effect={}, theme={:?}, round_corners={}",
         effect,
-        theme
+        theme,
+        round_corners
     );
     use window_vibrancy::{apply_mica, apply_tabbed, clear_mica};
 
@@ -611,6 +627,26 @@ pub fn apply_window_effect(window: &tauri::WebviewWindow, effect: &str, theme: &
                 log::error!("THEME:Failed to apply tabbed: {:?}", e);
             }
             log::info!("THEME:Applied Tabbed effect (Theme: {})", theme);
+        }
+    }
+
+    // Apply DWM rounded corners on Windows 11.
+    // "clear" always rounds; Mica/Mica-Alt follow the user setting.
+    let use_rounded = effect == "clear" || round_corners;
+    if let Ok(handle) = window.hwnd() {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Dwm::{
+            DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND,
+        };
+        let hwnd = HWND(handle.0 as _);
+        let corner_pref = if use_rounded { DWMWCP_ROUND.0 } else { DWMWCP_DONOTROUND.0 };
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &corner_pref as *const _ as *const _,
+                std::mem::size_of::<u32>() as u32,
+            );
         }
     }
 }

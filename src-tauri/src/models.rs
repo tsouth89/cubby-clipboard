@@ -16,6 +16,7 @@ pub struct AppSettings {
     pub auto_paste: bool,
     pub ignore_ghost_clips: bool,
     pub startup_with_windows: bool,
+    pub round_corners: bool,
 
     // AI
     pub ai_provider: String,
@@ -47,6 +48,7 @@ impl Default for AppSettings {
             auto_paste: false,
             ignore_ghost_clips: false,
             startup_with_windows: false,
+            round_corners: false,
 
             ai_provider: "openai".to_string(),
             ai_api_key: "".to_string(),

@@ -1024,6 +1024,20 @@ pub async fn register_global_shortcut(
 }
 
 #[tauri::command]
+pub async fn refresh_window(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("main") {
+        let win_for_show = win.clone();
+        crate::animate_window_hide(
+            &win,
+            Some(Box::new(move || {
+                crate::position_window_at_bottom(&win_for_show);
+            })),
+        );
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn focus_window(app: AppHandle, label: String) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(&label) {
         if let Err(e) = window.unminimize() {

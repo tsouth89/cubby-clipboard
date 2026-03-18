@@ -28,6 +28,7 @@ export interface Settings {
   theme: string;
   language?: string;
   mica_effect?: string;
+  round_corners?: boolean;
   auto_paste: boolean;
   ignore_ghost_clips: boolean;
   ai_provider?: string;

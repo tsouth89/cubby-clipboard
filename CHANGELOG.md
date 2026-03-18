@@ -2,6 +2,20 @@
 
 All notable changes to PastePaw will be documented in this file.
 
+## v1.3.5
+
+### Added
+- Native rounded corners support for all window effects (Mica, Mica Alt, Clear) using Windows 11 DWM — toggle on/off in Settings
+
+### Fixed
+- Fixed TypeScript build error caused by missing Vite client types (`import.meta.env`)
+
+### 新增
+- 所有窗口效果（Mica、Mica Alt、Clear）均支持原生圆角，通过 Windows 11 DWM 实现，可在设置中开启/关闭
+
+### 修复
+- 修复因缺少 Vite 客户端类型导致的 TypeScript 构建错误（`import.meta.env`）
+
 ## v1.3.4
 
 ### Added
