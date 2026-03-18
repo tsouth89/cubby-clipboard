@@ -19,6 +19,8 @@
 
 A beautiful clipboard history manager for Windows, built with Rust + Tauri + React + TypeScript.
 
+Also available for **macOS** on the [App Store](https://apps.apple.com/us/app/pastepaw/id6759132043?mt=12) ([中国区](https://apps.apple.com/cn/app/pastepaw/id6759132043?mt=12)) — visit [pastepaw.com](https://pastepaw.com/) for more.
+
 ## Features
 
 - 🔒 **Private** - IMPORTANT! All data stored locally
