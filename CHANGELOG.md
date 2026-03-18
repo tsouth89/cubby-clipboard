@@ -2,6 +2,14 @@
 
 All notable changes to PastePaw will be documented in this file.
 
+## v1.3.4
+
+### Added
+- Brand new native style look with Windows Mica and Mica-Alt window effects for a seamless, beautiful appearance that blends with your desktop
+
+### 新增
+- 全新原生风格外观，支持 Windows Mica 和 Mica-Alt 窗口效果，与桌面完美融合，带来更精美的视觉体验
+
 ## v1.3.3
 
 ### Changed

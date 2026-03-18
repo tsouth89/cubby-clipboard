@@ -24,7 +24,7 @@ Also available for **macOS** on the [App Store](https://apps.apple.com/us/app/pa
 ## Features
 
 - 🔒 **Private** - IMPORTANT! All data stored locally
-- 🎨 **Beautiful UI** - Modern dark/light theme with immediate switching
+- 🎨 **Beautiful UI** - Modern dark/light theme with native Windows Mica & Mica-Alt window effects
 - ⚡ **Fast & Lightweight** - Built with Rust for performance
 - 📋 **Clipboard History** - Automatically saves everything you copy
 - 🖥️ **Support multiple Displays** - Show on the active display
