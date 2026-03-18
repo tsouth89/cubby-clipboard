@@ -126,6 +126,8 @@ export const ClipCard = memo(
     return (
       <div
         ref={ref}
+        data-el="clip-card"
+        data-clip-id={clip.id}
         style={{
           width: COLUMN_WIDTH - LAYOUT.CARD_GAP,
           height: `calc(100% - ${LAYOUT.CARD_VERTICAL_PADDING * 2}px)`,
@@ -133,6 +135,7 @@ export const ClipCard = memo(
         className="flex-shrink-0"
       >
         <div
+          data-el="clip-card-inner"
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseEnter={() => setHovered(true)}
@@ -156,6 +159,7 @@ export const ClipCard = memo(
           {/* Framer-motion spotlight border glow */}
           {!isSelected && (
             <motion.div
+              data-el="clip-card-glow"
               className="pointer-events-none absolute -inset-px z-20 rounded-[17px] p-[2px]"
               style={{
                 background: glowBackground,
@@ -169,6 +173,7 @@ export const ClipCard = memo(
           )}
 
           <div
+            data-el="clip-card-header"
             className="relative z-10 flex flex-shrink-0 items-center gap-2 px-2 py-1.5"
             style={{ backgroundColor: `hsl(${appHue} 82% 60%)` }}
           >
@@ -183,6 +188,7 @@ export const ClipCard = memo(
               {title}
             </span>
             <button
+              data-el="clip-card-copy-btn"
               onClick={(e) => {
                 e.stopPropagation();
                 onCopy();
@@ -200,12 +206,12 @@ export const ClipCard = memo(
             </button>
           </div>
 
-          <div className="relative z-10 flex-1 overflow-hidden bg-card/90 p-2">
+          <div data-el="clip-card-content" className="relative z-10 flex-1 overflow-hidden bg-card/90 p-2">
             {renderedContent}
             <div className="pointer-events-none absolute bottom-0 left-0 right-0 h-12 bg-gradient-to-t from-card/100 to-card/30" />
           </div>
 
-          <div className="absolute bottom-0 left-0 right-0 z-10 bg-gradient-to-t from-card via-card/100 to-transparent/0 px-3 py-1.5">
+          <div data-el="clip-card-footer" className="absolute bottom-0 left-0 right-0 z-10 bg-gradient-to-t from-card via-card/100 to-transparent/0 px-3 py-1.5">
             <span className="text-[11px] font-medium text-muted-foreground/50">
               {clip.clip_type === 'image'
                 ? t('clipList.imageSize', { size: imageSizeKb })

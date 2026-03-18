@@ -636,13 +636,15 @@ function App() {
   };
 
   return (
-    <div className="relative h-screen w-full overflow-hidden">
+    <div data-el="app-root" className="relative h-screen w-full overflow-hidden">
       {/* Content Container */}
       <div
+        data-el="app-window"
         className="relative h-full w-full"
         style={{ padding: `${LAYOUT.WINDOW_PADDING}px` }}
       >
         <div
+          data-el="app-frame"
           className={`flex h-full w-full flex-col overflow-hidden font-sans text-foreground rounded-[16px] ${settings?.mica_effect === 'clear' ? 'bg-background/95' : 'bg-transparent shadow-[0_0_24px_rgba(0,0,0,0)] dark:shadow-[0_0_24px_rgba(0,0,0,0)]'}`}
         >
           {draggingClipId && (
@@ -744,7 +746,7 @@ function App() {
             theme={effectiveTheme}
           />
 
-          <main className="no-scrollbar relative flex-1 overflow-hidden">
+          <main data-el="clip-list-area" className="no-scrollbar relative flex-1 overflow-hidden">
             <ClipList
               clips={clips}
               isLoading={isLoading}

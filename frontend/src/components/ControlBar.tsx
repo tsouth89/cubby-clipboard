@@ -228,9 +228,10 @@ export function ControlBar({
   };
 
   return (
-    <div className="drag-area flex items-end gap-4 px-6 pb-0" style={style}>
+    <div data-el="control-bar" className="drag-area flex items-end gap-4 px-6 pb-0" style={style}>
       {/* Search Toggle / Input */}
       <div
+        data-el="search-toggle"
         className={clsx(
           'no-drag flex items-center transition-all duration-300',
           showSearch ? 'w-[300px]' : 'w-10'
@@ -238,9 +239,10 @@ export function ControlBar({
       >
         {/** Search Render Code Omitted here for brevity, referencing original structure **/}
         {showSearch ? (
-          <div className="animate-in fade-in slide-in-from-left-2 flex w-full items-center gap-2 rounded-full border border-border bg-input px-3 py-1.5 duration-300">
+          <div data-el="search-input-wrapper" className="animate-in fade-in slide-in-from-left-2 flex w-full items-center gap-2 rounded-full border border-border bg-input px-3 py-1.5 duration-300">
             <Search size={18} className="text-blue-400" />
             <input
+              data-el="search-input"
               autoFocus
               type="text"
               value={searchQuery}
@@ -255,6 +257,7 @@ export function ControlBar({
               }}
             />
             <button
+              data-el="search-close-btn"
               onClick={onSearchClick}
               className="rounded-full p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             >
@@ -263,6 +266,7 @@ export function ControlBar({
           </div>
         ) : (
           <button
+            data-el="search-btn"
             onClick={onSearchClick}
             className="rounded-lg p-2 text-blue-400 transition-colors hover:bg-blue-500/10"
           >
@@ -273,6 +277,7 @@ export function ControlBar({
 
       {/* Category Pills (Always visible) */}
       <div
+        data-el="folder-pills"
         className="no-scrollbar mask-gradient-right flex flex-1 items-center gap-2 overflow-x-auto p-1"
         style={{ WebkitAppRegion: 'no-drag' } as any}
       >
@@ -305,6 +310,8 @@ export function ControlBar({
           return (
             <button
               key={cat.id ?? 'all'}
+              data-el="folder-pill"
+              data-folder-id={cat.id ?? 'all'}
               onClick={() => onSelectFolder(cat.id)}
               onMouseEnter={() => handleMouseEnter(cat.id)}
               onMouseLeave={handleMouseLeave}
@@ -341,17 +348,20 @@ export function ControlBar({
 
       {/* Actions */}
       <div
+        data-el="control-bar-actions"
         className="flex flex-shrink-0 items-center gap-2"
         style={{ WebkitAppRegion: 'no-drag' } as any}
         onDoubleClick={(e) => e.stopPropagation()}
       >
         <button
+          data-el="add-folder-btn"
           onClick={onAddClick}
           className="rounded-lg p-2 text-emerald-400 transition-colors hover:bg-emerald-500/10"
         >
           <Plus size={20} />
         </button>
         <button
+          data-el="settings-btn"
           onClick={onMoreClick}
           className="rounded-lg p-2 text-amber-400 transition-colors hover:bg-amber-500/10"
         >

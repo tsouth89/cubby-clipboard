@@ -139,7 +139,7 @@ export function ClipList({
     if (!clip) return null;
 
     return (
-      <div style={style} className="flex h-full items-center justify-center">
+      <div data-el="clip-cell" data-clip-id={clip.id} style={style} className="flex h-full items-center justify-center">
         <ClipCard
           clip={clip}
           isSelected={selectedClipId === clip.id}
@@ -175,6 +175,7 @@ export function ClipList({
 
   return (
     <Grid
+      data-el="clip-list"
       className="no-scrollbar h-full w-full flex-1 overflow-x-auto overflow-y-hidden"
       defaultHeight={240}
       defaultWidth={1000}
