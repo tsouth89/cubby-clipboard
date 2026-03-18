@@ -162,7 +162,7 @@ export const ClipCard = memo(
             } as React.CSSProperties
           }
           className={clsx(
-            'relative flex h-full w-full cursor-pointer select-none flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-lg transition-all',
+            'relative flex h-full w-full cursor-pointer select-none flex-col overflow-hidden rounded-2xl border border-border bg-card/80 shadow-lg transition-all',
             isSelected ? 'z-10 scale-[1.02] transform' : 'hover:-translate-y-1',
             'group'
           )}

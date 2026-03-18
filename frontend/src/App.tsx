@@ -16,6 +16,7 @@ import { useLanguage } from './hooks/useLanguage';
 import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
 import { LAYOUT } from './constants';
+import { generateDemoClips } from './debug/demoData';
 
 const base64ToBlob = (base64: string, mimeType: string = 'image/png'): Blob => {
   const byteCharacters = atob(base64);
@@ -96,8 +97,22 @@ function App() {
       setSettings(event.payload);
     });
 
+    // Debug only: load demo clips / restore actual data when triggered from settings
+    const unlistenDemo = import.meta.env.DEV
+      ? Promise.all([
+          listen('load-demo-data', () => {
+            setClips(generateDemoClips());
+            setHasMore(false);
+          }),
+          listen('restore-actual-data', () => {
+            loadClips(selectedFolderRef.current, false, '');
+          }),
+        ])
+      : Promise.resolve([() => {}, () => {}]);
+
     return () => {
       unlisten.then((f) => f());
+      unlistenDemo.then((fs) => fs.forEach((f) => f()));
     };
   }, []);
 
@@ -622,22 +637,13 @@ function App() {
 
   return (
     <div className="relative h-screen w-full overflow-hidden">
-      {/* Blur layer */}
-      <div
-        className="absolute inset-0"
-        style={{
-          backgroundColor: 'transparent',
-          backdropFilter: 'blur(2px)',
-        }}
-      />
-
       {/* Content Container */}
       <div
         className="relative h-full w-full"
         style={{ padding: `${LAYOUT.WINDOW_PADDING}px` }}
       >
         <div
-          className={`flex h-full w-full flex-col overflow-hidden font-sans text-foreground rounded-[16px] border border-border/10 bg-background/95 ${settings?.mica_effect === 'clear' ? '' : 'shadow-[0_0_24px_rgba(0,0,0,0.2)] dark:shadow-[0_0_24px_rgba(0,0,0,0.4)]'}`}
+          className={`flex h-full w-full flex-col overflow-hidden font-sans text-foreground rounded-[16px] border border-border/10 ${settings?.mica_effect === 'clear' ? 'bg-background/95' : 'bg-transparent shadow-[0_0_24px_rgba(0,0,0,0.2)] dark:shadow-[0_0_24px_rgba(0,0,0,0.4)]'}`}
         >
           {draggingClipId && (
             <DragPreview
