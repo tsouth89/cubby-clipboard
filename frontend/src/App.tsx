@@ -643,7 +643,7 @@ function App() {
         style={{ padding: `${LAYOUT.WINDOW_PADDING}px` }}
       >
         <div
-          className={`flex h-full w-full flex-col overflow-hidden font-sans text-foreground rounded-[16px] border border-border/10 ${settings?.mica_effect === 'clear' ? 'bg-background/95' : 'bg-transparent shadow-[0_0_24px_rgba(0,0,0,0.2)] dark:shadow-[0_0_24px_rgba(0,0,0,0.4)]'}`}
+          className={`flex h-full w-full flex-col overflow-hidden font-sans text-foreground rounded-[16px] ${settings?.mica_effect === 'clear' ? 'bg-background/95' : 'bg-transparent shadow-[0_0_24px_rgba(0,0,0,0)] dark:shadow-[0_0_24px_rgba(0,0,0,0)]'}`}
         >
           {draggingClipId && (
             <DragPreview
