@@ -969,7 +969,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
             PastePaw {appVersion || '...'}
           </button>
           <div className="flex gap-2 text-xs text-muted-foreground">
-            <span>© 2025</span>
+            <a href="https://pastepaw.com" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">© 2026 PastePaw</a>
             <span>•</span>
             <button onClick={handleCheckUpdate} className="underline hover:text-foreground">
               {t('settings.checkForUpdates')}
