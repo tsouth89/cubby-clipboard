@@ -1008,7 +1008,11 @@ pub async fn register_global_shortcut(
         .global_shortcut()
         .on_shortcut(shortcut, move |_app, _shortcut, event| {
             if event.state() == ShortcutState::Pressed {
-                crate::position_window_at_bottom(&win_clone);
+                if win_clone.is_visible().unwrap_or(false) && win_clone.is_focused().unwrap_or(false) {
+                    crate::animate_window_hide(&win_clone, None);
+                } else {
+                    crate::position_window_at_bottom(&win_clone);
+                }
             }
         })
     {
