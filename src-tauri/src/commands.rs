@@ -506,7 +506,7 @@ pub async fn paste_clip(
         .map_err(|e| e.to_string())?;
 
     match clip {
-        Some(mut clip) => {
+        Some(clip) => {
             // Synchronize clipboard access across the app
             let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
 

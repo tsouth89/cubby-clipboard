@@ -634,14 +634,10 @@ function App() {
       {/* Content Container */}
       <div
         className="relative h-full w-full"
-        style={{ padding: mac ? '0px' : `${LAYOUT.WINDOW_PADDING}px` }}
+        style={{ padding: `${LAYOUT.WINDOW_PADDING}px` }}
       >
         <div
-          className={`flex h-full w-full flex-col overflow-hidden font-sans text-foreground ${
-            mac
-              ? 'rounded-[16px] bg-background'
-              : 'rounded-[16px] border border-border/10 bg-background/95 shadow-[0_0_24px_rgba(0,0,0,0.2)] dark:shadow-[0_0_24px_rgba(0,0,0,0.4)]'
-          }`}
+          className="flex h-full w-full flex-col overflow-hidden font-sans text-foreground rounded-[16px] border border-border/10 bg-background/95 shadow-[0_0_24px_rgba(0,0,0,0.2)] dark:shadow-[0_0_24px_rgba(0,0,0,0.4)]"
         >
           {draggingClipId && (
             <DragPreview

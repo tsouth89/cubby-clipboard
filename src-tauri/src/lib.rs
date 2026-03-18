@@ -1,3 +1,4 @@
+#![allow(non_snake_case)] // crate name PastePaw is intentional
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;

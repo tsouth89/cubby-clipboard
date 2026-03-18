@@ -127,15 +127,6 @@ struct ClipboardImageRead {
     source_type: &'static str,
 }
 
-fn image_dimensions_from_bytes(bytes: &[u8]) -> Result<(u32, u32), String> {
-    use image::io::Reader as ImageReader;
-    use std::io::Cursor;
-
-    let reader = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|e| e.to_string())?;
-    reader.into_dimensions().map_err(|e| e.to_string())
-}
 
 fn read_clipboard_image_with_clipboard_rs(
     source_type: &'static str,
