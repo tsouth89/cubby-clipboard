@@ -2,6 +2,16 @@
 
 All notable changes to PastePaw will be documented in this file.
 
+## v1.3.6
+
+### Added
+- Support rounded corners for Mica window effect
+- Every release is now automatically scanned with VirusTotal (70+ antivirus engines) — scan results are linked in the release notes
+
+### 新增
+- Mica 窗口效果支持圆角
+- 每次发布版本现在会自动通过 VirusTotal（70+ 款杀毒引擎）进行安全扫描，扫描结果链接附在 Release 说明中
+
 ## v1.3.5
 
 ### Added

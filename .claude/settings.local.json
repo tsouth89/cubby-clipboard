@@ -34,7 +34,8 @@
       "Bash(pnpm add:*)",
       "Bash(git checkout:*)",
       "Bash(git tag:*)",
-      "Bash(gh run:*)"
+      "Bash(gh run:*)",
+      "Bash(gh workflow:*)"
     ]
   }
 }
