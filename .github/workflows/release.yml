@@ -173,7 +173,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish-winget:
-    needs: release
+    needs: virustotal-scan
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
