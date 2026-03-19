@@ -60,6 +60,8 @@ winget install XueshiQiao.PastePaw
 直接从 Github 安装最新版
 [https://github.com/XueshiQiao/PastePaw/releases](https://github.com/XueshiQiao/PastePaw/releases)
 
+> 🔍 **安全说明：** 每个版本发布时均会自动通过 [VirusTotal](https://www.virustotal.com/) 进行扫描（覆盖 70+ 款杀毒引擎）。扫描结果链接附在每个 Release 说明的底部。
+
 
 ## 键盘快捷键
 

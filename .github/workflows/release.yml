@@ -118,6 +118,58 @@ jobs:
           repository: XueshiQiao/XueshiQiao.github.io
           event-type: app_released
 
+  virustotal-scan:
+    needs: release
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download installers
+        run: |
+          gh release download ${{ github.ref_name }} --pattern "*x64-setup.exe" --dir ./installers
+          gh release download ${{ github.ref_name }} --pattern "*arm64-setup.exe" --dir ./installers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload to VirusTotal and get URLs
+        id: vt
+        run: |
+          X64_FILE=$(ls ./installers/*x64-setup.exe)
+          ARM64_FILE=$(ls ./installers/*arm64-setup.exe)
+
+          X64_SHA=$(sha256sum "$X64_FILE" | cut -d' ' -f1)
+          ARM64_SHA=$(sha256sum "$ARM64_FILE" | cut -d' ' -f1)
+
+          curl -s --request POST \
+            --url https://www.virustotal.com/api/v3/files \
+            --header "x-apikey: ${{ secrets.VT_API_KEY }}" \
+            --form "file=@$X64_FILE"
+
+          sleep 16
+
+          curl -s --request POST \
+            --url https://www.virustotal.com/api/v3/files \
+            --header "x-apikey: ${{ secrets.VT_API_KEY }}" \
+            --form "file=@$ARM64_FILE"
+
+          echo "X64_URL=https://www.virustotal.com/gui/file/$X64_SHA" >> $GITHUB_OUTPUT
+          echo "ARM64_URL=https://www.virustotal.com/gui/file/$ARM64_SHA" >> $GITHUB_OUTPUT
+
+      - name: Append VirusTotal results to release notes
+        run: |
+          gh release view ${{ github.ref_name }} --json body -q .body > release_body.txt
+          cat >> release_body.txt << EOF
+
+          ---
+          🔍 **VirusTotal Scan Results** (70+ antivirus engines):
+          - [x64 installer](${{ steps.vt.outputs.X64_URL }})
+          - [arm64 installer](${{ steps.vt.outputs.ARM64_URL }})
+          EOF
+          gh release edit ${{ github.ref_name }} --notes-file release_body.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   publish-winget:
     needs: release
     if: github.event_name != 'workflow_dispatch'
