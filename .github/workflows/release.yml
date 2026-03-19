@@ -125,6 +125,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download installers
         run: |
           gh release download ${{ github.ref_name }} --pattern "*x64-setup.exe" --dir ./installers
