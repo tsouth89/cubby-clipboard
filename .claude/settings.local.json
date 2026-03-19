@@ -33,7 +33,8 @@
       "Bash(pnpm run build)",
       "Bash(pnpm add:*)",
       "Bash(git checkout:*)",
-      "Bash(git tag:*)"
+      "Bash(git tag:*)",
+      "Bash(gh run:*)"
     ]
   }
 }

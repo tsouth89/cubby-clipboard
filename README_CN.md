@@ -23,7 +23,7 @@
 
 ## 功能特性
 
-- 🔒 **隐私安全** - 这一点至关重要！所有数据仅存储在本地，绝不上传。
+- 🔒 **隐私安全** - 这一点至关重要！所有数据仅存储在本地
 - 🎨 **精美界面** - 现代化的深色/浅色主题，支持即时切换，原生 Windows Mica 和 Mica-Alt 窗口效果，与桌面完美融合。
 - ⚡ **轻量极速** - 基于 Rust 构建，性能强劲，资源占用极低。
 - ⌨️ **自定义快捷键** - 设置您习惯的快捷键来随时呼出历史记录。
@@ -43,6 +43,22 @@
 ![docs/paste_paw_dark.png](docs/screenshot_win_light.png)
 ### Dark theme
 ![docs/paste_paw_dark.png](docs/screenshot_win_dark.png)
+
+## 安装
+
+两个版本完全一致，winget 版本因需要提交到 winget 审核，需要半天到一天的时间
+提交到 winget 仓库的版本就是 GitHub Release 中构建的版本，所以完全一致
+
+### 1. 使用 Winget 安装
+打开命令行或者 Powershell
+```bash
+winget install XueshiQiao.PastePaw
+```
+
+### 2. 从 GitHub Releases 下载
+
+直接从 Github 安装最新版
+[https://github.com/XueshiQiao/PastePaw/releases](https://github.com/XueshiQiao/PastePaw/releases)
 
 
 ## 键盘快捷键
@@ -238,33 +254,6 @@ sequenceDiagram
     Note over BE: Windows 下后端不重复写入图片字节
     BE->>OS: 隐藏窗口
     BE->>OS: 发送 Shift+Insert（开启自动粘贴时）
-    deactivate BE
-
-    OS->>User: 显示粘贴后的图片
-```
-
-### 粘贴图片的时序图（macOS）
-
-```mermaid
-sequenceDiagram
-    actor User
-    participant FE as 前端 (React/App.tsx)
-    participant BE as 后端 (Rust/commands.rs)
-    participant PB as NSPasteboard
-    participant OS as macOS / 目标应用
-
-    User->>FE: 双击图片卡片
-    activate FE
-    FE->>BE: invoke('paste_clip', { id })
-    deactivate FE
-
-    activate BE
-    BE->>BE: 从文件系统读取完整图片 (clip_images.file_path)
-    BE->>PB: setData(public.png)
-    BE->>PB: setData(public.file-url)
-    BE->>BE: 更新时间戳 / LRU
-    BE->>OS: 隐藏窗口
-    BE->>OS: 发送 Cmd+V（开启自动粘贴时）
     deactivate BE
 
     OS->>User: 显示粘贴后的图片

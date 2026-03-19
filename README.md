@@ -47,6 +47,20 @@ Also available for **macOS** on the [App Store](https://apps.apple.com/us/app/pa
 ![docs/paste_paw_dark.png](docs/screenshot_win_dark.png)
 
 
+## Installation Guide
+
+### 1. Install via Winget
+
+```bash
+winget install XueshiQiao.PastePaw
+```
+
+### 2. Download from GitHub Releases (Windows)
+
+Download the latest installer directly from:
+[https://github.com/XueshiQiao/PastePaw/releases](https://github.com/XueshiQiao/PastePaw/releases)
+
+
 ## Keyboard Shortcuts
 
 ### Global
@@ -61,18 +75,6 @@ Also available for **macOS** on the [App Store](https://apps.apple.com/us/app/pa
 - `P` - Pin/Unpin selected item
 - `Arrow Up/Down` - Navigate items
 
-### Installation Guide
-
-#### 1. Install via Homebrew (macOS)
-
-```bash
-brew install xueshiqiao/tap/hypercapslock
-```
-
-#### 2. Download from GitHub Releases (macOS and Windows)
-
-Download the latest installer directly from:
-[https://github.com/XueshiQiao/PastePaw/releases](https://github.com/XueshiQiao/PastePaw/releases)
 
 
 ## Application Exceptions (Ignored Apps)
@@ -254,33 +256,6 @@ sequenceDiagram
     Note over BE: On Windows, backend does not rewrite image bytes
     BE->>OS: Hide window
     BE->>OS: Send Shift+Insert (when auto-paste is enabled)
-    deactivate BE
-
-    OS->>User: Pasted image appears
-```
-
-### Sequence Diagram for Image Pasting (macOS)
-
-```mermaid
-sequenceDiagram
-    actor User
-    participant FE as Frontend (React/App.tsx)
-    participant BE as Backend (Rust/commands.rs)
-    participant PB as NSPasteboard
-    participant OS as macOS / Target App
-
-    User->>FE: Double click image clip
-    activate FE
-    FE->>BE: invoke('paste_clip', { id })
-    deactivate FE
-
-    activate BE
-    BE->>BE: Load full image bytes from file (clip_images.file_path)
-    BE->>PB: setData(public.png)
-    BE->>PB: setData(public.file-url)
-    BE->>BE: Update clip timestamp/LRU
-    BE->>OS: Hide window
-    BE->>OS: Send Cmd+V (when auto-paste is enabled)
     deactivate BE
 
     OS->>User: Pasted image appears
