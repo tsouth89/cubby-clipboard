@@ -184,6 +184,8 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Verify installer hashes are stable
         run: |
           gh release download ${{ github.ref_name }} --pattern "*x64-setup.exe" --dir ./verify

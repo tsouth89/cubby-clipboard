@@ -4,14 +4,14 @@ All notable changes to PastePaw will be documented in this file.
 
 ## v1.3.7
 
-### Fixed
-- Fixed missing and incorrect translations in German, French, and Japanese (proper umlauts/accents, 4 missing settings keys)
+### Added
+- German, French, and Japanese language support
 
 ### Improved
 - Winget release pipeline: hash verification step added before publishing to winget-pkgs to prevent stale-hash mismatches; release tag now explicitly pinned
 
-### 修复
-- 修复德语、法语、日语翻译中缺失及错误的内容（补全变音符号/重音符号，补充 4 个缺失的设置项翻译）
+### 新增
+- 新增德语、法语、日语语言支持
 
 ### 优化
 - Winget 发布流程：在发布至 winget-pkgs 前增加哈希值校验步骤，防止哈希不匹配问题；发布时明确指定 release tag
@@ -19,11 +19,11 @@ All notable changes to PastePaw will be documented in this file.
 ## v1.3.6
 
 ### Added
-- Support rounded corners for Mica window effect
+- Support floating window above the taskbar (toggle in Settings)
 - Every release is now automatically scanned with VirusTotal (70+ antivirus engines) — scan results are linked in the release notes
 
 ### 新增
-- Mica 窗口效果支持圆角
+- 窗口支持浮动在任务栏上层（可在设置中开启/关闭）
 - 每次发布版本现在会自动通过 VirusTotal（70+ 款杀毒引擎）进行安全扫描，扫描结果链接附在 Release 说明中
 
 ## v1.3.5
