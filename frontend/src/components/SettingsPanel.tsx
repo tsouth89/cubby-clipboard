@@ -493,7 +493,10 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                           value={settings.language || 'en'}
                           onChange={handleLanguageChange}
                           options={[
+                            { value: 'de', label: 'Deutsch' },
                             { value: 'en', label: 'English' },
+                            { value: 'fr', label: 'Francais' },
+                            { value: 'ja', label: '日本語' },
                             { value: 'zh', label: '中文' },
                           ]}
                         />
