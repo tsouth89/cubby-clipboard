@@ -2,6 +2,20 @@
 
 All notable changes to PastePaw will be documented in this file.
 
+## v1.3.7
+
+### Fixed
+- Fixed missing and incorrect translations in German, French, and Japanese (proper umlauts/accents, 4 missing settings keys)
+
+### Improved
+- Winget release pipeline: hash verification step added before publishing to winget-pkgs to prevent stale-hash mismatches; release tag now explicitly pinned
+
+### 修复
+- 修复德语、法语、日语翻译中缺失及错误的内容（补全变音符号/重音符号，补充 4 个缺失的设置项翻译）
+
+### 优化
+- Winget 发布流程：在发布至 winget-pkgs 前增加哈希值校验步骤，防止哈希不匹配问题；发布时明确指定 release tag
+
 ## v1.3.6
 
 ### Added
