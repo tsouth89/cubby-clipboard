@@ -142,4 +142,25 @@ Update version in **both**:
 1. `src-tauri/Cargo.toml` → `version = "x.y.z"`
 2. `src-tauri/tauri.conf.json` → `"version": "x.y.z"`
 
+Before writing the CHANGELOG entry, **always** review all commits since the previous tag:
+```bash
+git log --oneline v{prev_version}..HEAD
+```
+Summarize from the full list — never from just the most recent commit. The last commit often has a `fix:` prefix that misrepresents the primary feature.
+
 Then add a `## vx.y.z` section to `CHANGELOG.md`, commit, tag `vx.y.z`, and push the tag to trigger the release workflow.
+
+## Working Conventions
+
+### Language
+Always respond in English, regardless of the language the user writes in. All content in this file must also be in English.
+
+### Honesty
+Always be truthful and face problems directly. Never fabricate, obscure, or work around a real issue to make things appear to work.
+- If a check fails, investigate and fix the root cause — do not delete the check or skip it.
+- If something is uncertain or unknown, say so explicitly rather than guessing with false confidence.
+- If a fix is incomplete or only partially verified, state that clearly.
+- Never claim something is working unless it has been confirmed to work.
+
+### Changelog
+CHANGELOG.md includes both English and Chinese entries for every version. Always add both when writing a new version section.
