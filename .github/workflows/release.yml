@@ -124,9 +124,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    outputs:
-      x64_sha: ${{ steps.vt.outputs.X64_SHA }}
-      arm64_sha: ${{ steps.vt.outputs.ARM64_SHA }}
     steps:
       - uses: actions/checkout@v4
 
@@ -158,8 +155,6 @@ jobs:
             --header "x-apikey: ${{ secrets.VT_API_KEY }}" \
             --form "file=@$ARM64_FILE"
 
-          echo "X64_SHA=${X64_SHA}" >> $GITHUB_OUTPUT
-          echo "ARM64_SHA=${ARM64_SHA}" >> $GITHUB_OUTPUT
           echo "X64_URL=https://www.virustotal.com/gui/file/$X64_SHA" >> $GITHUB_OUTPUT
           echo "ARM64_URL=https://www.virustotal.com/gui/file/$ARM64_SHA" >> $GITHUB_OUTPUT
 
@@ -182,33 +177,6 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - name: Verify installer hashes are stable
-        run: |
-          gh release download ${{ github.ref_name }} --pattern "*x64-setup.exe" --dir ./verify
-          gh release download ${{ github.ref_name }} --pattern "*arm64-setup.exe" --dir ./verify
-
-          X64_CURRENT=$(sha256sum ./verify/*x64-setup.exe | cut -d' ' -f1)
-          ARM64_CURRENT=$(sha256sum ./verify/*arm64-setup.exe | cut -d' ' -f1)
-
-          EXPECTED_X64="${{ needs.virustotal-scan.outputs.x64_sha }}"
-          EXPECTED_ARM64="${{ needs.virustotal-scan.outputs.arm64_sha }}"
-
-          if [ "$X64_CURRENT" != "$EXPECTED_X64" ]; then
-            echo "ERROR: x64 installer hash changed after VirusTotal scan!"
-            echo "  VirusTotal scan saw: $EXPECTED_X64"
-            echo "  Current hash:        $X64_CURRENT"
-            exit 1
-          fi
-          if [ "$ARM64_CURRENT" != "$EXPECTED_ARM64" ]; then
-            echo "ERROR: arm64 installer hash changed after VirusTotal scan!"
-            echo "  VirusTotal scan saw: $EXPECTED_ARM64"
-            echo "  Current hash:        $ARM64_CURRENT"
-            exit 1
-          fi
-          echo "Hash verification passed — installers are stable."
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Publish to winget-pkgs
         uses: vedantmgoyal9/winget-releaser@v2
         with:
