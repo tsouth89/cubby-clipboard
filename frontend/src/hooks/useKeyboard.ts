@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 
 interface KeyboardOptions {
   onClose?: () => void;
@@ -8,56 +8,86 @@ interface KeyboardOptions {
   onNavigateUp?: () => void;
   onNavigateDown?: () => void;
   onPaste?: () => void;
+  onPastePlainText?: () => void;
   onCopy?: () => void;
 }
 
 export function useKeyboard(options: KeyboardOptions) {
+  const optionsRef = useRef(options);
+
+  useEffect(() => {
+    optionsRef.current = options;
+  }, [options]);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
+
+      const current = optionsRef.current;
       const target = e.target as HTMLElement | null;
       const isEditing =
         target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
+      const isSearchInput = target?.matches('[data-el="search-input"]') ?? false;
+      const canNavigateHistory = !isEditing || isSearchInput;
+      const isRepeatableAction = e.key === 'ArrowUp' || e.key === 'ArrowDown';
 
-      if (e.key === 'Escape' && options.onClose) {
+      if (e.repeat && !isRepeatableAction) return;
+
+      if (e.key === 'Escape' && canNavigateHistory && current.onClose) {
         e.preventDefault();
-        options.onClose();
+        current.onClose();
+        return;
       }
 
-      if ((e.metaKey || e.ctrlKey) && e.key === 'f' && options.onSearch) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'f' && current.onSearch) {
         e.preventDefault();
-        options.onSearch();
+        current.onSearch();
+        return;
       }
 
-      if (!isEditing && e.key === 'Delete' && options.onDelete) {
+      if (!isEditing && e.key === 'Delete' && current.onDelete) {
         e.preventDefault();
-        options.onDelete();
+        current.onDelete();
+        return;
       }
 
-      if (!isEditing && e.key === 'p' && !e.metaKey && !e.ctrlKey && options.onPin) {
+      if (!isEditing && e.key === 'p' && !e.metaKey && !e.ctrlKey && current.onPin) {
         e.preventDefault();
-        options.onPin();
+        current.onPin();
+        return;
       }
 
-      if (!isEditing && e.key === 'ArrowUp' && options.onNavigateUp) {
+      if (canNavigateHistory && e.key === 'ArrowUp' && current.onNavigateUp) {
         e.preventDefault();
-        options.onNavigateUp();
+        current.onNavigateUp();
+        return;
       }
 
-      if (!isEditing && e.key === 'ArrowDown' && options.onNavigateDown) {
+      if (canNavigateHistory && e.key === 'ArrowDown' && current.onNavigateDown) {
         e.preventDefault();
-        options.onNavigateDown();
+        current.onNavigateDown();
+        return;
       }
 
-      if (!isEditing && e.key === 'Enter' && (e.ctrlKey || e.metaKey) && options.onCopy) {
+      if (canNavigateHistory && e.key === 'Enter' && e.shiftKey && current.onPastePlainText) {
         e.preventDefault();
-        options.onCopy();
-      } else if (!isEditing && e.key === 'Enter' && options.onPaste) {
+        current.onPastePlainText();
+        return;
+      }
+
+      if (canNavigateHistory && e.key === 'Enter' && (e.ctrlKey || e.metaKey) && current.onCopy) {
         e.preventDefault();
-        options.onPaste();
+        current.onCopy();
+        return;
+      }
+
+      if (canNavigateHistory && e.key === 'Enter' && current.onPaste) {
+        e.preventDefault();
+        current.onPaste();
       }
     };
 
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [options]);
+  }, []);
 }

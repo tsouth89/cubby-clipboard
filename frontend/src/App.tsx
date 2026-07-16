@@ -326,10 +326,17 @@ function App() {
 
   const handleDelete = async (clipId: string | null) => {
     if (!clipId) return;
+    const deletedIndex = visibleClips.findIndex((clip) => clip.id === clipId);
+    const remainingVisibleClips = visibleClips.filter((clip) => clip.id !== clipId);
+    const nextSelection =
+      deletedIndex < 0
+        ? (remainingVisibleClips[0]?.id ?? null)
+        : (remainingVisibleClips[Math.min(deletedIndex, remainingVisibleClips.length - 1)]?.id ??
+          null);
     try {
       await invoke('delete_clip', { id: clipId, hardDelete: false });
-      setClips(clips.filter((c) => c.id !== clipId));
-      setSelectedClipId(null);
+      setClips((currentClips) => currentClips.filter((clip) => clip.id !== clipId));
+      setSelectedClipId(nextSelection);
       // Refresh counts
       loadFolders();
       refreshTotalCount();
@@ -462,6 +469,13 @@ function App() {
     }
   }, [selectedClipId, handlePaste]);
 
+  const handlePasteSelectedAsPlainText = useCallback(() => {
+    if (!selectedClipId) return;
+    const selectedClip = visibleClips.find((clip) => clip.id === selectedClipId);
+    if (!selectedClip || selectedClip.clip_type === 'image') return;
+    handlePaste(selectedClipId, true);
+  }, [selectedClipId, visibleClips, handlePaste]);
+
   const handleCopySelected = useCallback(() => {
     if (selectedClipId) {
       handleCopy(selectedClipId);
@@ -469,12 +483,20 @@ function App() {
   }, [selectedClipId, handleCopy]);
 
   useKeyboard({
-    onClose: () => appWindow.hide(),
+    onClose: () => {
+      if (searchQuery) {
+        setSearchQuery('');
+        document.querySelector<HTMLInputElement>('[data-el="search-input"]')?.focus();
+        return;
+      }
+      appWindow.hide();
+    },
     onSearch: () => document.querySelector<HTMLInputElement>('[data-el="search-input"]')?.focus(),
     onDelete: () => handleDelete(selectedClipId),
     onNavigateUp: handleNavigateUp,
     onNavigateDown: handleNavigateDown,
     onPaste: handlePasteSelected,
+    onPastePlainText: handlePasteSelectedAsPlainText,
     onCopy: handleCopySelected,
   });
 
@@ -737,6 +759,13 @@ function App() {
                   ? t('pasteContext.copyAction')
                   : t('contextMenu.paste')}
               </span>
+              {selectedClipId &&
+                visibleClips.find((clip) => clip.id === selectedClipId)?.clip_type !== 'image' && (
+                  <span>
+                    <kbd>Shift</kbd>
+                    <kbd>Enter</kbd> Plain
+                  </span>
+                )}
               <span>
                 <kbd>Esc</kbd> Close
               </span>
