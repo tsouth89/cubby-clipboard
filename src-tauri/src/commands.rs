@@ -477,7 +477,7 @@ async fn restore_clip(
                         Some(Box::new(move || {
                             crate::restore_previous_foreground_window();
                             std::thread::sleep(std::time::Duration::from_millis(100));
-                            crate::clipboard::send_paste_input();
+                            crate::paste_engine::send_paste_input();
                         })),
                     );
                 } else {
