@@ -8,6 +8,7 @@ Cubby is in its foundation stage and is not ready for general use.
 
 - Feel like part of Windows 11, not a cross-platform utility.
 - Make the keyboard-first copy/paste loop instant and predictable.
+- Capture clipboard changes reliably across local apps, RDP, and third-party remote-control sessions.
 - Keep clipboard data local and private.
 - Preserve copied content losslessly.
 - Avoid required accounts, cloud services, telemetry, and AI features.
@@ -42,6 +43,8 @@ pnpm tauri dev
 ```
 
 The current upstream baseline has no meaningful automated tests. Adding a Windows clipboard compatibility harness is part of the planned foundation work.
+
+Remote-session capture is a first-class reliability target. Cubby must be tested with Windows Remote Desktop and representative third-party remote-control tools, including rapid sequential copies, delayed-rendered content, reconnects, and text, image, HTML, RTF, and file-list formats.
 
 ## Repository layout
 
