@@ -2,7 +2,7 @@ import { ClipboardItem } from '../types';
 import { clsx } from 'clsx';
 import { memo, useMemo } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { Copy, File, Image as ImageIcon, MoreHorizontal } from 'lucide-react';
+import { Copy, File, Image as ImageIcon, MoreHorizontal, Pin } from 'lucide-react';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { PREVIEW_CHAR_LIMIT } from '../constants';
 
@@ -13,6 +13,7 @@ interface ClipCardProps {
   onSelect: () => void;
   onPaste: () => void;
   onCopy: () => void;
+  onTogglePin: () => void;
   onContextMenu?: (e: React.MouseEvent) => void;
 }
 
@@ -69,6 +70,7 @@ export const ClipCard = memo(function ClipCard({
   onSelect,
   onPaste,
   onCopy,
+  onTogglePin,
   onContextMenu,
 }: ClipCardProps) {
   const imageSrc = useMemo(() => {
@@ -204,6 +206,13 @@ export const ClipCard = memo(function ClipCard({
               {preview.slice(0, PREVIEW_CHAR_LIMIT)}
             </p>
             <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+              {clip.is_pinned && (
+                <>
+                  <Pin size={10} className="shrink-0 fill-current text-primary" />
+                  <span className="shrink-0 text-foreground/65">Pinned</span>
+                  <span className="shrink-0 text-muted-foreground/35">•</span>
+                </>
+              )}
               <span className="truncate">{label}</span>
               <span className="shrink-0 text-muted-foreground/35">•</span>
               <span className="shrink-0 text-foreground/50">{kind}</span>
@@ -224,6 +233,22 @@ export const ClipCard = memo(function ClipCard({
           isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
         )}
       >
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onTogglePin();
+          }}
+          className={clsx(
+            'rounded-md p-1.5 transition-colors hover:bg-white/10 hover:text-foreground',
+            clip.is_pinned ? 'text-primary' : 'text-muted-foreground'
+          )}
+          title={clip.is_pinned ? 'Unpin' : 'Pin'}
+          aria-label={clip.is_pinned ? 'Unpin clip' : 'Pin clip'}
+          aria-pressed={clip.is_pinned}
+        >
+          <Pin size={13} className={clsx(clip.is_pinned && 'fill-current')} />
+        </button>
         <button
           type="button"
           onClick={(event) => {

@@ -4,6 +4,7 @@ export interface ClipboardItem {
   content: string;
   preview: string;
   folder_id: string | null;
+  is_pinned: boolean;
   created_at: string;
   source_app: string | null;
   source_icon: string | null;

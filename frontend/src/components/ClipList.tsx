@@ -13,6 +13,7 @@ interface ClipListProps {
   onSelectClip: (clipId: string) => void;
   onPaste: (clipId: string) => void;
   onCopy: (clipId: string) => void;
+  onTogglePin: (clipId: string) => void;
   onLoadMore: () => void;
   onCardContextMenu?: (e: React.MouseEvent, clipId: string) => void;
 }
@@ -27,6 +28,7 @@ export function ClipList({
   onSelectClip,
   onPaste,
   onCopy,
+  onTogglePin,
   onLoadMore,
   onCardContextMenu,
 }: ClipListProps) {
@@ -86,6 +88,7 @@ export function ClipList({
             onSelect={() => onSelectClip(clip.id)}
             onPaste={() => onPaste(clip.id)}
             onCopy={() => onCopy(clip.id)}
+            onTogglePin={() => onTogglePin(clip.id)}
             onContextMenu={(event) => onCardContextMenu?.(event, clip.id)}
           />
         ))}

@@ -394,6 +394,29 @@ function App() {
     }
   };
 
+  const handleTogglePin = useCallback(
+    async (clipId: string | null) => {
+      if (!clipId) return;
+      try {
+        const isPinned = await invoke<boolean>('toggle_clip_pin', { id: clipId });
+        setClips((currentClips) =>
+          currentClips
+            .map((clip) => (clip.id === clipId ? { ...clip, is_pinned: isPinned } : clip))
+            .sort(
+              (left, right) =>
+                Number(right.is_pinned) - Number(left.is_pinned) ||
+                new Date(right.created_at).getTime() - new Date(left.created_at).getTime()
+            )
+        );
+        toast.success(isPinned ? 'Clip pinned' : 'Clip unpinned');
+      } catch (error) {
+        console.error('Failed to update pin state:', error);
+        toast.error('Failed to update pin state');
+      }
+    },
+    [setClips]
+  );
+
   // Keyboard navigation handlers
   const visibleClips = useMemo(
     () =>
@@ -493,6 +516,7 @@ function App() {
     },
     onSearch: () => document.querySelector<HTMLInputElement>('[data-el="search-input"]')?.focus(),
     onDelete: () => handleDelete(selectedClipId),
+    onPin: () => handleTogglePin(selectedClipId),
     onNavigateUp: handleNavigateUp,
     onNavigateDown: handleNavigateDown,
     onPaste: handlePasteSelected,
@@ -627,6 +651,10 @@ function App() {
                       const clip = clips.find((item) => item.id === contextMenu.itemId);
                       return [
                         {
+                          label: clip?.is_pinned ? 'Unpin' : 'Pin',
+                          onClick: () => handleTogglePin(contextMenu.itemId),
+                        },
+                        {
                           label: t('contextMenu.paste'),
                           onClick: () => handlePaste(contextMenu.itemId),
                         },
@@ -719,6 +747,7 @@ function App() {
               onSelectClip={setSelectedClipId}
               onPaste={handlePaste}
               onCopy={handleCopy}
+              onTogglePin={handleTogglePin}
               onLoadMore={loadMore}
               onCardContextMenu={(e, clipId) => handleContextMenu(e, 'card', clipId)}
             />

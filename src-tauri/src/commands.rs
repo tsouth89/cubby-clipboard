@@ -22,6 +22,7 @@ fn clip_to_list_item(clip: &Clip, image_path: Option<&str>) -> ClipboardItem {
         content: content_str,
         preview: clip.text_preview.clone(),
         folder_id: clip.folder_id.map(|id| id.to_string()),
+        is_pinned: clip.is_pinned,
         created_at: clip.created_at.to_rfc3339(),
         source_app: clip.source_app.clone(),
         source_icon: clip.source_icon.clone(),
@@ -42,6 +43,7 @@ fn clip_to_detail_item(clip: &Clip, full_image_content: Option<&[u8]>) -> Clipbo
         content: content_str,
         preview: clip.text_preview.clone(),
         folder_id: clip.folder_id.map(|id| id.to_string()),
+        is_pinned: clip.is_pinned,
         created_at: clip.created_at.to_rfc3339(),
         source_app: clip.source_app.clone(),
         source_icon: clip.source_icon.clone(),
@@ -254,7 +256,7 @@ pub async fn get_clips(
                 sqlx::query_as(
                     r#"
                     SELECT * FROM clips WHERE is_deleted = 0 AND folder_id = ?
-                    ORDER BY created_at DESC LIMIT ? OFFSET ?
+                    ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?
                 "#,
                 )
                 .bind(numeric_id)
@@ -273,7 +275,7 @@ pub async fn get_clips(
             sqlx::query_as(
                 r#"
                 SELECT * FROM clips WHERE is_deleted = 0
-                ORDER BY created_at DESC LIMIT ? OFFSET ?
+                ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?
             "#,
             )
             .bind(limit)
@@ -556,6 +558,33 @@ pub async fn delete_clip(
     Ok(())
 }
 
+async fn toggle_clip_pin_in_pool(pool: &SqlitePool, id: &str) -> Result<bool, String> {
+    let pinned: Option<i64> = sqlx::query_scalar(
+        r#"
+        UPDATE clips
+        SET is_pinned = CASE is_pinned WHEN 0 THEN 1 ELSE 0 END
+        WHERE uuid = ? AND is_deleted = 0
+        RETURNING is_pinned
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    pinned
+        .map(|value| value != 0)
+        .ok_or_else(|| "Clipboard item not found".to_string())
+}
+
+#[tauri::command]
+pub async fn toggle_clip_pin(
+    id: String,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<bool, String> {
+    toggle_clip_pin_in_pool(&db.pool, &id).await
+}
+
 #[tauri::command]
 pub async fn move_to_folder(
     clip_id: String,
@@ -695,7 +724,7 @@ pub async fn search_clips(
             if let Some(numeric_id) = folder_id_num {
                 sqlx::query_as(r#"
                     SELECT * FROM clips WHERE is_deleted = 0 AND folder_id = ? AND (text_preview LIKE ? OR content LIKE ?)
-                    ORDER BY created_at DESC LIMIT ? OFFSET ?
+                    ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?
                 "#)
                 .bind(numeric_id)
                 .bind(&search_pattern)
@@ -710,7 +739,7 @@ pub async fn search_clips(
         None => sqlx::query_as(
             r#"
                 SELECT * FROM clips WHERE is_deleted = 0 AND (text_preview LIKE ? OR content LIKE ?)
-                ORDER BY created_at DESC LIMIT ? OFFSET ?
+                ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?
             "#,
         )
         .bind(&search_pattern)
@@ -1008,5 +1037,48 @@ pub fn get_system_accent_color() -> Result<serde_json::Value, String> {
     #[cfg(not(target_os = "windows"))]
     {
         Err("System accent color is only available on Windows".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::toggle_clip_pin_in_pool;
+    use crate::database::Database;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_database() -> Database {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory database should open");
+        let database = Database { pool };
+        database.migrate().await.expect("migration should succeed");
+        database
+    }
+
+    #[tokio::test]
+    async fn pin_toggle_round_trips_persisted_state() {
+        let database = test_database().await;
+        sqlx::query(
+            r#"
+            INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash)
+            VALUES ('clip-1', 'text', X'68656C6C6F', 'hello', 'hash-1')
+            "#,
+        )
+        .execute(&database.pool)
+        .await
+        .expect("clip should be inserted");
+
+        assert!(toggle_clip_pin_in_pool(&database.pool, "clip-1")
+            .await
+            .expect("first toggle should pin"));
+        assert!(!toggle_clip_pin_in_pool(&database.pool, "clip-1")
+            .await
+            .expect("second toggle should unpin"));
+        assert_eq!(
+            toggle_clip_pin_in_pool(&database.pool, "missing").await,
+            Err("Clipboard item not found".to_string())
+        );
     }
 }
