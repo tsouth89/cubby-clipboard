@@ -6,6 +6,7 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 mod windows_probe {
+    use clipboard_rs::common::RustImage;
     use clipboard_rs::{Clipboard, ClipboardContext};
     use serde::Serialize;
     use sha2::{Digest, Sha256};
@@ -40,6 +41,7 @@ mod windows_probe {
         interval_ms: u64,
         timeout_seconds: u64,
         expect_text: Option<usize>,
+        expect_items: Option<usize>,
         writer: bool,
     }
 
@@ -50,6 +52,8 @@ mod windows_probe {
         observed: HashSet<String>,
         expected_text: Option<usize>,
         observed_text: HashSet<String>,
+        expected_items: Option<usize>,
+        observed_items: HashSet<String>,
         events: usize,
         read_failures: usize,
         timed_out: bool,
@@ -66,8 +70,19 @@ mod windows_probe {
         text_sha256: Option<String>,
         text_status: &'static str,
         text_read_error: Option<String>,
+        image_width: Option<u32>,
+        image_height: Option<u32>,
+        image_sha256: Option<String>,
+        image_status: &'static str,
+        image_read_error: Option<String>,
         marker: Option<String>,
         read_error: Option<String>,
+    }
+
+    struct ImageSnapshot {
+        width: u32,
+        height: u32,
+        sha256: String,
     }
 
     pub fn run() {
@@ -95,6 +110,8 @@ mod windows_probe {
                 observed: HashSet::new(),
                 expected_text: config.expect_text,
                 observed_text: HashSet::new(),
+                expected_items: config.expect_items,
+                observed_items: HashSet::new(),
                 events: 0,
                 read_failures: 0,
                 timed_out: false,
@@ -127,10 +144,13 @@ mod windows_probe {
                     "burst"
                 } else if config.expect_text.is_some() {
                     "remote_text"
+                } else if config.expect_items.is_some() {
+                    "remote_items"
                 } else {
                     "interactive"
                 },
                 "expected_distinct_text": config.expect_text,
+                "expected_distinct_items": config.expect_items,
                 "timeout_seconds": config.timeout_seconds
             })
         );
@@ -159,13 +179,20 @@ mod windows_probe {
         let observed_count = state.observed.len();
         let expected_text_count = state.expected_text.unwrap_or(0);
         let observed_text_count = state.observed_text.len();
+        let expected_item_count = state.expected_items.unwrap_or(0);
+        let observed_item_count = state.observed_items.len();
         let burst_passed = state.expected.is_none() || observed_count == expected_count;
         let text_passed =
             state.expected_text.is_none() || observed_text_count >= expected_text_count;
-        let has_expectations = state.expected.is_some() || state.expected_text.is_some();
+        let items_passed =
+            state.expected_items.is_none() || observed_item_count >= expected_item_count;
+        let has_expectations = state.expected.is_some()
+            || state.expected_text.is_some()
+            || state.expected_items.is_some();
         let passed = (!has_expectations || !state.timed_out)
             && burst_passed
             && text_passed
+            && items_passed
             && state.read_failures == 0;
 
         println!(
@@ -179,6 +206,8 @@ mod windows_probe {
                 "observed_markers": observed_count,
                 "expected_distinct_text": expected_text_count,
                 "observed_distinct_text": observed_text_count,
+                "expected_distinct_items": expected_item_count,
+                "observed_distinct_items": observed_item_count,
                 "timed_out": state.timed_out
             })
         );
@@ -193,6 +222,7 @@ mod windows_probe {
         let mut interval_ms = 25;
         let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
         let mut expect_text = None;
+        let mut expect_items = None;
         let mut writer = false;
         let mut args = env::args().skip(1);
 
@@ -208,10 +238,13 @@ mod windows_probe {
                 "--expect-text" => {
                     expect_text = Some(parse_value(&mut args, "--expect-text"));
                 }
+                "--expect-items" => {
+                    expect_items = Some(parse_value(&mut args, "--expect-items"));
+                }
                 "--writer" => writer = true,
                 "--help" | "-h" => {
                     println!(
-                        "Usage: clipboard_probe [--burst COUNT] [--interval-ms MS] [--expect-text COUNT] [--timeout-seconds SECONDS]"
+                        "Usage: clipboard_probe [--burst COUNT] [--interval-ms MS] [--expect-text COUNT] [--expect-items COUNT] [--timeout-seconds SECONDS]"
                     );
                     std::process::exit(0);
                 }
@@ -227,6 +260,7 @@ mod windows_probe {
             interval_ms,
             timeout_seconds,
             expect_text,
+            expect_items,
             writer,
         }
     }
@@ -376,6 +410,11 @@ mod windows_probe {
         let text_error = has_unicode_text
             .then_some(attempted_text_error.clone())
             .flatten();
+        let (image, attempted_image_error) = if text.is_none() {
+            read_image_with_retry()
+        } else {
+            (None, None)
+        };
         let read_error = match (format_error, text_error) {
             (None, None) => None,
             (Some(error), None) | (None, Some(error)) => Some(error),
@@ -396,6 +435,11 @@ mod windows_probe {
             (None, false, Some(_)) => "not_available",
             (None, _, None) => "not_text",
         };
+        let image_status = match (&image, &attempted_image_error) {
+            (Some(_), _) => "readable",
+            (None, Some(_)) => "not_available",
+            (None, None) => "not_checked",
+        };
 
         let mut should_quit = false;
         let elapsed_ms = if let Some(state_cell) = STATE.get() {
@@ -415,6 +459,11 @@ mod windows_probe {
             }
             if let Some(text_sha256) = text_sha256.as_ref() {
                 state.observed_text.insert(text_sha256.clone());
+                state.observed_items.insert(format!("text:{text_sha256}"));
+            } else if let Some(image) = image.as_ref() {
+                state
+                    .observed_items
+                    .insert(format!("image:{}", image.sha256));
             }
             let burst_complete = state
                 .expected
@@ -423,7 +472,10 @@ mod windows_probe {
             let text_complete = state
                 .expected_text
                 .is_some_and(|expected| state.observed_text.len() >= expected);
-            should_quit = burst_complete || text_complete;
+            let items_complete = state
+                .expected_items
+                .is_some_and(|expected| state.observed_items.len() >= expected);
+            should_quit = burst_complete || text_complete || items_complete;
             state.started.elapsed().as_millis()
         } else {
             0
@@ -442,6 +494,11 @@ mod windows_probe {
             text_sha256,
             text_status,
             text_read_error: attempted_text_error,
+            image_width: image.as_ref().map(|snapshot| snapshot.width),
+            image_height: image.as_ref().map(|snapshot| snapshot.height),
+            image_sha256: image.as_ref().map(|snapshot| snapshot.sha256.clone()),
+            image_status,
+            image_read_error: attempted_image_error,
             marker,
             read_error,
         };
@@ -507,6 +564,48 @@ mod windows_probe {
         (
             None,
             last_error.map(|error| format!("text materialization failed: {error}")),
+        )
+    }
+
+    fn read_image_with_retry() -> (Option<ImageSnapshot>, Option<String>) {
+        let clipboard = match ClipboardContext::new() {
+            Ok(clipboard) => clipboard,
+            Err(error) => return (None, Some(format!("clipboard init failed: {error}"))),
+        };
+        let mut last_error = None;
+
+        for attempt in 0..10_u32 {
+            match clipboard.get_image() {
+                Ok(image) => {
+                    let (width, height) = image.get_size();
+                    match image.to_png() {
+                        Ok(png) => {
+                            let mut hasher = Sha256::new();
+                            hasher.update(png.get_bytes());
+                            return (
+                                Some(ImageSnapshot {
+                                    width,
+                                    height,
+                                    sha256: format!("{:x}", hasher.finalize()),
+                                }),
+                                None,
+                            );
+                        }
+                        Err(error) => {
+                            return (None, Some(format!("image encoding failed: {error}")));
+                        }
+                    }
+                }
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    thread::sleep(Duration::from_millis(2_u64.pow(attempt.min(6))));
+                }
+            }
+        }
+
+        (
+            None,
+            last_error.map(|error| format!("image materialization failed: {error}")),
         )
     }
 

@@ -41,3 +41,11 @@ cargo run --locked --bin clipboard_probe -- --expect-text 20 --timeout-seconds 3
 ```
 
 Copy 20 distinct text values in the remote session. Remote-control software may emit additional updates with no readable text; those are reported as synchronization churn and do not count toward the target.
+
+For a mixed text and screenshot run, use:
+
+```powershell
+cargo run --locked --bin clipboard_probe -- --expect-items 20 --timeout-seconds 300
+```
+
+This mode materializes and hashes screenshots as images, counts each distinct text or image payload once, and ignores duplicate synchronization notifications.
