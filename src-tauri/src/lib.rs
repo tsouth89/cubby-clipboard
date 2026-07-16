@@ -716,10 +716,33 @@ pub fn apply_window_effect(
                 log::error!("THEME:Failed to clear tabbed: {:?}", e);
             }
             let tint = if matches!(theme, tauri::Theme::Dark) {
-                (18, 18, 20, 150)
+                (18, 18, 20, 115)
             } else {
-                (245, 245, 247, 150)
+                (245, 245, 247, 115)
             };
+            // clear_mica resets this attribute to light mode. Acrylic does not set it
+            // itself on Windows 11, so restore the active app theme before applying it.
+            if let Ok(handle) = window.hwnd() {
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::Graphics::Dwm::{
+                    DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                };
+                let hwnd = HWND(handle.0 as _);
+                let dark_mode = u32::from(matches!(theme, tauri::Theme::Dark));
+                unsafe {
+                    if let Err(error) = DwmSetWindowAttribute(
+                        hwnd,
+                        DWMWA_USE_IMMERSIVE_DARK_MODE,
+                        &dark_mode as *const _ as _,
+                        std::mem::size_of_val(&dark_mode) as u32,
+                    ) {
+                        log::error!(
+                            "THEME:Failed to set Acrylic immersive dark mode: {:?}",
+                            error
+                        );
+                    }
+                }
+            }
             if let Err(e) = apply_acrylic(window, Some(tint)) {
                 log::error!("THEME:Failed to apply acrylic: {:?}", e);
             }

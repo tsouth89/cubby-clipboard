@@ -72,7 +72,7 @@ function App() {
     windowEffect === 'solid'
       ? 'bg-[#171719]'
       : windowEffect === 'acrylic'
-        ? 'bg-background/[0.20]'
+        ? 'bg-background/[0.10]'
         : 'bg-background/[0.08]';
 
   const appWindow = getCurrentWindow();
@@ -581,9 +581,7 @@ function App() {
       >
         <div
           data-el="app-frame"
-          className={`flex h-full w-full flex-col font-sans text-foreground ${
-            windowEffect === 'acrylic' ? 'backdrop-blur-xl' : ''
-          }`}
+          className="flex h-full w-full flex-col font-sans text-foreground"
         >
           {contextMenu && (
             <ContextMenu
