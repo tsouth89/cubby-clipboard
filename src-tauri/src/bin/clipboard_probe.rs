@@ -39,6 +39,7 @@ mod windows_probe {
         burst_count: Option<usize>,
         interval_ms: u64,
         timeout_seconds: u64,
+        expect_text: Option<usize>,
         writer: bool,
     }
 
@@ -47,6 +48,8 @@ mod windows_probe {
         started: Instant,
         expected: Option<HashSet<String>>,
         observed: HashSet<String>,
+        expected_text: Option<usize>,
+        observed_text: HashSet<String>,
         events: usize,
         read_failures: usize,
         timed_out: bool,
@@ -61,6 +64,8 @@ mod windows_probe {
         formats: Vec<String>,
         text_length: Option<usize>,
         text_sha256: Option<String>,
+        text_status: &'static str,
+        text_read_error: Option<String>,
         marker: Option<String>,
         read_error: Option<String>,
     }
@@ -88,6 +93,8 @@ mod windows_probe {
                 started: Instant::now(),
                 expected,
                 observed: HashSet::new(),
+                expected_text: config.expect_text,
+                observed_text: HashSet::new(),
                 events: 0,
                 read_failures: 0,
                 timed_out: false,
@@ -116,7 +123,14 @@ mod windows_probe {
             "{}",
             serde_json::json!({
                 "event": "ready",
-                "mode": if config.burst_count.is_some() { "burst" } else { "interactive" },
+                "mode": if config.burst_count.is_some() {
+                    "burst"
+                } else if config.expect_text.is_some() {
+                    "remote_text"
+                } else {
+                    "interactive"
+                },
+                "expected_distinct_text": config.expect_text,
                 "timeout_seconds": config.timeout_seconds
             })
         );
@@ -143,8 +157,16 @@ mod windows_probe {
             .expect("state lock");
         let expected_count = state.expected.as_ref().map_or(0, HashSet::len);
         let observed_count = state.observed.len();
-        let passed = state.expected.is_none()
-            || (!state.timed_out && observed_count == expected_count && state.read_failures == 0);
+        let expected_text_count = state.expected_text.unwrap_or(0);
+        let observed_text_count = state.observed_text.len();
+        let burst_passed = state.expected.is_none() || observed_count == expected_count;
+        let text_passed =
+            state.expected_text.is_none() || observed_text_count >= expected_text_count;
+        let has_expectations = state.expected.is_some() || state.expected_text.is_some();
+        let passed = (!has_expectations || !state.timed_out)
+            && burst_passed
+            && text_passed
+            && state.read_failures == 0;
 
         println!(
             "{}",
@@ -155,6 +177,8 @@ mod windows_probe {
                 "read_failures": state.read_failures,
                 "expected_markers": expected_count,
                 "observed_markers": observed_count,
+                "expected_distinct_text": expected_text_count,
+                "observed_distinct_text": observed_text_count,
                 "timed_out": state.timed_out
             })
         );
@@ -168,6 +192,7 @@ mod windows_probe {
         let mut burst_count = None;
         let mut interval_ms = 25;
         let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
+        let mut expect_text = None;
         let mut writer = false;
         let mut args = env::args().skip(1);
 
@@ -180,10 +205,13 @@ mod windows_probe {
                 "--timeout-seconds" => {
                     timeout_seconds = parse_value(&mut args, "--timeout-seconds");
                 }
+                "--expect-text" => {
+                    expect_text = Some(parse_value(&mut args, "--expect-text"));
+                }
                 "--writer" => writer = true,
                 "--help" | "-h" => {
                     println!(
-                        "Usage: clipboard_probe [--burst COUNT] [--interval-ms MS] [--timeout-seconds SECONDS]"
+                        "Usage: clipboard_probe [--burst COUNT] [--interval-ms MS] [--expect-text COUNT] [--timeout-seconds SECONDS]"
                     );
                     std::process::exit(0);
                 }
@@ -198,6 +226,7 @@ mod windows_probe {
             burst_count,
             interval_ms,
             timeout_seconds,
+            expect_text,
             writer,
         }
     }
@@ -344,7 +373,9 @@ mod windows_probe {
         let (formats, format_error) = read_formats_with_retry();
         let has_unicode_text = formats.iter().any(|format| format == "CF_UNICODETEXT");
         let (text, attempted_text_error) = read_text_with_retry();
-        let text_error = has_unicode_text.then_some(attempted_text_error).flatten();
+        let text_error = has_unicode_text
+            .then_some(attempted_text_error.clone())
+            .flatten();
         let read_error = match (format_error, text_error) {
             (None, None) => None,
             (Some(error), None) | (None, Some(error)) => Some(error),
@@ -359,6 +390,12 @@ mod windows_probe {
             hasher.update(value.as_bytes());
             format!("{:x}", hasher.finalize())
         });
+        let text_status = match (&text, has_unicode_text, &attempted_text_error) {
+            (Some(_), _, _) => "readable",
+            (None, true, Some(_)) => "advertised_but_unreadable",
+            (None, false, Some(_)) => "not_available",
+            (None, _, None) => "not_text",
+        };
 
         let mut should_quit = false;
         let elapsed_ms = if let Some(state_cell) = STATE.get() {
@@ -376,10 +413,17 @@ mod windows_probe {
                     state.observed.insert(marker.clone());
                 }
             }
-            should_quit = state
+            if let Some(text_sha256) = text_sha256.as_ref() {
+                state.observed_text.insert(text_sha256.clone());
+            }
+            let burst_complete = state
                 .expected
                 .as_ref()
                 .is_some_and(|expected| state.observed.len() == expected.len());
+            let text_complete = state
+                .expected_text
+                .is_some_and(|expected| state.observed_text.len() >= expected);
+            should_quit = burst_complete || text_complete;
             state.started.elapsed().as_millis()
         } else {
             0
@@ -396,6 +440,8 @@ mod windows_probe {
             formats,
             text_length: text.as_ref().map(String::len),
             text_sha256,
+            text_status,
+            text_read_error: attempted_text_error,
             marker,
             read_error,
         };

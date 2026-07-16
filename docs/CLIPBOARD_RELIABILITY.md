@@ -70,7 +70,10 @@ cargo run --bin clipboard_probe -- --burst 100 --interval-ms 25
 # Interactive mode for RDP, NinjaOne, and other application testing.
 cargo run --bin clipboard_probe -- --timeout-seconds 300
 
+# Require 20 distinct readable text copies while ignoring remote sync churn.
+cargo run --bin clipboard_probe -- --expect-text 20 --timeout-seconds 300
+
 Pop-Location
 ```
 
-Each event is emitted as JSON containing the clipboard sequence number, advertised formats, text length, and a SHA-256 digest. Clipboard contents are not printed. Burst mode exits unsuccessfully if it misses a marker, cannot read an update, or reaches the timeout.
+Each event is emitted as JSON containing the clipboard sequence number, advertised formats, text status, text length, and a SHA-256 digest. Clipboard contents are not printed. Burst mode exits unsuccessfully if it misses a marker, cannot read an update, or reaches the timeout. `--expect-text` ignores non-text synchronization updates and succeeds only after the requested number of distinct text values have been materialized.

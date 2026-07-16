@@ -33,3 +33,11 @@ cargo run --locked --bin clipboard_probe -- --burst 100 --interval-ms 10 --timeo
 - Add HTML, RTF, image, physical file-list, and virtual-file burst fixtures.
 - Verify content remains available after disconnecting or closing the source session.
 - Move the proven event and retry behavior into Cubby's production capture engine.
+
+For a remote text run, use:
+
+```powershell
+cargo run --locked --bin clipboard_probe -- --expect-text 20 --timeout-seconds 300
+```
+
+Copy 20 distinct text values in the remote session. Remote-control software may emit additional updates with no readable text; those are reported as synchronization churn and do not count toward the target.
