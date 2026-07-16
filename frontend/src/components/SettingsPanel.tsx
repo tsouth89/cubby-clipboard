@@ -387,14 +387,25 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         <span className="text-sm font-medium">{t('settings.windowEffect')}</span>
                       </label>
                       <Select
-                        value={settings.mica_effect || 'clear'}
+                        value={
+                          settings.mica_effect === 'clear'
+                            ? 'solid'
+                            : settings.mica_effect === 'mica_alt' ||
+                                settings.mica_effect === 'auto'
+                              ? 'acrylic'
+                              : settings.mica_effect || 'solid'
+                        }
                         onChange={(val) => updateSetting('mica_effect', val)}
                         options={[
-                          { value: 'mica_alt', label: 'Mica Alt' },
+                          { value: 'solid', label: 'Solid' },
                           { value: 'mica', label: 'Mica' },
-                          { value: 'clear', label: 'Clear' },
+                          { value: 'acrylic', label: 'Acrylic' },
                         ]}
                       />
+                      <p className="text-xs text-muted-foreground">
+                        Solid is opaque, Mica subtly uses your wallpaper, and Acrylic visibly
+                        frosts the windows behind Cubby.
+                      </p>
                     </div>
 
                     <div className="flex items-center justify-between rounded-lg border border-border bg-accent/20 p-3">

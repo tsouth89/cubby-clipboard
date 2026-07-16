@@ -75,7 +75,7 @@
     "startupWithWindows": "Mit Windows starten",
     "startupWithWindowsDesc": "Automatisch starten, wenn Windows hochfährt",
     "roundCorners": "Abgerundete Ecken",
-    "roundCornersDesc": "Fensterecken über DWM abrunden (Windows 11). Kein Effekt im Clear-Modus.",
+    "roundCornersDesc": "Abgerundete Ecken für das Cubby-Fenster verwenden.",
     "autoPaste": "Automatisch einfügen",
     "autoPasteDesc": "Inhalt nach der Auswahl automatisch einfügen",
     "ignoreGhostClips": "Geistereinträge ignorieren",

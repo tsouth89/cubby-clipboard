@@ -81,7 +81,7 @@
     "startupWithWindows": "Startup with Windows",
     "startupWithWindowsDesc": "Automatically start when Windows boots",
     "roundCorners": "Rounded Corners",
-    "roundCornersDesc": "Round window corners via DWM (Windows 11). No effect on Clear mode.",
+    "roundCornersDesc": "Use rounded corners for the Cubby flyout.",
     "autoPaste": "Auto Paste",
     "autoPasteDesc": "Automatically paste content after selection",
     "ignoreGhostClips": "Ignore Ghost Clips",

@@ -29,7 +29,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             theme: "system".to_string(),
-            mica_effect: "clear".to_string(),
+            mica_effect: "solid".to_string(),
             language: "en".to_string(),
             max_items: 1000,
             auto_delete_days: 30,

@@ -75,7 +75,7 @@
     "startupWithWindows": "Démarrer avec Windows",
     "startupWithWindowsDesc": "Démarrer automatiquement au lancement de Windows",
     "roundCorners": "Coins arrondis",
-    "roundCornersDesc": "Arrondir les coins de la fenêtre via DWM (Windows 11). Sans effet en mode Clear.",
+    "roundCornersDesc": "Utiliser des coins arrondis pour la fenêtre Cubby.",
     "autoPaste": "Collage automatique",
     "autoPasteDesc": "Coller automatiquement le contenu après la sélection",
     "ignoreGhostClips": "Ignorer les éléments fantômes",

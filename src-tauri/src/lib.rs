@@ -675,41 +675,67 @@ pub fn apply_window_effect(
         theme,
         round_corners
     );
-    use window_vibrancy::{apply_mica, apply_tabbed, clear_mica};
+    use window_vibrancy::{apply_acrylic, apply_mica, clear_acrylic, clear_mica, clear_tabbed};
 
     match effect {
-        "clear" => {
+        "solid" | "clear" => {
+            if let Err(e) = clear_acrylic(window) {
+                log::error!("THEME:Failed to clear acrylic: {:?}", e);
+            }
             if let Err(e) = clear_mica(window) {
                 log::error!("THEME:Failed to clear mica: {:?}", e);
             }
-            log::info!("THEME:Mica effect cleared");
+            if let Err(e) = clear_tabbed(window) {
+                log::error!("THEME:Failed to clear tabbed: {:?}", e);
+            }
+            log::info!("THEME:Window backdrop cleared for solid mode");
         }
         "mica" | "dark" => {
+            if let Err(e) = clear_acrylic(window) {
+                log::error!("THEME:Failed to clear acrylic: {:?}", e);
+            }
             if let Err(e) = clear_mica(window) {
                 log::error!("THEME:Failed to clear mica: {:?}", e);
+            }
+            if let Err(e) = clear_tabbed(window) {
+                log::error!("THEME:Failed to clear tabbed: {:?}", e);
             }
             if let Err(e) = apply_mica(window, Some(matches!(theme, tauri::Theme::Dark))) {
                 log::error!("THEME:Failed to apply mica: {:?}", e);
             }
             log::info!("THEME:Applied Mica effect (Theme: {})", theme);
         }
-        "mica_alt" | "auto" => {
+        "acrylic" | "mica_alt" | "auto" => {
+            if let Err(e) = clear_acrylic(window) {
+                log::error!("THEME:Failed to clear acrylic: {:?}", e);
+            }
             if let Err(e) = clear_mica(window) {
                 log::error!("THEME:Failed to clear mica: {:?}", e);
             }
-            if let Err(e) = apply_tabbed(window, Some(matches!(theme, tauri::Theme::Dark))) {
-                log::error!("THEME:Failed to apply tabbed: {:?}", e);
+            if let Err(e) = clear_tabbed(window) {
+                log::error!("THEME:Failed to clear tabbed: {:?}", e);
             }
-            log::info!("THEME:Applied Tabbed effect (Theme: {})", theme);
+            let tint = if matches!(theme, tauri::Theme::Dark) {
+                (18, 18, 20, 150)
+            } else {
+                (245, 245, 247, 150)
+            };
+            if let Err(e) = apply_acrylic(window, Some(tint)) {
+                log::error!("THEME:Failed to apply acrylic: {:?}", e);
+            }
+            log::info!("THEME:Applied Acrylic effect (Theme: {})", theme);
         }
         _ => {
+            if let Err(e) = clear_acrylic(window) {
+                log::error!("THEME:Failed to clear acrylic: {:?}", e);
+            }
             if let Err(e) = clear_mica(window) {
                 log::error!("THEME:Failed to clear mica: {:?}", e);
             }
-            if let Err(e) = apply_tabbed(window, Some(matches!(theme, tauri::Theme::Dark))) {
-                log::error!("THEME:Failed to apply tabbed: {:?}", e);
+            if let Err(e) = clear_tabbed(window) {
+                log::error!("THEME:Failed to clear tabbed: {:?}", e);
             }
-            log::info!("THEME:Applied Tabbed effect (Theme: {})", theme);
+            log::info!("THEME:Unknown window effect; using solid mode");
         }
     }
 

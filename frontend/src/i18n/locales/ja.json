@@ -75,7 +75,7 @@
     "startupWithWindows": "Windows 起動時に開始",
     "startupWithWindowsDesc": "Windows の起動時に自動的に開始します",
     "roundCorners": "角を丸くする",
-    "roundCornersDesc": "DWM でウィンドウの角を丸くします (Windows 11)。Clear モードでは無効です。",
+    "roundCornersDesc": "Cubby ウィンドウに丸い角を使用します。",
     "autoPaste": "自動貼り付け",
     "autoPasteDesc": "選択後に内容を自動的に貼り付けます",
     "ignoreGhostClips": "ゴーストクリップを無視",

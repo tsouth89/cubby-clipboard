@@ -62,12 +62,18 @@ function App() {
   useLanguage(settings?.language);
   const { t } = useTranslation();
   const hasRoundedCorners = settings?.round_corners ?? true;
-  const windowSurface =
+  const windowEffect =
     settings?.mica_effect === 'clear'
+      ? 'solid'
+      : settings?.mica_effect === 'mica_alt' || settings?.mica_effect === 'auto'
+        ? 'acrylic'
+        : settings?.mica_effect || 'solid';
+  const windowSurface =
+    windowEffect === 'solid'
       ? 'bg-[#171719]'
-      : settings?.mica_effect === 'mica_alt'
-        ? 'bg-background/[0.28]'
-        : 'bg-background/[0.16]';
+      : windowEffect === 'acrylic'
+        ? 'bg-background/[0.20]'
+        : 'bg-background/[0.08]';
 
   const appWindow = getCurrentWindow();
   const selectedFolderRef = useRef(selectedFolder);
@@ -576,7 +582,7 @@ function App() {
         <div
           data-el="app-frame"
           className={`flex h-full w-full flex-col font-sans text-foreground ${
-            settings?.mica_effect === 'clear' ? '' : 'backdrop-blur-sm'
+            windowEffect === 'acrylic' ? 'backdrop-blur-xl' : ''
           }`}
         >
           {contextMenu && (
