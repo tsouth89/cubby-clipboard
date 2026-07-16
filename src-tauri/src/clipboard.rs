@@ -34,9 +34,6 @@ use windows::Win32::System::ProcessStatus::{GetModuleBaseNameW, GetModuleFileNam
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 #[cfg(target_os = "windows")]
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_INSERT, VK_SHIFT,
-};
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::{
     SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_USEFILEATTRIBUTES,
@@ -181,7 +178,7 @@ fn run_native_listener(snapshot_tx: tokio::sync::mpsc::UnboundedSender<Clipboard
 fn run_native_listener(_snapshot_tx: tokio::sync::mpsc::UnboundedSender<ClipboardSnapshot>) {}
 
 fn materialize_clipboard_content() -> Option<CapturedContent> {
-    const ATTEMPTS: u32 = 5;
+    const ATTEMPTS: u32 = 10;
 
     for attempt in 0..ATTEMPTS {
         if let Ok(image) = read_clipboard_image_fast() {
@@ -204,11 +201,15 @@ fn materialize_clipboard_content() -> Option<CapturedContent> {
         }
 
         if attempt + 1 < ATTEMPTS {
-            std::thread::sleep(std::time::Duration::from_millis(1_u64 << attempt));
+            std::thread::sleep(clipboard_retry_delay(attempt));
         }
     }
 
     None
+}
+
+fn clipboard_retry_delay(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(1_u64 << attempt.min(6))
 }
 
 fn capture_text(text: String) -> Option<CapturedContent> {
@@ -976,59 +977,9 @@ unsafe fn extract_icon(path: &str) -> Option<String> {
     Some(BASE64.encode(&png_data))
 }
 
-#[cfg(target_os = "windows")]
-pub fn send_paste_input() {
-    log::info!("send_paste_input: sending Shift+Insert");
-    unsafe {
-        let inputs = vec![
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VK_SHIFT,
-                        ..Default::default()
-                    },
-                },
-            },
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VK_INSERT,
-                        ..Default::default()
-                    },
-                },
-            },
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VK_INSERT,
-                        dwFlags: KEYEVENTF_KEYUP,
-                        ..Default::default()
-                    },
-                },
-            },
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VK_SHIFT,
-                        dwFlags: KEYEVENTF_KEYUP,
-                        ..Default::default()
-                    },
-                },
-            },
-        ];
-
-        let result = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-        log::info!("send_paste_input: SendInput returned {}", result);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{calculate_hash, capture_text, CapturedContent};
+    use super::{calculate_hash, capture_text, clipboard_retry_delay, CapturedContent};
 
     #[test]
     fn capture_text_preserves_exact_whitespace() {
@@ -1053,5 +1004,15 @@ mod tests {
     fn capture_text_ignores_only_truly_empty_content() {
         assert!(capture_text(String::new()).is_none());
         assert!(capture_text("   ".to_string()).is_some());
+    }
+
+    #[test]
+    fn clipboard_contention_backoff_is_bounded() {
+        let delays = (0..10)
+            .map(|attempt| clipboard_retry_delay(attempt).as_millis())
+            .collect::<Vec<_>>();
+
+        assert_eq!(delays, vec![1, 2, 4, 8, 16, 32, 64, 64, 64, 64]);
+        assert_eq!(delays.iter().sum::<u128>(), 319);
     }
 }

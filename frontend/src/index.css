@@ -70,6 +70,10 @@
     @apply font-sans text-foreground antialiased;
   }
 
+  kbd {
+    @apply mr-1 inline-flex min-w-5 items-center justify-center rounded border border-white/10 bg-white/[0.055] px-1 py-0.5 font-sans text-[9px] leading-none text-foreground/70 shadow-sm;
+  }
+
   ::-webkit-scrollbar {
     display: none;
   }
@@ -167,5 +171,49 @@
   .mask-gradient-right {
     mask-image: linear-gradient(to right, black 85%, transparent 100%);
     -webkit-mask-image: linear-gradient(to right, black 85%, transparent 100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (forced-colors: active) {
+  [data-el='app-window'] {
+    border: 1px solid CanvasText !important;
+    background: Canvas !important;
+    color: CanvasText !important;
+    box-shadow: none !important;
+  }
+
+  [data-el='clip-card'] {
+    border: 1px solid ButtonBorder !important;
+    background: Canvas !important;
+    color: CanvasText !important;
+    forced-color-adjust: auto;
+  }
+
+  [data-el='clip-card'][data-selected='true'] {
+    border-color: Highlight !important;
+    background: Highlight !important;
+    color: HighlightText !important;
+  }
+
+  [data-el='clip-card'][data-selected='true'] * {
+    color: HighlightText !important;
+  }
+
+  input,
+  select,
+  button,
+  kbd {
+    forced-color-adjust: auto;
   }
 }

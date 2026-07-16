@@ -67,6 +67,9 @@ Push-Location src-tauri
 # Automated local burst. Every marker must produce its own clipboard update.
 cargo run --bin clipboard_probe -- --burst 100 --interval-ms 25
 
+# Force the reader through clipboard-lock contention after every update.
+cargo run --bin clipboard_probe -- --burst 100 --interval-ms 10 --contention-ms 40
+
 # Interactive mode for RDP, NinjaOne, and other application testing.
 cargo run --bin clipboard_probe -- --timeout-seconds 300
 
@@ -80,3 +83,12 @@ Pop-Location
 ```
 
 Each event is emitted as JSON containing the clipboard sequence number, advertised formats, text or image status, dimensions or length, and a SHA-256 digest. Clipboard contents and image bytes are not printed. Burst mode exits unsuccessfully if it misses a marker, cannot read an update, or reaches the timeout. `--expect-text` counts distinct readable text. `--expect-items` counts distinct readable text or images and ignores non-content synchronization updates.
+
+For repeatable local validation, run `scripts/test-clipboard-capture.ps1`. It
+executes both rapid and intentionally contended bursts. Because Windows exposes
+one system clipboard per interactive session, this test replaces the current
+clipboard contents and should only be run when the keyboard is idle.
+
+Production materialization uses the same bounded retry margin: ten attempts with
+exponential backoff capped at 64 ms, allowing up to 319 ms for a clipboard owner
+or synchronization client to release the clipboard.

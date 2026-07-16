@@ -79,8 +79,8 @@ export function generateDemoClips(): ClipboardItem[] {
     {
       id: 'demo-5',
       clip_type: 'text',
-      content: `Ctrl+Shift+V  Toggle window\nCtrl+F        Focus search\nEscape        Close / clear search\nEnter         Paste selected\nDelete        Delete selected\nP             Pin / Unpin`,
-      preview: 'Ctrl+Shift+V  Toggle window\nCtrl+F  Focus search...',
+      content: `Win+Alt+V     Toggle window\nCtrl+F        Focus search\nEscape        Close / clear search\nEnter         Paste selected\nDelete        Delete selected\nP             Pin / Unpin`,
+      preview: 'Win+Alt+V  Toggle window\nCtrl+F  Focus search...',
       folder_id: null,
       created_at: ago(12),
       source_app: 'Code.exe',

@@ -1,20 +1,19 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { ClipboardItem as AppClipboardItem, FolderItem, Settings } from './types';
+import { ClipboardItem as AppClipboardItem, FolderItem, PasteContext, Settings } from './types';
 import { ClipList } from './components/ClipList';
-import { ControlBar } from './components/ControlBar';
-import { DragPreview } from './components/DragPreview';
+import { ContentFilter, FlyoutHeader } from './components/FlyoutHeader';
 import { ContextMenu } from './components/ContextMenu';
 import { FolderModal } from './components/FolderModal';
 import { useKeyboard } from './hooks/useKeyboard';
 import { useTheme } from './hooks/useTheme';
 import { useLanguage } from './hooks/useLanguage';
+import { useSystemAccent } from './hooks/useSystemAccent';
 import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
-import { LAYOUT } from './constants';
 import { generateDemoClips } from './debug/demoData';
 
 const base64ToBlob = (base64: string, mimeType: string = 'image/png'): Blob => {
@@ -45,34 +44,47 @@ function App() {
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [showSearch, setShowSearch] = useState(false);
+  const [contentFilter, setContentFilter] = useState<ContentFilter>('all');
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [clipListResetToken, setClipListResetToken] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [hasMore, setHasMore] = useState(true);
   const [theme, setTheme] = useState('system');
   const [settings, setSettings] = useState<Settings | null>(null);
-
-  // Simulated Drag State
-  const [draggingClipId, setDraggingClipId] = useState<string | null>(null);
-  const [dragPosition, setDragPosition] = useState({ x: 0, y: 0 });
-  const [dragTargetFolderId, setDragTargetFolderId] = useState<string | null>(null);
+  const [pasteContext, setPasteContext] = useState<PasteContext | null>(null);
 
   // Add Folder Modal State
   const [showAddFolderModal, setShowAddFolderModal] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
 
-  // Using refs for event handlers to access latest state without re-attaching listeners
-  const dragStateRef = useRef({
-    isDragging: false,
-    clipId: null as string | null,
-    targetFolderId: null as string | null,
-    pendingDrag: null as { clipId: string; startX: number; startY: number } | null,
-  });
-
   const effectiveTheme = useTheme(theme);
+  useSystemAccent();
   useLanguage(settings?.language);
   const { t } = useTranslation();
+  const hasRoundedCorners = settings?.round_corners ?? true;
+  const density = settings?.density ?? 'comfortable';
+  const windowEffect =
+    settings?.mica_effect === 'clear'
+      ? 'solid'
+      : settings?.mica_effect === 'mica_alt' || settings?.mica_effect === 'auto'
+        ? 'acrylic'
+        : settings?.mica_effect || 'solid';
+  const windowSurface =
+    windowEffect === 'solid'
+      ? 'bg-[#171719]'
+      : windowEffect === 'acrylic'
+        ? 'bg-background/[0.58]'
+        : 'bg-background/[0.08]';
+  const windowBorder =
+    windowEffect === 'acrylic'
+      ? 'border-white/[0.14]'
+      : windowEffect === 'mica'
+        ? 'border-white/[0.10]'
+        : 'border-white/[0.09]';
+  const windowGeometry = hasRoundedCorners ? 'p-2' : 'p-0';
+  const windowShape = hasRoundedCorners
+    ? 'rounded-[10px] shadow-[0_24px_80px_rgba(0,0,0,0.48),0_6px_24px_rgba(0,0,0,0.32)]'
+    : 'rounded-none shadow-none';
 
   const appWindow = getCurrentWindow();
   const selectedFolderRef = useRef(selectedFolder);
@@ -114,6 +126,16 @@ function App() {
       unlistenDemo.then((fs) => fs.forEach((f) => f()));
     };
   }, []);
+
+  const refreshPasteContext = useCallback(() => {
+    invoke<PasteContext>('get_paste_context').then(setPasteContext).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    refreshPasteContext();
+    window.addEventListener('focus', refreshPasteContext);
+    return () => window.removeEventListener('focus', refreshPasteContext);
+  }, [refreshPasteContext]);
 
   const openSettings = useCallback(async () => {
     // Check if settings window already exists
@@ -272,104 +294,6 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedFolder, searchQuery]);
 
-  // Handle global mouse events for simulated drag
-  useEffect(() => {
-    const handleGlobalMouseMove = (e: MouseEvent) => {
-      const state = dragStateRef.current;
-
-      // If we are already dragging, update position
-      if (state.isDragging) {
-        setDragPosition({ x: e.clientX, y: e.clientY });
-        return;
-      }
-
-      // If we have a pending drag, check threshold
-      if (state.pendingDrag) {
-        const dx = e.clientX - state.pendingDrag.startX;
-        const dy = e.clientY - state.pendingDrag.startY;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-
-        if (dist > 5) {
-          // Start actual drag
-          setDraggingClipId(state.pendingDrag.clipId);
-          setDragPosition({ x: e.clientX, y: e.clientY });
-          dragStateRef.current.isDragging = true;
-          dragStateRef.current.clipId = state.pendingDrag.clipId;
-          dragStateRef.current.pendingDrag = null;
-        }
-      }
-    };
-
-    const handleGlobalMouseUp = (_: MouseEvent) => {
-      // Always clear pending drag on mouse up
-      if (dragStateRef.current.pendingDrag) {
-        dragStateRef.current.pendingDrag = null;
-      }
-
-      if (dragStateRef.current.isDragging) {
-        finishDrag();
-      }
-    };
-
-    window.addEventListener('mousemove', handleGlobalMouseMove);
-    window.addEventListener('mouseup', handleGlobalMouseUp);
-
-    return () => {
-      window.removeEventListener('mousemove', handleGlobalMouseMove);
-      window.removeEventListener('mouseup', handleGlobalMouseUp);
-    };
-  }, []);
-
-  const startDrag = (clipId: string, startX: number, startY: number) => {
-    // Instead of starting immediately, set pending
-    dragStateRef.current.pendingDrag = { clipId, startX, startY };
-    dragStateRef.current.clipId = clipId;
-    // We don't set state yet, avoiding re-render until threshold passed
-  };
-
-  const finishDrag = () => {
-    if (dragStateRef.current.targetFolderId !== undefined && dragStateRef.current.clipId) {
-      // We only move if targetFolderId was explicitly set by a hover event.
-      // Wait, how do we distinguish "Not Hovering" vs "Hovering 'All' (null)"?
-      // We will make ControlBar pass a specific sentinel for "No Target" when leaving?
-      // Or simply: ControlBar tracks hover. If hover, it calls setDragTargetFolderId.
-      // If we drop and dragTargetFolderId is valid, we move.
-      // BUT 'null' is a valid folder ID (All).
-      // Let's use a generic 'undefined' for "No Target".
-    }
-
-    // Actually, simpler:
-    // When MouseUp happens, we check dragTargetFolderId state.
-    // If it is NOT undefined, we execute move.
-
-    // IMPORTANT: State updates in React are async. accessing `dragTargetFolderId` state inside event listener might be stale?
-    // That's why we use `dragStateRef`.
-
-    const { clipId, targetFolderId } = dragStateRef.current;
-    if (clipId && targetFolderId !== undefined && targetFolderId !== 'NO_TARGET') {
-      handleMoveClip(clipId, targetFolderId);
-    }
-
-    setDraggingClipId(null);
-    setDragTargetFolderId(null);
-    dragStateRef.current = {
-      isDragging: false,
-      clipId: null,
-      targetFolderId: 'NO_TARGET',
-      pendingDrag: null,
-    };
-  };
-
-  const handleDragHover = (folderId: string | null) => {
-    setDragTargetFolderId(folderId);
-    dragStateRef.current.targetFolderId = folderId;
-  };
-
-  const handleDragLeave = () => {
-    setDragTargetFolderId(null);
-    dragStateRef.current.targetFolderId = 'NO_TARGET';
-  };
-
   // Total History Count
   const [totalClipCount, setTotalClipCount] = useState(0);
 
@@ -425,33 +349,36 @@ function App() {
     []
   );
 
-  const handlePaste = async (clipId: string) => {
+  const handlePaste = async (clipId: string, plainText: boolean = false) => {
     try {
       const clip = clips.find((c) => c.id === clipId);
-      if (clip && clip.clip_type === 'image') {
-        try {
-          const blob = await getFullImageBlob(clipId, clip);
-          await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
-        } catch (e) {
-          console.error('Frontend clipboard write failed', e);
-        }
-      }
+      if (!clip) return;
+      if (plainText && clip.clip_type === 'image') return;
 
-      invoke('paste_clip', { id: clipId }).catch(console.error);
-    } catch (error) {
-      console.error('Failed to paste clip:', error);
-    }
-  };
-
-  const handleCopy = async (clipId: string) => {
-    try {
-      const clip = clips.find((c) => c.id === clipId);
       if (clip && clip.clip_type === 'image') {
         const blob = await getFullImageBlob(clipId, clip);
         await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
       }
 
-      await invoke('paste_clip', { id: clipId });
+      await invoke('paste_clip', { id: clipId, plainText });
+    } catch (error) {
+      console.error('Failed to paste clip:', error);
+      toast.error('Failed to paste clip');
+    }
+  };
+
+  const handleCopy = async (clipId: string, plainText: boolean = false) => {
+    try {
+      const clip = clips.find((c) => c.id === clipId);
+      if (!clip) return;
+      if (plainText && clip.clip_type === 'image') return;
+
+      if (clip && clip.clip_type === 'image') {
+        const blob = await getFullImageBlob(clipId, clip);
+        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      }
+
+      await invoke('copy_clip', { id: clipId, plainText });
 
       toast.success(t('common.copied'));
     } catch (error) {
@@ -461,35 +388,73 @@ function App() {
   };
 
   // Keyboard navigation handlers
-  const handleNavigateLeft = useCallback(() => {
-    if (clips.length === 0) return;
+  const visibleClips = useMemo(
+    () =>
+      clips.filter((clip) => {
+        if (contentFilter === 'images') return clip.clip_type === 'image';
+        if (contentFilter === 'text') return clip.clip_type !== 'image';
+        return true;
+      }),
+    [clips, contentFilter]
+  );
+
+  useEffect(() => {
+    if (visibleClips.length === 0) {
+      setSelectedClipId(null);
+      return;
+    }
+    if (!selectedClipId || !visibleClips.some((clip) => clip.id === selectedClipId)) {
+      setSelectedClipId(visibleClips[0].id);
+    }
+  }, [visibleClips, selectedClipId]);
+
+  useEffect(() => {
+    const focusSearchOnTyping = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isEditing =
+        target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
+      if (isEditing || event.ctrlKey || event.altKey || event.metaKey || event.key.length !== 1) {
+        return;
+      }
+
+      const input = document.querySelector<HTMLInputElement>('[data-el="search-input"]');
+      if (!input) return;
+      event.preventDefault();
+      input.focus();
+      setSearchQuery((query) => `${query}${event.key}`);
+    };
+
+    document.addEventListener('keydown', focusSearchOnTyping);
+    return () => document.removeEventListener('keydown', focusSearchOnTyping);
+  }, []);
+
+  const handleNavigateUp = useCallback(() => {
+    if (visibleClips.length === 0) return;
 
     if (!selectedClipId) {
-      // No selection, select the first clip
-      setSelectedClipId(clips[0].id);
+      setSelectedClipId(visibleClips[0].id);
       return;
     }
 
-    const currentIndex = clips.findIndex((c) => c.id === selectedClipId);
+    const currentIndex = visibleClips.findIndex((c) => c.id === selectedClipId);
     if (currentIndex > 0) {
-      setSelectedClipId(clips[currentIndex - 1].id);
+      setSelectedClipId(visibleClips[currentIndex - 1].id);
     }
-  }, [clips, selectedClipId]);
+  }, [visibleClips, selectedClipId]);
 
-  const handleNavigateRight = useCallback(() => {
-    if (clips.length === 0) return;
+  const handleNavigateDown = useCallback(() => {
+    if (visibleClips.length === 0) return;
 
     if (!selectedClipId) {
-      // No selection, select the first clip
-      setSelectedClipId(clips[0].id);
+      setSelectedClipId(visibleClips[0].id);
       return;
     }
 
-    const currentIndex = clips.findIndex((c) => c.id === selectedClipId);
-    if (currentIndex < clips.length - 1) {
-      setSelectedClipId(clips[currentIndex + 1].id);
+    const currentIndex = visibleClips.findIndex((c) => c.id === selectedClipId);
+    if (currentIndex < visibleClips.length - 1) {
+      setSelectedClipId(visibleClips[currentIndex + 1].id);
     }
-  }, [clips, selectedClipId]);
+  }, [visibleClips, selectedClipId]);
 
   const handlePasteSelected = useCallback(() => {
     if (selectedClipId) {
@@ -497,13 +462,20 @@ function App() {
     }
   }, [selectedClipId, handlePaste]);
 
+  const handleCopySelected = useCallback(() => {
+    if (selectedClipId) {
+      handleCopy(selectedClipId);
+    }
+  }, [selectedClipId, handleCopy]);
+
   useKeyboard({
     onClose: () => appWindow.hide(),
-    onSearch: () => setShowSearch(true),
+    onSearch: () => document.querySelector<HTMLInputElement>('[data-el="search-input"]')?.focus(),
     onDelete: () => handleDelete(selectedClipId),
-    onNavigateLeft: handleNavigateLeft,
-    onNavigateRight: handleNavigateRight,
+    onNavigateUp: handleNavigateUp,
+    onNavigateDown: handleNavigateDown,
     onPaste: handlePasteSelected,
+    onCopy: handleCopySelected,
   });
 
   const handleCreateFolder = async (name: string) => {
@@ -515,34 +487,36 @@ function App() {
     }
   };
 
+  const handleMoveClip = async (clipId: string, folderId: string | null) => {
+    try {
+      await invoke('move_to_folder', { clipId, folderId });
+
+      if (selectedFolder && folderId !== selectedFolder) {
+        setClips((current) => current.filter((clip) => clip.id !== clipId));
+        setSelectedClipId(null);
+      } else {
+        setClips((current) =>
+          current.map((clip) => (clip.id === clipId ? { ...clip, folder_id: folderId } : clip))
+        );
+      }
+
+      await loadFolders();
+      toast.success(
+        folderId
+          ? `Moved to ${folders.find((folder) => folder.id === folderId)?.name ?? 'folder'}`
+          : 'Removed from folder'
+      );
+    } catch (error) {
+      console.error('Failed to move clip:', error);
+      toast.error('Failed to move clip');
+    }
+  };
+
   const loadMore = useCallback(() => {
     if (hasMore && !isLoading) {
       loadClips(selectedFolder, true, searchQuery);
     }
   }, [hasMore, isLoading, selectedFolder, loadClips, searchQuery]);
-
-  const handleMoveClip = async (clipId: string, folderId: string | null) => {
-    try {
-      await invoke('move_to_folder', { clipId, folderId });
-
-      // Update local state to reflect the move
-      if (selectedFolder) {
-        // If we are in a specific folder (not All)
-        if (folderId !== selectedFolder) {
-          // If moved to a different folder, remove from current view
-          setClips((prev) => prev.filter((c) => c.id !== clipId));
-        }
-      } else {
-        // If we are in "All clips" view, just update the folder_id
-        setClips((prev) => prev.map((c) => (c.id === clipId ? { ...c, folder_id: folderId } : c)));
-      }
-      // Refresh counts after move
-      loadFolders();
-      refreshTotalCount();
-    } catch (error) {
-      console.error('Failed to move clip:', error);
-    }
-  };
 
   // Context Menu State
   const [contextMenu, setContextMenu] = useState<{
@@ -611,20 +585,15 @@ function App() {
   };
 
   return (
-    <div data-el="app-root" className="relative h-screen w-full overflow-hidden">
-      {/* Content Container */}
+    <div
+      data-el="app-root"
+      className={`relative h-screen w-full overflow-hidden bg-transparent ${windowGeometry}`}
+    >
       <div
         data-el="app-window"
-        className={`relative h-full w-full overflow-hidden ${settings?.mica_effect === 'clear' ? 'bg-background/95' : ''}`}
+        className={`relative h-full w-full overflow-hidden border ${windowBorder} ${windowShape} ${windowSurface}`}
       >
         <div data-el="app-frame" className="flex h-full w-full flex-col font-sans text-foreground">
-          {draggingClipId && (
-            <DragPreview
-              clip={clips.find((c) => c.id === draggingClipId)!}
-              position={dragPosition}
-            />
-          )}
-
           {contextMenu && (
             <ContextMenu
               x={contextMenu.x}
@@ -632,13 +601,47 @@ function App() {
               onClose={handleCloseContextMenu}
               options={
                 contextMenu.type === 'card'
-                  ? [
-                      {
-                        label: t('contextMenu.delete'),
-                        danger: true,
-                        onClick: () => handleDelete(contextMenu.itemId),
-                      },
-                    ]
+                  ? (() => {
+                      const clip = clips.find((item) => item.id === contextMenu.itemId);
+                      return [
+                        {
+                          label: t('contextMenu.paste'),
+                          onClick: () => handlePaste(contextMenu.itemId),
+                        },
+                        {
+                          label: t('contextMenu.pastePlainText'),
+                          disabled: clip?.clip_type === 'image',
+                          onClick: () => handlePaste(contextMenu.itemId, true),
+                        },
+                        {
+                          label: t('contextMenu.copy'),
+                          onClick: () => handleCopy(contextMenu.itemId),
+                        },
+                        {
+                          label: t('contextMenu.copyPlainText'),
+                          disabled: clip?.clip_type === 'image',
+                          onClick: () => handleCopy(contextMenu.itemId, true),
+                        },
+                        ...(clip?.folder_id
+                          ? [
+                              {
+                                label: 'Remove from folder',
+                                onClick: () => handleMoveClip(contextMenu.itemId, null),
+                              },
+                            ]
+                          : []),
+                        ...folders.map((folder) => ({
+                          label: `Move to ${folder.name}`,
+                          disabled: clip?.folder_id === folder.id,
+                          onClick: () => handleMoveClip(contextMenu.itemId, folder.id),
+                        })),
+                        {
+                          label: t('contextMenu.delete'),
+                          danger: true,
+                          onClick: () => handleDelete(contextMenu.itemId),
+                        },
+                      ];
+                    })()
                   : [
                       {
                         label: t('contextMenu.rename'),
@@ -660,53 +663,41 @@ function App() {
             />
           )}
 
-          <ControlBar
-            style={{ height: LAYOUT.CONTROL_BAR_HEIGHT, flexShrink: 0 }}
+          <FlyoutHeader
+            searchQuery={searchQuery}
+            onSearchChange={handleSearch}
+            contentFilter={contentFilter}
+            onContentFilterChange={(filter) => {
+              setContentFilter(filter);
+              setSelectedClipId(null);
+              setClipListResetToken((token) => token + 1);
+            }}
             folders={folders}
             selectedFolder={selectedFolder}
             onSelectFolder={handleSelectFolder}
-            showSearch={showSearch}
-            searchQuery={searchQuery}
-            onSearchChange={handleSearch}
-            onSearchClick={() => {
-              if (showSearch) {
-                handleSearch(''); // Clear search when closing
-              }
-              setShowSearch(!showSearch);
-            }}
-            onAddClick={() => {
+            onAddFolder={() => {
               setFolderModalMode('create');
               setNewFolderName('');
               setShowAddFolderModal(true);
             }}
-            onMoreClick={openSettings}
-            onMoveClip={handleMoveClip} // Legacy, but kept for interface
-            // Simulated Drag Props
-            isDragging={!!draggingClipId}
-            dragTargetFolderId={dragTargetFolderId}
-            onDragHover={handleDragHover}
-            onDragLeave={handleDragLeave}
-            totalClipCount={totalClipCount}
-            onFolderContextMenu={(e, folderId) => {
-              if (folderId) handleContextMenu(e, 'folder', folderId);
-            }}
-            theme={effectiveTheme}
+            onOpenSettings={openSettings}
           />
 
-          <main data-el="clip-list-area" className="no-scrollbar relative flex-1 overflow-hidden">
+          <main
+            data-el="clip-list-area"
+            className="no-scrollbar relative min-h-0 flex-1 overflow-hidden"
+          >
             <ClipList
-              clips={clips}
+              clips={visibleClips}
               isLoading={isLoading}
               hasMore={hasMore}
               resetToken={clipListResetToken}
+              density={density}
               selectedClipId={selectedClipId}
               onSelectClip={setSelectedClipId}
               onPaste={handlePaste}
               onCopy={handleCopy}
-              onDelete={handleDelete}
               onLoadMore={loadMore}
-              // Simulated Drag Props
-              onDragStart={startDrag}
               onCardContextMenu={(e, clipId) => handleContextMenu(e, 'card', clipId)}
             />
 
@@ -722,6 +713,35 @@ function App() {
               onSubmit={handleCreateOrRenameFolder}
             />
           </main>
+          <footer className="drag-area flex h-9 shrink-0 items-center border-t border-white/[0.07] px-3 text-[10px] text-muted-foreground">
+            <div className="flex min-w-0 items-center gap-2">
+              <span>{totalClipCount.toLocaleString()} items</span>
+              {pasteContext?.target_kind !== 'standard' && (
+                <>
+                  <span className="h-1 w-1 shrink-0 rounded-full bg-primary" />
+                  <span className="truncate text-foreground/75">
+                    {pasteContext?.target_kind === 'ninja'
+                      ? pasteContext.remote_paste_mode === 'copy_then_paste'
+                        ? t('pasteContext.ninjaCopy')
+                        : t('pasteContext.ninjaKeystrokes')
+                      : t('pasteContext.remote')}
+                  </span>
+                </>
+              )}
+            </div>
+            <div className="ml-auto flex items-center gap-3">
+              <span>
+                <kbd>Enter</kbd>{' '}
+                {pasteContext?.target_kind === 'ninja' &&
+                pasteContext.remote_paste_mode === 'copy_then_paste'
+                  ? t('pasteContext.copyAction')
+                  : t('contextMenu.paste')}
+              </span>
+              <span>
+                <kbd>Esc</kbd> Close
+              </span>
+            </div>
+          </footer>
           <Toaster richColors position="bottom-center" theme={effectiveTheme} />
         </div>
       </div>

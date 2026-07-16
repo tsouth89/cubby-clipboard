@@ -1,225 +1,254 @@
 import { ClipboardItem } from '../types';
 import { clsx } from 'clsx';
-import { useMemo, memo, useState, forwardRef } from 'react';
+import { memo, useMemo } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { useTranslation } from 'react-i18next';
-import { LAYOUT, COLUMN_WIDTH, PREVIEW_CHAR_LIMIT } from '../constants';
-import { Copy, Check } from 'lucide-react';
-import { useMotionValue, useMotionTemplate, motion } from 'framer-motion';
+import { Copy, File, Image as ImageIcon, MoreHorizontal } from 'lucide-react';
+import { formatDistanceToNowStrict } from 'date-fns';
+import { PREVIEW_CHAR_LIMIT } from '../constants';
 
 interface ClipCardProps {
   clip: ClipboardItem;
+  density: 'compact' | 'comfortable';
   isSelected: boolean;
   onSelect: () => void;
   onPaste: () => void;
   onCopy: () => void;
-  onDragStart: (clipId: string, startX: number, startY: number) => void;
   onContextMenu?: (e: React.MouseEvent) => void;
 }
 
-export const ClipCard = memo(
-  forwardRef<HTMLDivElement, ClipCardProps>(function ClipCard(
-    { clip, isSelected, onSelect, onPaste, onCopy, onDragStart, onContextMenu }: ClipCardProps,
-    ref
+interface ImageMetadata {
+  width?: number;
+  height?: number;
+  size_bytes?: number;
+}
+
+function sourceLabel(value: string | null, type: string) {
+  if (!value) return type === 'image' ? 'Image' : 'Clipboard';
+  return value.replace(/\.exe$/i, '');
+}
+
+function parseImageMetadata(metadata: string | null): ImageMetadata {
+  if (!metadata) return {};
+  try {
+    return JSON.parse(metadata) as ImageMetadata;
+  } catch {
+    return {};
+  }
+}
+
+function formatBytes(bytes?: number) {
+  if (!bytes || bytes <= 0) return null;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function contentKind(content: string, clipType: string) {
+  const trimmed = content.trim();
+  if (clipType === 'url' || /^https?:\/\/\S+$/i.test(trimmed)) return 'URL';
+  if (/^[A-Za-z]:[\\/]|^\\\\[^\\]+\\/.test(trimmed)) return 'Path';
+  if (
+    /(^|\n)\s*(?:const|let|var|function|class|interface|type|pub fn|fn|use|import|SELECT|UPDATE|INSERT|git |cargo |pnpm |npm |sudo |curl |cd )\b/m.test(
+      trimmed
+    )
   ) {
-    const { t } = useTranslation();
-    const [copied, setCopied] = useState(false);
-    const [hovered, setHovered] = useState(false);
-    const title = clip.source_app || clip.clip_type.toUpperCase();
+    return 'Code';
+  }
+  if (trimmed.includes('\n')) return 'Text';
+  return trimmed.length < 24 ? 'Snippet' : 'Text';
+}
 
-    const mouseX = useMotionValue(0);
-    const mouseY = useMotionValue(0);
+function imageLabel(source: string) {
+  return /snip|screen|capture/i.test(source) ? 'Screenshot' : 'Clipboard image';
+}
 
-    const imageSrc = useMemo(() => {
-      if (clip.clip_type !== 'image' || !clip.content) return null;
-      const value = clip.content;
-      const isAbsolutePath = value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value);
-      if (
-        value.startsWith('data:') ||
-        value.startsWith('http://') ||
-        value.startsWith('https://') ||
-        value.startsWith('asset:') ||
-        value.startsWith('tauri://')
-      ) {
-        return value;
-      }
-      if (isAbsolutePath) {
-        return convertFileSrc(value);
-      }
-      return `data:image/png;base64,${value}`;
-    }, [clip.clip_type, clip.content]);
+export const ClipCard = memo(function ClipCard({
+  clip,
+  density,
+  isSelected,
+  onSelect,
+  onPaste,
+  onCopy,
+  onContextMenu,
+}: ClipCardProps) {
+  const imageSrc = useMemo(() => {
+    if (clip.clip_type !== 'image' || !clip.content) return null;
+    const value = clip.content;
+    if (
+      value.startsWith('data:') ||
+      value.startsWith('http://') ||
+      value.startsWith('https://') ||
+      value.startsWith('asset:') ||
+      value.startsWith('tauri://')
+    ) {
+      return value;
+    }
+    if (value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value)) {
+      return convertFileSrc(value);
+    }
+    return `data:image/png;base64,${value}`;
+  }, [clip.clip_type, clip.content]);
 
-    const imageSizeKb = useMemo(() => {
-      if (clip.clip_type !== 'image') return 0;
-      try {
-        const parsed = clip.metadata
-          ? (JSON.parse(clip.metadata) as { size_bytes?: number })
-          : null;
-        if (parsed?.size_bytes && parsed.size_bytes > 0) {
-          return Math.round(parsed.size_bytes / 1024);
-        }
-      } catch {
-        // Ignore invalid metadata and fall back to zero.
-      }
-      return 0;
-    }, [clip.clip_type, clip.metadata]);
+  const age = useMemo(() => {
+    const parsed = new Date(clip.created_at);
+    if (Number.isNaN(parsed.getTime())) return '';
+    return formatDistanceToNowStrict(parsed, { addSuffix: true });
+  }, [clip.created_at]);
 
-    // Memoize the content rendering
-    const renderedContent = useMemo(() => {
-      if (clip.clip_type === 'image') {
-        return (
-          <div className="flex h-full w-full select-none items-center justify-center">
-            {clip.content ? (
-              <img
-                src={imageSrc ?? undefined}
-                alt="Clipboard Image"
-                className="max-h-full max-w-full object-contain"
-              />
-            ) : (
-              <span className="text-xs text-muted-foreground/70">Image</span>
-            )}
-          </div>
-        );
-      } else {
-        return (
-          <pre className="whitespace-pre-wrap break-all font-mono text-[13px] leading-tight text-foreground">
-            <span>{clip.content.substring(0, PREVIEW_CHAR_LIMIT)}</span>
-          </pre>
-        );
-      }
-    }, [clip.clip_type, clip.content, imageSrc]);
+  const label = sourceLabel(clip.source_app, clip.clip_type);
+  const preview = (clip.content || clip.preview)
+    .replace(/\r\n/g, '\n')
+    .replace(/\n[ \t]*\n+/g, '\n')
+    .trim();
+  const kind = contentKind(preview, clip.clip_type);
+  const imageMetadata = useMemo(() => parseImageMetadata(clip.metadata), [clip.metadata]);
+  const imageDetails = [
+    imageMetadata.width && imageMetadata.height
+      ? `${imageMetadata.width}×${imageMetadata.height}`
+      : null,
+    formatBytes(imageMetadata.size_bytes),
+  ].filter(Boolean);
+  const isCompact = density === 'compact';
 
-    // Generate stable color index based on source app name
-    const getAppColorIndex = (name: string) => {
-      let hash = 0;
-      for (let i = 0; i < name.length; i++) {
-        hash = name.charCodeAt(i) + ((hash << 5) - hash);
-      }
-      return Math.abs(hash) % 15;
-    };
-
-    const appHue = useMemo(() => {
-      const index = getAppColorIndex(title);
-      const hueStep = 360 / 15;
-      return Math.round(index * hueStep);
-    }, [title]);
-
-    const glowBackground = useMotionTemplate`radial-gradient(180px circle at ${mouseX}px ${mouseY}px, hsl(${appHue} 90% 64% / 0.9), transparent 65%)`;
-
-    const handleMouseDown = (e: React.MouseEvent) => {
-      // Only left click
-      if (e.button !== 0) return;
-      onDragStart(clip.id, e.clientX, e.clientY);
-    };
-
-    const handleContextMenu = (e: React.MouseEvent) => {
-      e.preventDefault();
-      onContextMenu?.(e);
-    };
-
-    const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-      const rect = e.currentTarget.getBoundingClientRect();
-      mouseX.set(e.clientX - rect.left);
-      mouseY.set(e.clientY - rect.top);
-    };
-
-    return (
-      <div
-        ref={ref}
-        data-el="clip-card"
-        data-clip-id={clip.id}
-        style={{
-          width: COLUMN_WIDTH - LAYOUT.CARD_GAP,
-          height: `calc(100% - ${LAYOUT.CARD_VERTICAL_PADDING * 2}px)`,
-        }}
-        className="flex-shrink-0"
-      >
+  return (
+    <article
+      data-el="clip-card"
+      data-clip-id={clip.id}
+      data-selected={isSelected}
+      role="listitem"
+      aria-current={isSelected ? 'true' : undefined}
+      onMouseEnter={onSelect}
+      onClick={onPaste}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        onContextMenu?.(event);
+      }}
+      className={clsx(
+        'group relative flex cursor-default select-none items-center overflow-hidden rounded-[10px] border transition-colors duration-100',
+        isCompact ? 'min-h-[72px] gap-2 px-2.5 py-2' : 'min-h-[92px] gap-2.5 px-3 py-2.5',
+        isSelected
+          ? 'border-white/[0.1] bg-white/[0.09]'
+          : 'border-transparent bg-white/[0.035] hover:border-white/[0.075] hover:bg-white/[0.065]'
+      )}
+    >
+      {isSelected && (
         <div
-          data-el="clip-card-inner"
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseEnter={() => setHovered(true)}
-          onMouseLeave={() => setHovered(false)}
-          onClick={onSelect}
-          onDoubleClick={onPaste}
-          onContextMenu={handleContextMenu}
-          style={
-            {
-              '--app-hue': `${appHue}`,
-              borderColor: isSelected ? `hsl(${appHue} 82% 60%)` : undefined,
-              borderWidth: isSelected ? '2px' : undefined,
-            } as React.CSSProperties
-          }
           className={clsx(
-            'relative flex h-full w-full cursor-pointer select-none flex-col overflow-hidden rounded-2xl border border-border bg-card/80 shadow-lg transition-all',
-            isSelected ? 'z-10 scale-[1.02] transform' : 'hover:-translate-y-1',
-            'group'
+            'absolute left-0 w-[3px] rounded-r bg-primary',
+            isCompact ? 'inset-y-2' : 'inset-y-2.5'
           )}
-        >
-          {/* Framer-motion spotlight border glow */}
-          {!isSelected && (
-            <motion.div
-              data-el="clip-card-glow"
-              className="pointer-events-none absolute -inset-px z-20 rounded-[17px] p-[2px]"
-              style={{
-                background: glowBackground,
-                WebkitMask: 'linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)',
-                WebkitMaskComposite: 'xor',
-                maskComposite: 'exclude',
-                opacity: hovered ? 1 : 0,
-                transition: 'opacity 200ms',
-              }}
-            />
-          )}
+        />
+      )}
 
-          <div
-            data-el="clip-card-header"
-            className="relative z-10 flex flex-shrink-0 items-center gap-2 px-2 py-1.5"
-            style={{ backgroundColor: `hsl(${appHue} 82% 60%)` }}
-          >
-            {clip.source_icon && (
-              <img
-                src={`data:image/png;base64,${clip.source_icon}`}
-                alt=""
-                className="h-4 w-4 object-contain"
-              />
-            )}
-            <span className="flex-1 truncate text-[11px] font-bold uppercase tracking-wider text-foreground">
-              {title}
-            </span>
-            <button
-              data-el="clip-card-copy-btn"
-              onClick={(e) => {
-                e.stopPropagation();
-                onCopy();
-                setCopied(true);
-                setTimeout(() => setCopied(false), 2000);
-              }}
-              className="rounded-md p-1 opacity-0 transition-all hover:bg-black/10 group-hover:opacity-100"
-              title="Copy to clipboard"
-            >
-              {copied ? (
-                <Check size={14} className="text-emerald-500" />
-              ) : (
-                <Copy size={14} className="text-foreground/70 hover:text-foreground" />
-              )}
-            </button>
-          </div>
-
-          <div data-el="clip-card-content" className="relative z-10 flex-1 overflow-hidden bg-card/90 p-2">
-            {renderedContent}
-            <div className="pointer-events-none absolute bottom-0 left-0 right-0 h-12 bg-gradient-to-t from-card/100 to-card/30" />
-          </div>
-
-          <div data-el="clip-card-footer" className="absolute bottom-0 left-0 right-0 z-10 bg-gradient-to-t from-card via-card/100 to-transparent/0 px-3 py-1.5">
-            <span className="text-[11px] font-medium text-muted-foreground/50">
-              {clip.clip_type === 'image'
-                ? t('clipList.imageSize', { size: imageSizeKb })
-                : t('clipList.textLength', { count: clip.content.length })}
-            </span>
-          </div>
-        </div>
+      <div
+        className={clsx(
+          'flex shrink-0 items-center justify-center overflow-hidden rounded-lg border border-white/[0.075] bg-black/15',
+          isCompact ? 'h-7 w-7' : 'h-8 w-8'
+        )}
+      >
+        {clip.source_icon ? (
+          <img
+            src={`data:image/png;base64,${clip.source_icon}`}
+            alt=""
+            className="h-[18px] w-[18px] object-contain"
+          />
+        ) : clip.clip_type === 'image' ? (
+          <ImageIcon size={16} className="text-muted-foreground" />
+        ) : (
+          <File size={15} className="text-muted-foreground" />
+        )}
       </div>
-    );
-  })
-);
+
+      <div className="min-w-0 flex-1">
+        {clip.clip_type === 'image' ? (
+          <div className="flex min-w-0 items-center gap-3">
+            <div
+              className={clsx(
+                'shrink-0 overflow-hidden rounded-lg border border-white/10 bg-black/20',
+                isCompact ? 'h-[52px] w-[92px]' : 'h-[68px] w-[120px]'
+              )}
+            >
+              {imageSrc ? (
+                <img src={imageSrc} alt="" className="h-full w-full object-cover" />
+              ) : (
+                <div className="flex h-full items-center justify-center">
+                  <ImageIcon size={20} className="text-muted-foreground" />
+                </div>
+              )}
+            </div>
+            <div className="min-w-0">
+              <p className="truncate text-[13px] font-medium text-foreground">
+                {imageLabel(label)}
+              </p>
+              {imageDetails.length > 0 && (
+                <p className="mt-1 truncate text-[11px] text-foreground/55">
+                  {imageDetails.join(' · ')}
+                </p>
+              )}
+              <p className="mt-1.5 truncate text-[11px] text-muted-foreground">
+                {label}
+                {age && <span className="px-1.5 text-muted-foreground/40">•</span>}
+                {age}
+              </p>
+            </div>
+          </div>
+        ) : (
+          <>
+            <p
+              className={clsx(
+                'whitespace-pre-wrap break-words text-[13px] text-foreground/95',
+                isCompact ? 'line-clamp-2 leading-[17px]' : 'line-clamp-3 leading-[18px]',
+                kind === 'Code' && 'font-mono text-[12px] leading-[17px] text-foreground/90'
+              )}
+            >
+              {preview.slice(0, PREVIEW_CHAR_LIMIT)}
+            </p>
+            <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+              <span className="truncate">{label}</span>
+              <span className="shrink-0 text-muted-foreground/35">•</span>
+              <span className="shrink-0 text-foreground/50">{kind}</span>
+              {age && (
+                <>
+                  <span className="shrink-0 text-muted-foreground/35">•</span>
+                  <span className="shrink-0">{age}</span>
+                </>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+
+      <div
+        className={clsx(
+          'absolute right-2 top-2 flex items-center gap-0.5 rounded-lg border border-white/[0.06] bg-[#202023]/95 p-0.5 shadow-lg transition-opacity',
+          isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+        )}
+      >
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onCopy();
+          }}
+          className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+          title="Copy"
+          aria-label="Copy clip"
+        >
+          <Copy size={13} />
+        </button>
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onContextMenu?.(event);
+          }}
+          className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+          title="More actions"
+          aria-label="More clip actions"
+        >
+          <MoreHorizontal size={14} />
+        </button>
+      </div>
+    </article>
+  );
+});

@@ -25,13 +25,21 @@ export interface Settings {
   startup_with_windows: boolean;
   show_in_taskbar: boolean;
   hotkey: string;
+  replace_win_v: boolean;
   theme: string;
   language?: string;
   mica_effect?: string;
   round_corners?: boolean;
   float_above_taskbar?: boolean;
+  density?: 'compact' | 'comfortable';
   auto_paste: boolean;
+  remote_paste_mode: 'copy_then_paste' | 'paste_as_keystrokes';
   ignore_ghost_clips: boolean;
+}
+
+export interface PasteContext {
+  target_kind: 'standard' | 'remote' | 'ninja';
+  remote_paste_mode: 'copy_then_paste' | 'paste_as_keystrokes';
 }
 
 export type ClipType = 'text' | 'image' | 'html' | 'rtf' | 'file' | 'url';

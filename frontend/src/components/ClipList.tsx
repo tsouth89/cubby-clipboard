@@ -1,22 +1,19 @@
-import { CSSProperties, useEffect, useMemo, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Grid, GridProps, useGridCallbackRef } from 'react-window';
 import { ClipboardItem } from '../types';
 import { ClipCard } from './ClipCard';
-import { COLUMN_WIDTH } from '../constants';
 
 interface ClipListProps {
   clips: ClipboardItem[];
   isLoading: boolean;
   hasMore: boolean;
   resetToken: number;
+  density: 'compact' | 'comfortable';
   selectedClipId: string | null;
   onSelectClip: (clipId: string) => void;
   onPaste: (clipId: string) => void;
   onCopy: (clipId: string) => void;
-  onDelete: (clipId: string) => void;
   onLoadMore: () => void;
-  onDragStart: (clipId: string, startX: number, startY: number) => void;
   onCardContextMenu?: (e: React.MouseEvent, clipId: string) => void;
 }
 
@@ -25,173 +22,79 @@ export function ClipList({
   isLoading,
   hasMore,
   resetToken,
+  density,
   selectedClipId,
   onSelectClip,
   onPaste,
   onCopy,
   onLoadMore,
-  onDragStart,
   onCardContextMenu,
 }: ClipListProps) {
   const { t } = useTranslation();
-  const [gridApi, setGridApi] = useGridCallbackRef();
-  const wheelTargetRef = useRef(0);
-  const wheelRafRef = useRef<number | null>(null);
-  const selectedClipIndex = useMemo(
-    () => (selectedClipId ? clips.findIndex((clip) => clip.id === selectedClipId) : -1),
-    [clips, selectedClipId]
-  );
+  const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (selectedClipIndex >= 0) {
-      gridApi?.scrollToColumn({
-        index: selectedClipIndex,
-        align: 'smart',
-        behavior: 'smooth',
-      });
-    }
-  }, [gridApi, selectedClipIndex]);
+    listRef.current?.scrollTo({ top: 0 });
+  }, [resetToken]);
 
   useEffect(() => {
-    if (wheelRafRef.current !== null) {
-      cancelAnimationFrame(wheelRafRef.current);
-      wheelRafRef.current = null;
-    }
-    wheelTargetRef.current = 0;
-
-    const element = gridApi?.element;
-    if (element) {
-      element.scrollLeft = 0;
-    }
-
-    gridApi?.scrollToColumn({
-      index: 0,
-      align: 'start',
-      behavior: 'auto',
-    });
-  }, [gridApi, resetToken]);
-
-  const handleWheel = (e: React.WheelEvent) => {
-    const element = gridApi?.element;
-    if (!element) return;
-
-    const rawDelta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-    if (rawDelta === 0) return;
-
-    e.preventDefault();
-
-    let deltaPx = rawDelta;
-    if (e.deltaMode === 1) {
-      deltaPx *= 16;
-    } else if (e.deltaMode === 2) {
-      deltaPx *= element.clientWidth;
-    }
-
-    // Smaller per-notch travel with a single RAF-driven animation target.
-    const scrollStep = deltaPx * 0.52;
-    const estimatedMax = Math.max(0, clips.length * COLUMN_WIDTH - element.clientWidth);
-    const measuredMax = Math.max(0, element.scrollWidth - element.clientWidth);
-    const maxScrollLeft = Math.max(estimatedMax, measuredMax);
-
-    const baseTarget = wheelRafRef.current === null ? element.scrollLeft : wheelTargetRef.current;
-    wheelTargetRef.current = Math.min(maxScrollLeft, Math.max(0, baseTarget + scrollStep));
-
-    if (wheelRafRef.current !== null) return;
-
-    const tick = () => {
-      const el = gridApi?.element;
-      if (!el) {
-        wheelRafRef.current = null;
-        return;
-      }
-
-      const diff = wheelTargetRef.current - el.scrollLeft;
-      if (Math.abs(diff) < 0.5) {
-        el.scrollLeft = wheelTargetRef.current;
-        wheelRafRef.current = null;
-        return;
-      }
-
-      el.scrollLeft += diff * 0.24;
-      wheelRafRef.current = requestAnimationFrame(tick);
-    };
-
-    wheelRafRef.current = requestAnimationFrame(tick);
-  };
-
-  useEffect(() => {
-    return () => {
-      if (wheelRafRef.current !== null) {
-        cancelAnimationFrame(wheelRafRef.current);
-      }
-    };
-  }, []);
-
-  const handleCellsRendered: GridProps<{}>['onCellsRendered'] = (_visibleCells, allCells) => {
-    if (!hasMore || isLoading) return;
-    if (allCells.columnStopIndex >= clips.length - 2) {
-      onLoadMore();
-    }
-  };
-
-  const Cell = ({ columnIndex, style }: { columnIndex: number; style: CSSProperties }) => {
-    const clip = clips[columnIndex];
-    if (!clip) return null;
-
-    return (
-      <div data-el="clip-cell" data-clip-id={clip.id} style={style} className="flex h-full items-center justify-center">
-        <ClipCard
-          clip={clip}
-          isSelected={selectedClipId === clip.id}
-          onSelect={() => onSelectClip(clip.id)}
-          onPaste={() => onPaste(clip.id)}
-          onCopy={() => onCopy(clip.id)}
-          onDragStart={onDragStart}
-          onContextMenu={(e: React.MouseEvent) => onCardContextMenu?.(e, clip.id)}
-        />
-      </div>
-    );
-  };
+    if (!selectedClipId) return;
+    listRef.current
+      ?.querySelector<HTMLElement>(`[data-clip-id="${CSS.escape(selectedClipId)}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  }, [selectedClipId]);
 
   if (isLoading && clips.length === 0) {
     return (
-      <div className="flex h-full w-full items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
-          <p className="text-sm text-muted-foreground">{t('clipList.loadingClips')}</p>
-        </div>
+      <div className="flex h-full items-center justify-center">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary/25 border-t-primary" />
       </div>
     );
   }
 
   if (clips.length === 0) {
     return (
-      <div className="flex h-full w-full flex-col items-center justify-center p-8 text-center">
-        <h3 className="mb-2 text-lg font-semibold text-gray-400">{t('clipList.empty')}</h3>
-        <p className="max-w-xs text-sm text-gray-500">{t('clipList.emptyDesc')}</p>
+      <div className="flex h-full flex-col items-center justify-center px-10 text-center">
+        <p className="text-sm font-medium text-foreground/80">{t('clipList.empty')}</p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('clipList.emptyDesc')}</p>
       </div>
     );
   }
 
   return (
-    <Grid
+    <div
+      ref={listRef}
       data-el="clip-list"
-      className="no-scrollbar h-full w-full flex-1 overflow-x-auto overflow-y-hidden"
-      defaultHeight={240}
-      defaultWidth={1000}
-      gridRef={setGridApi}
-      rowCount={1}
-      rowHeight="100%"
-      columnCount={clips.length}
-      columnWidth={COLUMN_WIDTH}
-      overscanCount={4}
-      cellComponent={({ columnIndex, style }) => <Cell columnIndex={columnIndex} style={style} />}
-      cellProps={{}}
-      onCellsRendered={handleCellsRendered}
-      onWheel={handleWheel}
-      style={{
-        scrollBehavior: 'auto',
+      role="list"
+      aria-label="Clipboard history"
+      className="no-scrollbar h-full overflow-y-auto px-2 pb-2"
+      onScroll={(event) => {
+        if (!hasMore || isLoading) return;
+        const element = event.currentTarget;
+        if (element.scrollHeight - element.scrollTop - element.clientHeight < 120) {
+          onLoadMore();
+        }
       }}
-    />
+    >
+      <div className="space-y-1.5">
+        {clips.map((clip) => (
+          <ClipCard
+            key={clip.id}
+            clip={clip}
+            density={density}
+            isSelected={selectedClipId === clip.id}
+            onSelect={() => onSelectClip(clip.id)}
+            onPaste={() => onPaste(clip.id)}
+            onCopy={() => onCopy(clip.id)}
+            onContextMenu={(event) => onCardContextMenu?.(event, clip.id)}
+          />
+        ))}
+      </div>
+      {isLoading && (
+        <div className="flex justify-center py-3">
+          <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary/25 border-t-primary" />
+        </div>
+      )}
+    </div>
   );
 }

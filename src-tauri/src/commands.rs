@@ -3,14 +3,11 @@ use tauri_plugin_clipboard_x::write_text;
 
 use crate::database::Database;
 use crate::models::{Clip, ClipboardItem, Folder, FolderItem};
-use crate::settings_manager::SettingsManager;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
 fn clip_to_list_item(clip: &Clip, image_path: Option<&str>) -> ClipboardItem {
     let content_str = if clip.clip_type == "image" {
@@ -399,23 +396,27 @@ pub async fn get_clip_detail(
     get_clip(id, db).await
 }
 
-#[tauri::command]
-pub async fn paste_clip(
-    id: String,
-    app: AppHandle,
-    window: tauri::WebviewWindow,
-    db: tauri::State<'_, Arc<Database>>,
+async fn restore_clip(
+    id: &str,
+    plain_text: bool,
+    should_paste: bool,
+    window: &tauri::WebviewWindow,
+    db: &Database,
 ) -> Result<(), String> {
     let pool = &db.pool;
 
     let clip: Option<Clip> = sqlx::query_as(r#"SELECT * FROM clips WHERE uuid = ?"#)
-        .bind(&id)
+        .bind(id)
         .fetch_optional(pool)
         .await
         .map_err(|e| e.to_string())?;
 
     match clip {
         Some(clip) => {
+            if plain_text && clip.clip_type == "image" {
+                return Err("Plain text is not available for image clips".to_string());
+            }
+
             // Synchronize clipboard access across the app
             let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
 
@@ -463,6 +464,10 @@ pub async fn paste_clip(
                     .await;
 
             if final_res.is_ok() {
+                let remote_paste_mode = window
+                    .state::<Arc<crate::settings_manager::SettingsManager>>()
+                    .get()
+                    .remote_paste_mode;
                 let content = if clip.clip_type == "image" {
                     "[Image]".to_string()
                 } else {
@@ -470,32 +475,53 @@ pub async fn paste_clip(
                 };
                 let _ = window.emit("clipboard-write", &content);
 
-                // Check auto_paste setting
-                let manager = app.state::<Arc<SettingsManager>>();
-                let settings = manager.get();
-                let auto_paste = settings.auto_paste;
-                log::info!("paste_clip: auto_paste={}", auto_paste);
-
-                if auto_paste {
-                    // Auto-Paste Logic
-                    // 1. Hide window immediately to trigger focus switch to previous app
+                if should_paste {
                     crate::animate_window_hide(
-                        &window,
+                        window,
                         Some(Box::new(move || {
-                            // 2. Callback executed AFTER window is hidden
-                            // Small buffer to ensure OS focus switch is complete
-                            std::thread::sleep(std::time::Duration::from_millis(200));
-                            crate::clipboard::send_paste_input();
+                            let strategy = crate::paste_engine::previous_paste_strategy();
+                            crate::restore_previous_foreground_window();
+                            if !crate::paste_engine::should_auto_paste_with_mode(
+                                strategy,
+                                &remote_paste_mode,
+                            ) {
+                                log::info!(
+                                    "PASTE: Ninja clipboard is ready; waiting for physical Ctrl+V"
+                                );
+                                return;
+                            }
+                            std::thread::sleep(crate::paste_engine::paste_settle_delay(strategy));
+                            crate::paste_engine::send_paste_input(strategy);
                         })),
                     );
                 } else {
-                    crate::animate_window_hide(&window, None);
+                    crate::animate_window_hide(window, None);
                 }
             }
             final_res
         }
         None => Err("Clip not found".to_string()),
     }
+}
+
+#[tauri::command]
+pub async fn paste_clip(
+    id: String,
+    plain_text: bool,
+    window: tauri::WebviewWindow,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<(), String> {
+    restore_clip(&id, plain_text, true, &window, db.inner()).await
+}
+
+#[tauri::command]
+pub async fn copy_clip(
+    id: String,
+    plain_text: bool,
+    window: tauri::WebviewWindow,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<(), String> {
+    restore_clip(&id, plain_text, false, &window, db.inner()).await
 }
 
 #[tauri::command]
@@ -888,39 +914,7 @@ pub async fn register_global_shortcut(
     hotkey: String,
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
-    use tauri_plugin_global_shortcut::ShortcutState;
-
-    let app = window.app_handle();
-    let shortcut = Shortcut::from_str(&hotkey).map_err(|e| format!("Invalid hotkey: {:?}", e))?;
-
-    if let Err(e) = app.global_shortcut().unregister_all() {
-        log::warn!("Failed to unregister existing shortcuts: {:?}", e);
-    }
-
-    let main_window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "Main window not found".to_string())?;
-
-    let win_clone = main_window.clone();
-    if let Err(e) = app
-        .global_shortcut()
-        .on_shortcut(shortcut, move |_app, _shortcut, event| {
-            if event.state() == ShortcutState::Pressed {
-                if win_clone.is_visible().unwrap_or(false)
-                    && win_clone.is_focused().unwrap_or(false)
-                {
-                    crate::animate_window_hide(&win_clone, None);
-                } else {
-                    crate::position_window_at_bottom(&win_clone);
-                }
-            }
-        })
-    {
-        return Err(format!("Failed to register hotkey: {:?}", e));
-    }
-
-    log::info!("Registered global shortcut: {}", hotkey);
-    Ok(())
+    crate::shortcuts::register_standard_shortcut(window.app_handle(), &hotkey)
 }
 
 #[tauri::command]
@@ -930,7 +924,7 @@ pub async fn refresh_window(app: AppHandle) -> Result<(), String> {
         crate::animate_window_hide(
             &win,
             Some(Box::new(move || {
-                crate::position_window_at_bottom(&win_for_show);
+                crate::position_window_near_cursor(&win_for_show);
             })),
         );
     }
@@ -958,7 +952,7 @@ pub async fn focus_window(app: AppHandle, label: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn show_window(window: tauri::WebviewWindow) -> Result<(), String> {
-    crate::position_window_at_bottom(&window);
+    crate::position_window_near_cursor(&window);
     Ok(())
 }
 
@@ -983,4 +977,36 @@ pub fn get_layout_config() -> serde_json::Value {
     serde_json::json!({
         "window_height": crate::constants::WINDOW_HEIGHT,
     })
+}
+
+#[tauri::command]
+pub fn get_paste_context(
+    settings: tauri::State<'_, Arc<crate::settings_manager::SettingsManager>>,
+) -> crate::paste_engine::PasteContext {
+    crate::paste_engine::paste_context(settings.get().remote_paste_mode)
+}
+
+#[tauri::command]
+pub fn get_system_accent_color() -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::UI::ViewManagement::{UIColorType, UISettings};
+
+        let settings = UISettings::new().map_err(|error| error.to_string())?;
+        let color = settings
+            .GetColorValue(UIColorType::Accent)
+            .map_err(|error| error.to_string())?;
+
+        Ok(serde_json::json!({
+            "red": color.R,
+            "green": color.G,
+            "blue": color.B,
+            "alpha": color.A,
+        }))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("System accent color is only available on Windows".to_string())
+    }
 }

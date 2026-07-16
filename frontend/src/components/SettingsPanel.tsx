@@ -8,7 +8,7 @@ import {
   Folder as FolderIcon,
   MoreHorizontal,
 } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useTheme } from '../hooks/useTheme';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
@@ -33,6 +33,8 @@ type Tab = 'general' | 'folders';
 export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPanelProps) {
   const [activeTab, setActiveTab] = useState<Tab>('general');
   const [settings, setSettings] = useState<Settings>(initialSettings);
+  const settingsRef = useRef<Settings>(initialSettings);
+  const settingsSaveQueue = useRef<Promise<void>>(Promise.resolve());
   const [_historySize, setHistorySize] = useState<number>(0);
   const [isRecordingMode, setIsRecordingMode] = useState(false);
   // Folder Management State
@@ -48,56 +50,45 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   const { i18n, t } = useTranslation();
 
   // Generic handler for immediate settings updates
-  const updateSettings = async (updates: Partial<Settings>) => {
-    // Determine the next state before updating React state
-    setSettings((prev) => {
-      const newSettings = { ...prev, ...updates };
-
-      // Schedule async actions - we use newSettings which is local to this scope
-      // This avoids race conditions with 'settings' variable
-      (async () => {
+  const updateSettings = (updates: Partial<Settings>) => {
+    settingsSaveQueue.current = settingsSaveQueue.current
+      .catch(() => undefined)
+      .then(async () => {
+        const newSettings = { ...settingsRef.current, ...updates };
         try {
           await invoke('save_settings', { settings: newSettings });
+          settingsRef.current = newSettings;
+          setSettings(newSettings);
           await emit('settings-changed', newSettings);
-
-          if (updates.hotkey) {
-            await invoke('register_global_shortcut', { hotkey: updates.hotkey });
-          }
-          if (
-            'round_corners' in updates ||
-            'mica_effect' in updates ||
-            'float_above_taskbar' in updates
-          ) {
+          if ('float_above_taskbar' in updates) {
             await invoke('refresh_window');
+          }
+
+          const keys = Object.keys(updates);
+          if (keys.length === 1) {
+            const key = keys[0] as keyof Settings;
+            const value = updates[key];
+            if (key !== 'theme') {
+              const label = key
+                .split('_')
+                .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+                .join(' ');
+              if (typeof value === 'boolean') {
+                toast.success(`${label} was ${value ? 'enabled' : 'disabled'}`);
+              } else {
+                toast.success(`${label} updated`);
+              }
+            }
+          } else if (keys.length > 1) {
+            toast.success('Settings updated');
           }
         } catch (error) {
           console.error(`Failed to save settings:`, error);
-          toast.error(`Failed to save settings`);
+          toast.error(String(error));
         }
-      })();
+      });
 
-      // Feedback for changes
-      const keys = Object.keys(updates);
-      if (keys.length === 1) {
-        const key = keys[0] as keyof Settings;
-        const value = updates[key];
-        if (key !== 'theme') {
-          const label = key
-            .split('_')
-            .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-            .join(' ');
-          if (typeof value === 'boolean') {
-            toast.success(`${label} was ${value ? 'enabled' : 'disabled'}`);
-          } else {
-            toast.success(`${label} updated`);
-          }
-        }
-      } else if (keys.length > 1) {
-        toast.success('Settings updated');
-      }
-
-      return newSettings;
-    });
+    return settingsSaveQueue.current;
   };
 
   const updateSetting = (key: keyof Settings, value: any) => {
@@ -396,14 +387,72 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         <span className="text-sm font-medium">{t('settings.windowEffect')}</span>
                       </label>
                       <Select
-                        value={settings.mica_effect || 'clear'}
+                        value={
+                          settings.mica_effect === 'clear'
+                            ? 'solid'
+                            : settings.mica_effect === 'mica_alt' || settings.mica_effect === 'auto'
+                              ? 'acrylic'
+                              : settings.mica_effect || 'solid'
+                        }
                         onChange={(val) => updateSetting('mica_effect', val)}
                         options={[
-                          { value: 'mica_alt', label: 'Mica Alt' },
+                          { value: 'solid', label: 'Solid' },
                           { value: 'mica', label: 'Mica' },
-                          { value: 'clear', label: 'Clear' },
+                          { value: 'acrylic', label: 'Acrylic' },
                         ]}
                       />
+                      <div className="grid grid-cols-3 gap-2 text-[11px] text-muted-foreground">
+                        <div className="rounded-lg border border-border bg-[#171719] px-2.5 py-2">
+                          <span className="block font-medium text-foreground">Solid</span>
+                          Maximum contrast
+                        </div>
+                        <div className="rounded-lg border border-white/[0.08] bg-background/80 px-2.5 py-2">
+                          <span className="block font-medium text-foreground">Mica</span>
+                          Subtle and native
+                        </div>
+                        <div className="rounded-lg border border-white/[0.12] bg-background/55 px-2.5 py-2 backdrop-blur-md">
+                          <span className="block font-medium text-foreground">Acrylic</span>
+                          Frosted and layered
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3">
+                      <div>
+                        <span className="text-sm font-medium">History density</span>
+                        <p className="text-xs text-muted-foreground">
+                          Choose larger previews or fit more clipboard items in the flyout.
+                        </p>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {(
+                          [
+                            ['comfortable', 'Comfortable', 'Larger previews and more context'],
+                            ['compact', 'Compact', 'More history visible at once'],
+                          ] as const
+                        ).map(([value, label, description]) => {
+                          const selected = (settings.density ?? 'comfortable') === value;
+                          return (
+                            <button
+                              key={value}
+                              type="button"
+                              onClick={() => updateSetting('density', value)}
+                              aria-pressed={selected}
+                              className={clsx(
+                                'rounded-lg border px-3 py-2.5 text-left transition-colors',
+                                selected
+                                  ? 'border-primary/60 bg-primary/10 text-foreground'
+                                  : 'border-border bg-accent/20 text-muted-foreground hover:border-primary/35 hover:text-foreground'
+                              )}
+                            >
+                              <span className="block text-xs font-medium">{label}</span>
+                              <span className="mt-0.5 block text-[11px] opacity-75">
+                                {description}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
 
                     <div className="flex items-center justify-between rounded-lg border border-border bg-accent/20 p-3">
@@ -466,23 +515,6 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                       >
                         <div
                           className={`h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${settings.startup_with_windows ? 'translate-x-5' : 'translate-x-0.5'}`}
-                        />
-                      </button>
-                    </div>
-
-                    <div className="flex items-center justify-between rounded-lg border border-border bg-accent/20 p-3">
-                      <div>
-                        <span className="text-sm font-medium">{t('settings.autoPaste')}</span>
-                        <p className="text-xs text-muted-foreground">
-                          {t('settings.autoPasteDesc')}
-                        </p>
-                      </div>
-                      <button
-                        onClick={() => updateSetting('auto_paste', !settings.auto_paste)}
-                        className={`h-6 w-11 rounded-full transition-colors ${settings.auto_paste ? 'bg-primary' : 'bg-accent'}`}
-                      >
-                        <div
-                          className={`h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${settings.auto_paste ? 'translate-x-5' : 'translate-x-0.5'}`}
                         />
                       </button>
                     </div>
@@ -555,6 +587,65 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                           </span>
                         </button>
                       )}
+                      <div className="flex items-center justify-between rounded-lg border border-border bg-accent/20 p-3">
+                        <div className="pr-4">
+                          <span className="text-sm font-medium">{t('settings.replaceWinV')}</span>
+                          <p className="text-xs text-muted-foreground">
+                            {t('settings.replaceWinVDesc')}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => updateSetting('replace_win_v', !settings.replace_win_v)}
+                          className={`h-6 w-11 shrink-0 rounded-full transition-colors ${settings.replace_win_v ? 'bg-primary' : 'bg-accent'}`}
+                          aria-label={t('settings.replaceWinV')}
+                        >
+                          <div
+                            className={`h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${settings.replace_win_v ? 'translate-x-5' : 'translate-x-0.5'}`}
+                          />
+                        </button>
+                      </div>
+                      <div className="rounded-lg border border-border bg-accent/20 p-3">
+                        <div>
+                          <span className="text-sm font-medium">
+                            {t('settings.remotePasteMode')}
+                          </span>
+                          <p className="text-xs text-muted-foreground">
+                            {t('settings.remotePasteModeDesc')}
+                          </p>
+                        </div>
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                          <button
+                            onClick={() => updateSetting('remote_paste_mode', 'copy_then_paste')}
+                            className={`rounded-md border px-3 py-2 text-left text-xs transition-colors ${
+                              settings.remote_paste_mode === 'copy_then_paste'
+                                ? 'border-primary bg-primary/10 text-foreground'
+                                : 'border-border bg-input text-muted-foreground hover:border-primary/60'
+                            }`}
+                          >
+                            <span className="block font-medium">
+                              {t('settings.remotePasteCopy')}
+                            </span>
+                            <span className="mt-1 block">{t('settings.remotePasteCopyDesc')}</span>
+                          </button>
+                          <button
+                            onClick={() =>
+                              updateSetting('remote_paste_mode', 'paste_as_keystrokes')
+                            }
+                            className={`rounded-md border px-3 py-2 text-left text-xs transition-colors ${
+                              settings.remote_paste_mode === 'paste_as_keystrokes'
+                                ? 'border-primary bg-primary/10 text-foreground'
+                                : 'border-border bg-input text-muted-foreground hover:border-primary/60'
+                            }`}
+                          >
+                            <span className="block font-medium">
+                              {t('settings.remotePasteKeystrokes')}
+                            </span>
+                            <span className="mt-1 block">
+                              {t('settings.remotePasteKeystrokesDesc')}
+                            </span>
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   </section>
 

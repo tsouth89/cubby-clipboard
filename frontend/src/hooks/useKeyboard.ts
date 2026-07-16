@@ -5,14 +5,19 @@ interface KeyboardOptions {
   onSearch?: () => void;
   onDelete?: () => void;
   onPin?: () => void;
-  onNavigateLeft?: () => void;
-  onNavigateRight?: () => void;
+  onNavigateUp?: () => void;
+  onNavigateDown?: () => void;
   onPaste?: () => void;
+  onCopy?: () => void;
 }
 
 export function useKeyboard(options: KeyboardOptions) {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isEditing =
+        target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
+
       if (e.key === 'Escape' && options.onClose) {
         e.preventDefault();
         options.onClose();
@@ -23,27 +28,30 @@ export function useKeyboard(options: KeyboardOptions) {
         options.onSearch();
       }
 
-      if (e.key === 'Delete' && options.onDelete) {
+      if (!isEditing && e.key === 'Delete' && options.onDelete) {
         e.preventDefault();
         options.onDelete();
       }
 
-      if (e.key === 'p' && !e.metaKey && !e.ctrlKey && options.onPin) {
+      if (!isEditing && e.key === 'p' && !e.metaKey && !e.ctrlKey && options.onPin) {
         e.preventDefault();
         options.onPin();
       }
 
-      if (e.key === 'ArrowLeft' && options.onNavigateLeft) {
+      if (!isEditing && e.key === 'ArrowUp' && options.onNavigateUp) {
         e.preventDefault();
-        options.onNavigateLeft();
+        options.onNavigateUp();
       }
 
-      if (e.key === 'ArrowRight' && options.onNavigateRight) {
+      if (!isEditing && e.key === 'ArrowDown' && options.onNavigateDown) {
         e.preventDefault();
-        options.onNavigateRight();
+        options.onNavigateDown();
       }
 
-      if (e.key === 'Enter' && options.onPaste) {
+      if (!isEditing && e.key === 'Enter' && (e.ctrlKey || e.metaKey) && options.onCopy) {
+        e.preventDefault();
+        options.onCopy();
+      } else if (!isEditing && e.key === 'Enter' && options.onPaste) {
         e.preventDefault();
         options.onPaste();
       }

@@ -13,11 +13,14 @@ pub struct AppSettings {
     pub max_items: i64,
     pub auto_delete_days: i64,
     pub hotkey: String,
+    pub replace_win_v: bool,
     pub auto_paste: bool,
+    pub remote_paste_mode: String,
     pub ignore_ghost_clips: bool,
     pub startup_with_windows: bool,
     pub round_corners: bool,
     pub float_above_taskbar: bool,
+    pub density: String,
 
     // Privacy
     pub ignored_apps: HashSet<String>,
@@ -27,16 +30,19 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             theme: "system".to_string(),
-            mica_effect: "clear".to_string(),
+            mica_effect: "solid".to_string(),
             language: "en".to_string(),
             max_items: 1000,
             auto_delete_days: 30,
-            hotkey: "Ctrl+Shift+V".to_string(),
+            hotkey: "Win+Alt+V".to_string(),
+            replace_win_v: true,
             auto_paste: false,
+            remote_paste_mode: "copy_then_paste".to_string(),
             ignore_ghost_clips: false,
             startup_with_windows: false,
-            round_corners: false,
+            round_corners: true,
             float_above_taskbar: true,
+            density: "comfortable".to_string(),
 
             ignored_apps: HashSet::new(),
         }
@@ -109,4 +115,35 @@ pub struct FolderItem {
     pub color: Option<String>,
     pub is_system: bool,
     pub item_count: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppSettings;
+
+    #[test]
+    fn existing_settings_keep_their_configured_shortcut() {
+        let settings: AppSettings = serde_json::from_str(
+            r#"{
+                "theme": "system",
+                "hotkey": "Ctrl+Shift+V"
+            }"#,
+        )
+        .expect("existing settings should remain readable");
+
+        assert_eq!(settings.hotkey, "Ctrl+Shift+V");
+        assert!(settings.replace_win_v);
+        assert_eq!(settings.remote_paste_mode, "copy_then_paste");
+        assert_eq!(settings.density, "comfortable");
+    }
+
+    #[test]
+    fn new_settings_use_win_alt_v() {
+        let settings = AppSettings::default();
+
+        assert_eq!(settings.hotkey, "Win+Alt+V");
+        assert!(settings.replace_win_v);
+        assert_eq!(settings.remote_paste_mode, "copy_then_paste");
+        assert_eq!(settings.density, "comfortable");
+    }
 }

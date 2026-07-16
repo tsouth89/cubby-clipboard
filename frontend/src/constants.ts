@@ -1,16 +1,11 @@
 export const LAYOUT = {
-  WINDOW_HEIGHT: 282, // keep sync with backend (constants.rs)
-  CONTROL_BAR_HEIGHT: 50,
-  CARD_WIDTH: 210,
-  CARD_GAP: 16,
-  SIDE_PADDING: 20,
-  CARD_VERTICAL_PADDING: 8,
-  PADDING_OPACITY: 0.2,
-  WINDOW_PADDING: 8, // In pixels
-  BLUR_AMOUNT: '8px', // Intensity of the blur
+  WINDOW_WIDTH: 520,
+  WINDOW_HEIGHT: 620,
+  MIN_WINDOW_HEIGHT: 300,
+  HEADER_HEIGHT: 112,
+  FOOTER_HEIGHT: 38,
+  ROW_GAP: 6,
+  WINDOW_PADDING: 10,
 };
 
-export const CLIP_LIST_HEIGHT = LAYOUT.WINDOW_HEIGHT - LAYOUT.CONTROL_BAR_HEIGHT;
-// Width of each virtual grid column cell = card width + gap between cards
-export const COLUMN_WIDTH = LAYOUT.CARD_WIDTH + LAYOUT.CARD_GAP;
-export const PREVIEW_CHAR_LIMIT = 300;
+export const PREVIEW_CHAR_LIMIT = 420;

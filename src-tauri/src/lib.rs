@@ -1,5 +1,5 @@
 use std::fs;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{
     image::Image,
@@ -9,18 +9,21 @@ use tauri::{
 };
 #[cfg(not(feature = "app-store"))]
 use tauri_plugin_autostart::MacosLauncher;
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 static IS_ANIMATING: AtomicBool = AtomicBool::new(false);
 static LAST_SHOW_TIME: AtomicI64 = AtomicI64::new(0);
+static SHOW_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 mod clipboard;
 mod commands;
 mod constants;
 mod database;
 mod models;
+pub mod paste_engine;
 mod settings_commands;
 mod settings_manager;
+mod shortcuts;
+mod win_v_replacement;
 
 use database::Database;
 use models::get_runtime;
@@ -163,29 +166,10 @@ pub fn run_app() {
                             return;
                         }
 
-                        // Check if cursor is on a different monitor
-                        let current_monitor = win.current_monitor().ok().flatten();
-                        let cursor_monitor = get_monitor_at_cursor(&win);
-                        let moved_screens =
-                            if let (Some(cm), Some(crm)) = (&current_monitor, &cursor_monitor) {
-                                cm.position().x != crm.position().x
-                                    || cm.position().y != crm.position().y
-                            } else {
-                                false
-                            };
-
-                        if moved_screens {
-                            // User clicked on another screen, move window there immediately
-                            position_window_at_bottom(&win);
-                            let _ = win.show();
-                            let _ = win.set_focus();
-                        } else {
-                            // Normal blur handling (hide)
-                            let win_clone = win.clone();
-                            std::thread::spawn(move || {
-                                crate::animate_window_hide(&win_clone, None);
-                            });
-                        }
+                        let win_clone = win.clone();
+                        std::thread::spawn(move || {
+                            crate::animate_window_hide(&win_clone, None);
+                        });
                     }
                 }
                 _ => {}
@@ -200,6 +184,10 @@ pub fn run_app() {
                 SettingsManager::new(app.handle(), &db_for_settings).await
             });
             app.manage(Arc::new(settings_manager));
+            let shortcut_manager =
+                win_v_replacement::WinVReplacementManager::new(app.handle().clone())
+                    .map_err(std::io::Error::other)?;
+            app.manage(Arc::new(shortcut_manager));
 
             log::info!("Database path: {}", db_path_str);
             if let Ok(log_dir) = app.path().app_log_dir() {
@@ -239,14 +227,14 @@ pub fn run_app() {
                         app.exit(0);
                     } else if event.id.as_ref() == "show" {
                         if let Some(win) = app.get_webview_window("main") {
-                            position_window_at_bottom(&win);
+                            position_window_near_cursor(&win);
                         }
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
                     if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
                         if let Some(win) = tray.app_handle().get_webview_window("main") {
-                            position_window_at_bottom(&win);
+                            position_window_near_cursor(&win);
                         }
                     }
                 })
@@ -279,31 +267,77 @@ pub fn run_app() {
                 crate::apply_window_effect(&win, &mica_effect, &current_theme, round_corners);
             }
 
-            // Load saved hotkey from database or use default
             let manager = app_handle.state::<Arc<SettingsManager>>();
-            let saved_hotkey = manager.get().hotkey;
+            let mut shortcut_settings = manager.get();
+            let mut shortcuts_ready = match shortcuts::register_shortcuts(
+                &app_handle,
+                &shortcut_settings.hotkey,
+                shortcut_settings.replace_win_v,
+            ) {
+                Ok(()) => true,
+                Err(error) => {
+                    log::error!("SHORTCUT: Startup registration failed: {}", error);
+                    let replacement_disabled = shortcut_settings.replace_win_v
+                        && shortcuts::register_shortcuts(
+                            &app_handle,
+                            &shortcut_settings.hotkey,
+                            false,
+                        )
+                        .is_ok();
 
-            log::info!("Registering hotkey: {}", saved_hotkey);
-
-            // Parse the hotkey string into a Shortcut
-            use std::str::FromStr;
-            use tauri_plugin_global_shortcut::Shortcut;
-
-            if let Ok(shortcut) = Shortcut::from_str(&saved_hotkey) {
-                let win_clone = win.clone();
-                let _ = app_handle.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
-                    if event.state() == ShortcutState::Pressed {
-                        if win_clone.is_visible().unwrap_or(false) && win_clone.is_focused().unwrap_or(false) {
-                            crate::animate_window_hide(&win_clone, None);
+                    let recovered = if replacement_disabled {
+                        shortcut_settings.replace_win_v = false;
+                        log::warn!("SHORTCUT: Disabled Win+V replacement after startup conflict");
+                        true
+                    } else {
+                        let fallback = "Win+Ctrl+Alt+V";
+                        if shortcut_settings.hotkey != fallback
+                            && shortcuts::register_shortcuts(&app_handle, fallback, false).is_ok()
+                        {
+                            shortcut_settings.hotkey = fallback.to_string();
+                            shortcut_settings.replace_win_v = false;
+                            log::warn!("SHORTCUT: Fell back to {}", fallback);
+                            true
                         } else {
-                            position_window_at_bottom(&win_clone);
+                            shortcut_settings.replace_win_v = false;
+                            log::error!("SHORTCUT: No startup shortcut could be registered");
+                            false
                         }
-                    }
-                });
-            } else {
-                log::error!("Failed to parse hotkey: {}", saved_hotkey);
-            }
+                    };
 
+                    if let Err(save_error) = manager.save(shortcut_settings.clone()) {
+                        log::error!(
+                            "SHORTCUT: Failed to persist recovered shortcut settings: {}",
+                            save_error
+                        );
+                    }
+                    recovered
+                }
+            };
+
+            let replacement =
+                app_handle.state::<Arc<win_v_replacement::WinVReplacementManager>>();
+            if !shortcuts_ready {
+                shortcut_settings.replace_win_v = false;
+            }
+            if let Err(error) =
+                replacement.configure(shortcuts_ready && shortcut_settings.replace_win_v)
+            {
+                log::error!("WIN_V: Startup failed: {}", error);
+                shortcut_settings.replace_win_v = false;
+                shortcuts_ready = shortcuts::register_shortcuts(
+                    &app_handle,
+                    &shortcut_settings.hotkey,
+                    false,
+                )
+                .is_ok();
+                if let Err(save_error) = manager.save(shortcut_settings.clone()) {
+                    log::error!("WIN_V: Failed to persist disabled state: {}", save_error);
+                }
+            }
+            if !shortcuts_ready {
+                log::error!("SHORTCUT: Cubby started without a working global shortcut");
+            }
             let handle_for_clip = app_handle.clone();
             let db_for_clip = db_for_clipboard.clone();
             clipboard::init(&handle_for_clip, db_for_clip);
@@ -324,6 +358,7 @@ pub fn run_app() {
             commands::get_clip,
             commands::get_clip_detail,
             commands::paste_clip,
+            commands::copy_clip,
             commands::delete_clip,
             commands::move_to_folder,
             commands::create_folder,
@@ -346,6 +381,8 @@ pub fn run_app() {
             settings_commands::get_ignored_apps,
             commands::pick_file,
             commands::get_layout_config,
+            commands::get_paste_context,
+            commands::get_system_accent_color,
             commands::test_log,
             commands::focus_window,
             commands::refresh_window
@@ -354,12 +391,11 @@ pub fn run_app() {
         .expect("error while running tauri application");
 }
 
-pub fn position_window_at_bottom(window: &tauri::WebviewWindow) {
+pub fn position_window_near_cursor(window: &tauri::WebviewWindow) {
     animate_window_show(window);
 }
 
 pub fn animate_window_show(window: &tauri::WebviewWindow) {
-    // Atomically check if false and set to true. If already true, return.
     if IS_ANIMATING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -368,69 +404,75 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
     }
 
     LAST_SHOW_TIME.store(chrono::Local::now().timestamp_millis(), Ordering::SeqCst);
+    let show_generation = SHOW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
     let window = window.clone();
-
-    let (side_margin, bottom_margin, float_above_taskbar) = {
+    let float_above_taskbar = {
         let manager = window.state::<Arc<crate::settings_manager::SettingsManager>>();
-        let s = manager.get();
-        let is_mica = s.mica_effect != "clear";
-        let no_corners = !s.round_corners;
-        let side = if is_mica && no_corners {
-            0.0
-        } else {
-            constants::WINDOW_MARGIN
-        };
-        let bottom = if is_mica && no_corners {
-            0.0
-        } else {
-            constants::WINDOW_MARGIN
-        };
-        (side, bottom, s.float_above_taskbar)
+        manager.get().float_above_taskbar
     };
+
+    remember_foreground_window(&window);
 
     std::thread::spawn(move || {
         if let Some(monitor) = get_monitor_at_cursor(&window) {
             let scale_factor = monitor.scale_factor();
-            let monitor_pos = monitor.position();
-            let monitor_size = monitor.size();
             let work_area = monitor.work_area();
+            let window_width_px = (constants::WINDOW_WIDTH * scale_factor) as u32;
+            let desired_height_px = (constants::WINDOW_HEIGHT * scale_factor) as u32;
+            let minimum_height_px = (constants::MIN_WINDOW_HEIGHT * scale_factor) as u32;
+            let margin_px = (constants::WINDOW_MARGIN * scale_factor) as i32;
+            let cursor_offset_px = (constants::CURSOR_OFFSET * scale_factor) as i32;
+            let cursor = cursor_position().unwrap_or(windows::Win32::Foundation::POINT {
+                x: work_area.position.x + work_area.size.width as i32 / 2,
+                y: work_area.position.y + work_area.size.height as i32 / 2,
+            });
 
-            let window_height_px = (constants::WINDOW_HEIGHT * scale_factor) as u32;
-            let side_margin_px = (side_margin * scale_factor) as i32;
-            let bottom_margin_px = (bottom_margin * scale_factor) as i32;
-
-            // Use full monitor height when floating above taskbar, otherwise work area
-            let reference_bottom = if float_above_taskbar {
-                monitor_pos.y + monitor_size.height as i32
+            let work_left = work_area.position.x + margin_px;
+            let work_top = work_area.position.y + margin_px;
+            let work_right = work_area.position.x + work_area.size.width as i32 - margin_px;
+            let work_bottom = work_area.position.y + work_area.size.height as i32 - margin_px;
+            let max_x = (work_right - window_width_px as i32).max(work_left);
+            let right_candidate = cursor.x + cursor_offset_px;
+            let left_candidate = cursor.x - cursor_offset_px - window_width_px as i32;
+            let mut target_x = if right_candidate + window_width_px as i32 <= work_right {
+                right_candidate
             } else {
-                work_area.position.y + work_area.size.height as i32
+                left_candidate
             };
 
+            let (target_y, window_height_px) = calculate_vertical_placement(
+                cursor.y,
+                work_top,
+                work_bottom,
+                desired_height_px,
+                minimum_height_px,
+                cursor_offset_px,
+            );
+
+            target_x = target_x.clamp(work_left, max_x);
+
             let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize {
-                width: work_area.size.width - (side_margin_px as u32 * 2),
+                width: window_width_px,
                 height: window_height_px,
             }));
-
-            let target_y = reference_bottom - window_height_px as i32 - bottom_margin_px;
-            let start_y = reference_bottom;
-
             let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                x: work_area.position.x + side_margin_px,
-                y: start_y,
+                x: target_x,
+                y: target_y,
             }));
-
             let _ = window.show();
             let _ = window.set_focus();
 
-            // When floating above taskbar, ensure window stays on top
-            if float_above_taskbar {
-                if let Ok(handle) = window.hwnd() {
-                    use windows::Win32::Foundation::HWND;
-                    use windows::Win32::UI::WindowsAndMessaging::{
-                        SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-                    };
-                    let hwnd = HWND(handle.0 as _);
+            suppress_native_window_frame(&window);
+
+            if let Ok(handle) = window.hwnd() {
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                };
+                let hwnd = HWND(handle.0 as _);
+
+                if float_above_taskbar {
                     let hwnd_topmost = HWND(-1 as _); // HWND_TOPMOST
                     unsafe {
                         let _ = SetWindowPos(
@@ -446,34 +488,51 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
                 }
             }
 
-            let steps = 15;
-            let duration = std::time::Duration::from_millis(10);
-            let dy = (target_y - start_y) as f64 / steps as f64;
-
-            for i in 1..=steps {
-                let current_y = start_y as f64 + dy * i as f64;
-                let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                    x: work_area.position.x + side_margin_px,
-                    y: current_y as i32,
-                }));
-                std::thread::sleep(duration);
-            }
-
-            // Ensure final position is exact
-            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                x: work_area.position.x + side_margin_px,
-                y: target_y,
-            }));
+            watch_for_outside_click(window.clone(), show_generation);
         }
         IS_ANIMATING.store(false, Ordering::SeqCst);
     });
+}
+
+fn remember_foreground_window(window: &tauri::WebviewWindow) {
+    #[cfg(target_os = "windows")]
+    {
+        let cubby_hwnd = window.hwnd().ok().map(|handle| handle.0 as isize);
+        if let Some(foreground) = paste_engine::remember_foreground_window(cubby_hwnd) {
+            log::debug!("FOCUS: remembered foreground window {foreground:#x}");
+        }
+    }
+}
+
+pub fn restore_previous_foreground_window() -> bool {
+    paste_engine::restore_previous_foreground_window()
+}
+
+fn suppress_native_window_frame(window: &tauri::WebviewWindow) {
+    let _ = window.set_shadow(false);
+
+    #[cfg(target_os = "windows")]
+    if let Ok(handle) = window.hwnd() {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
+
+        // DWMWA_COLOR_NONE prevents Windows 11 from drawing its focused accent border.
+        let border_color: u32 = 0xFFFF_FFFE;
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                HWND(handle.0 as _),
+                DWMWA_BORDER_COLOR,
+                &border_color as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
+    }
 }
 
 pub fn animate_window_hide(
     window: &tauri::WebviewWindow,
     on_done: Option<Box<dyn FnOnce() + Send>>,
 ) {
-    // Atomically check if false and set to true. If already true, return.
     if IS_ANIMATING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -481,61 +540,10 @@ pub fn animate_window_hide(
         return;
     }
 
-    let (side_margin, bottom_margin, float_above_taskbar) = {
-        let manager = window.state::<Arc<crate::settings_manager::SettingsManager>>();
-        let s = manager.get();
-        let is_mica = s.mica_effect != "clear";
-        let no_corners = !s.round_corners;
-        let side = if is_mica && no_corners {
-            0.0
-        } else {
-            constants::WINDOW_MARGIN
-        };
-        let bottom = if is_mica && no_corners {
-            0.0
-        } else {
-            constants::WINDOW_MARGIN
-        };
-        (side, bottom, s.float_above_taskbar)
-    };
-
     let window = window.clone();
 
     std::thread::spawn(move || {
-        if let Some(monitor) = window.current_monitor().ok().flatten() {
-            let scale_factor = monitor.scale_factor();
-            let monitor_pos = monitor.position();
-            let monitor_size = monitor.size();
-            let work_area = monitor.work_area();
-
-            let window_height_px = (constants::WINDOW_HEIGHT * scale_factor) as u32;
-            let side_margin_px = (side_margin * scale_factor) as i32;
-            let bottom_margin_px = (bottom_margin * scale_factor) as i32;
-
-            let reference_bottom = if float_above_taskbar {
-                monitor_pos.y + monitor_size.height as i32
-            } else {
-                work_area.position.y + work_area.size.height as i32
-            };
-
-            let start_y = reference_bottom - window_height_px as i32 - bottom_margin_px;
-            let target_y = reference_bottom;
-
-            let steps = 15;
-            let duration = std::time::Duration::from_millis(10);
-            let dy = (target_y - start_y) as f64 / steps as f64;
-
-            for i in 1..=steps {
-                let current_y = start_y as f64 + dy * i as f64;
-                let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                    x: work_area.position.x + side_margin_px,
-                    y: current_y as i32,
-                }));
-                std::thread::sleep(duration);
-            }
-
-            let _ = window.hide();
-        }
+        let _ = window.hide();
         IS_ANIMATING.store(false, Ordering::SeqCst);
 
         if let Some(callback) = on_done {
@@ -552,12 +560,91 @@ fn get_data_dir() -> std::path::PathBuf {
     }
 }
 
-pub fn get_monitor_at_cursor(window: &tauri::WebviewWindow) -> Option<tauri::Monitor> {
+fn cursor_position() -> Option<windows::Win32::Foundation::POINT> {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
     let mut point = POINT { x: 0, y: 0 };
+    unsafe { GetCursorPos(&mut point).is_ok().then_some(point) }
+}
+
+fn calculate_vertical_placement(
+    cursor_y: i32,
+    work_top: i32,
+    work_bottom: i32,
+    desired_height: u32,
+    minimum_height: u32,
+    cursor_offset: i32,
+) -> (i32, u32) {
+    let below_candidate = cursor_y + cursor_offset;
+    let available_below = (work_bottom - below_candidate).max(0) as u32;
+
+    if available_below >= minimum_height {
+        return (below_candidate, desired_height.min(available_below));
+    }
+
+    let available_above = (cursor_y - cursor_offset - work_top).max(minimum_height as i32) as u32;
+    let height = desired_height.min(available_above);
+    (
+        (cursor_y - cursor_offset - height as i32).max(work_top),
+        height,
+    )
+}
+
+fn point_is_inside_rect(
+    point: windows::Win32::Foundation::POINT,
+    rect: windows::Win32::Foundation::RECT,
+) -> bool {
+    point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
+}
+
+fn watch_for_outside_click(window: tauri::WebviewWindow, generation: u64) {
+    std::thread::spawn(move || {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+        let Ok(raw_handle) = window.hwnd() else {
+            return;
+        };
+        let hwnd = windows::Win32::Foundation::HWND(raw_handle.0 as _);
+        let mut buttons_were_down = false;
+
+        loop {
+            if SHOW_GENERATION.load(Ordering::SeqCst) != generation
+                || !window.is_visible().unwrap_or(false)
+            {
+                break;
+            }
+
+            let buttons_down = unsafe {
+                GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0
+                    || GetAsyncKeyState(VK_RBUTTON.0 as i32) < 0
+                    || GetAsyncKeyState(VK_MBUTTON.0 as i32) < 0
+            };
+
+            if buttons_down && !buttons_were_down {
+                if let Some(cursor) = cursor_position() {
+                    let mut rect = windows::Win32::Foundation::RECT::default();
+                    let has_rect = unsafe { GetWindowRect(hwnd, &mut rect).is_ok() };
+                    let is_inside = has_rect && point_is_inside_rect(cursor, rect);
+
+                    if !is_inside {
+                        animate_window_hide(&window, None);
+                        break;
+                    }
+                }
+            }
+
+            buttons_were_down = buttons_down;
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    });
+}
+
+pub fn get_monitor_at_cursor(window: &tauri::WebviewWindow) -> Option<tauri::Monitor> {
     let mut found = None;
-    if unsafe { GetCursorPos(&mut point).is_ok() } {
+    if let Some(point) = cursor_position() {
         if let Ok(monitors) = window.available_monitors() {
             for m in monitors {
                 let pos = m.position();
@@ -588,47 +675,125 @@ pub fn apply_window_effect(
         theme,
         round_corners
     );
-    use window_vibrancy::{apply_mica, apply_tabbed, clear_mica};
+    use window_vibrancy::{apply_acrylic, apply_mica, clear_acrylic, clear_mica, clear_tabbed};
+
+    // Keep WebView2's preferred color scheme and the native DWM material on the
+    // same resolved theme. This is especially important for Acrylic, whose
+    // Windows 11 transient backdrop otherwise may remain light while Cubby is dark.
+    if let Err(error) = window.set_theme(Some(*theme)) {
+        log::error!("THEME:Failed to set resolved window theme: {:?}", error);
+    }
 
     match effect {
-        "clear" => {
+        "solid" | "clear" => {
+            if let Err(e) = clear_acrylic(window) {
+                log::error!("THEME:Failed to clear acrylic: {:?}", e);
+            }
             if let Err(e) = clear_mica(window) {
                 log::error!("THEME:Failed to clear mica: {:?}", e);
             }
-            log::info!("THEME:Mica effect cleared");
+            if let Err(e) = clear_tabbed(window) {
+                log::error!("THEME:Failed to clear tabbed: {:?}", e);
+            }
+            log::info!("THEME:Window backdrop cleared for solid mode");
         }
         "mica" | "dark" => {
+            if let Err(e) = clear_acrylic(window) {
+                log::error!("THEME:Failed to clear acrylic: {:?}", e);
+            }
             if let Err(e) = clear_mica(window) {
                 log::error!("THEME:Failed to clear mica: {:?}", e);
+            }
+            if let Err(e) = clear_tabbed(window) {
+                log::error!("THEME:Failed to clear tabbed: {:?}", e);
             }
             if let Err(e) = apply_mica(window, Some(matches!(theme, tauri::Theme::Dark))) {
                 log::error!("THEME:Failed to apply mica: {:?}", e);
             }
             log::info!("THEME:Applied Mica effect (Theme: {})", theme);
         }
-        "mica_alt" | "auto" => {
+        "acrylic" | "mica_alt" | "auto" => {
+            if let Err(e) = clear_acrylic(window) {
+                log::error!("THEME:Failed to clear acrylic: {:?}", e);
+            }
             if let Err(e) = clear_mica(window) {
                 log::error!("THEME:Failed to clear mica: {:?}", e);
             }
-            if let Err(e) = apply_tabbed(window, Some(matches!(theme, tauri::Theme::Dark))) {
-                log::error!("THEME:Failed to apply tabbed: {:?}", e);
+            if let Err(e) = clear_tabbed(window) {
+                log::error!("THEME:Failed to clear tabbed: {:?}", e);
             }
-            log::info!("THEME:Applied Tabbed effect (Theme: {})", theme);
+            let tint = if matches!(theme, tauri::Theme::Dark) {
+                (18, 18, 20, 115)
+            } else {
+                (245, 245, 247, 115)
+            };
+            // clear_mica resets this attribute to light mode. Acrylic does not set it
+            // itself on Windows 11, so restore the active app theme before applying it.
+            if let Ok(handle) = window.hwnd() {
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::Graphics::Dwm::{
+                    DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                };
+                let hwnd = HWND(handle.0 as _);
+                let dark_mode = u32::from(matches!(theme, tauri::Theme::Dark));
+                unsafe {
+                    if let Err(error) = DwmSetWindowAttribute(
+                        hwnd,
+                        DWMWA_USE_IMMERSIVE_DARK_MODE,
+                        &dark_mode as *const _ as _,
+                        std::mem::size_of_val(&dark_mode) as u32,
+                    ) {
+                        log::error!(
+                            "THEME:Failed to set Acrylic immersive dark mode: {:?}",
+                            error
+                        );
+                    }
+                }
+            }
+            if let Err(e) = apply_acrylic(window, Some(tint)) {
+                log::error!("THEME:Failed to apply acrylic: {:?}", e);
+            }
+            // Some Windows 11 builds reset the immersive flag while changing the
+            // system backdrop type, so assert it again after Acrylic is active.
+            if let Ok(handle) = window.hwnd() {
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::Graphics::Dwm::{
+                    DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                };
+                let hwnd = HWND(handle.0 as _);
+                let dark_mode = u32::from(matches!(theme, tauri::Theme::Dark));
+                unsafe {
+                    if let Err(error) = DwmSetWindowAttribute(
+                        hwnd,
+                        DWMWA_USE_IMMERSIVE_DARK_MODE,
+                        &dark_mode as *const _ as _,
+                        std::mem::size_of_val(&dark_mode) as u32,
+                    ) {
+                        log::error!(
+                            "THEME:Failed to restore Acrylic immersive dark mode: {:?}",
+                            error
+                        );
+                    }
+                }
+            }
+            log::info!("THEME:Applied Acrylic effect (Theme: {})", theme);
         }
         _ => {
+            if let Err(e) = clear_acrylic(window) {
+                log::error!("THEME:Failed to clear acrylic: {:?}", e);
+            }
             if let Err(e) = clear_mica(window) {
                 log::error!("THEME:Failed to clear mica: {:?}", e);
             }
-            if let Err(e) = apply_tabbed(window, Some(matches!(theme, tauri::Theme::Dark))) {
-                log::error!("THEME:Failed to apply tabbed: {:?}", e);
+            if let Err(e) = clear_tabbed(window) {
+                log::error!("THEME:Failed to clear tabbed: {:?}", e);
             }
-            log::info!("THEME:Applied Tabbed effect (Theme: {})", theme);
+            log::info!("THEME:Unknown window effect; using solid mode");
         }
     }
 
-    // Apply DWM rounded corners on Windows 11.
-    // "clear" always rounds; Mica/Mica-Alt follow the user setting.
-    let use_rounded = effect == "clear" || round_corners;
+    // Keep the native window shape aligned with the frontend frame.
+    let use_rounded = round_corners;
     if let Ok(handle) = window.hwnd() {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::Graphics::Dwm::{
@@ -649,6 +814,8 @@ pub fn apply_window_effect(
             );
         }
     }
+
+    suppress_native_window_frame(window);
 }
 
 pub fn update_tray_icon(tray: &TrayIcon, theme: &tauri::Theme) {
@@ -658,5 +825,62 @@ pub fn update_tray_icon(tray: &TrayIcon, theme: &tauri::Theme) {
     };
     if let Ok(icon) = Image::from_bytes(icon_data) {
         let _ = tray.set_icon(Some(icon));
+    }
+}
+
+#[cfg(test)]
+mod flyout_tests {
+    use super::{calculate_vertical_placement, point_is_inside_rect};
+    use windows::Win32::Foundation::{POINT, RECT};
+
+    #[test]
+    fn opens_full_height_below_the_cursor_when_space_allows() {
+        assert_eq!(
+            calculate_vertical_placement(250, 12, 1392, 620, 300, 14),
+            (264, 620)
+        );
+    }
+
+    #[test]
+    fn shrinks_below_the_cursor_before_flipping_upward() {
+        assert_eq!(
+            calculate_vertical_placement(962, 12, 1392, 620, 300, 14),
+            (976, 416)
+        );
+    }
+
+    #[test]
+    fn flips_upward_only_when_too_little_space_remains_below() {
+        assert_eq!(
+            calculate_vertical_placement(1272, 12, 1392, 620, 300, 14),
+            (638, 620)
+        );
+    }
+
+    #[test]
+    fn detects_points_inside_the_flyout_rectangle() {
+        let rect = RECT {
+            left: 100,
+            top: 200,
+            right: 620,
+            bottom: 820,
+        };
+
+        assert!(point_is_inside_rect(POINT { x: 100, y: 200 }, rect));
+        assert!(point_is_inside_rect(POINT { x: 619, y: 819 }, rect));
+    }
+
+    #[test]
+    fn treats_edges_and_external_clicks_as_outside() {
+        let rect = RECT {
+            left: 100,
+            top: 200,
+            right: 620,
+            bottom: 820,
+        };
+
+        assert!(!point_is_inside_rect(POINT { x: 99, y: 400 }, rect));
+        assert!(!point_is_inside_rect(POINT { x: 620, y: 400 }, rect));
+        assert!(!point_is_inside_rect(POINT { x: 300, y: 820 }, rect));
     }
 }

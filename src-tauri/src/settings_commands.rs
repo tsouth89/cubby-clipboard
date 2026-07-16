@@ -35,7 +35,40 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
 
     // Preserve ignored_apps from current state (as frontend doesn't send it in this call)
     let current = manager.get();
-    new_settings.ignored_apps = current.ignored_apps;
+    new_settings.ignored_apps = current.ignored_apps.clone();
+
+    let shortcut_settings_changed = new_settings.hotkey != current.hotkey
+        || new_settings.replace_win_v != current.replace_win_v;
+    if shortcut_settings_changed {
+        crate::shortcuts::register_shortcuts(
+            &app,
+            &new_settings.hotkey,
+            new_settings.replace_win_v,
+        )?;
+    }
+
+    if new_settings.replace_win_v != current.replace_win_v {
+        let replacement = app.state::<Arc<crate::win_v_replacement::WinVReplacementManager>>();
+        if let Err(error) = replacement.configure(new_settings.replace_win_v) {
+            let _ =
+                crate::shortcuts::register_shortcuts(&app, &current.hotkey, current.replace_win_v);
+            let _ = replacement.configure(current.replace_win_v);
+            return Err(error);
+        }
+    }
+
+    // Persist the selection before applying non-critical visual side effects.
+    // This keeps the UI and settings file consistent even if Windows rejects
+    // a backdrop on the current system or window state.
+    if let Err(error) = manager.save(new_settings.clone()) {
+        if shortcut_settings_changed {
+            let _ =
+                crate::shortcuts::register_shortcuts(&app, &current.hotkey, current.replace_win_v);
+            let replacement = app.state::<Arc<crate::win_v_replacement::WinVReplacementManager>>();
+            let _ = replacement.configure(current.replace_win_v);
+        }
+        return Err(error);
+    }
 
     // Window effect
     let theme_str = new_settings.theme.clone();
@@ -53,13 +86,16 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
             } else if theme_str == "dark" {
                 tauri::Theme::Dark
             } else {
-                let mode = dark_light::detect().map_err(|e| {
-                    log::error!("save_settings: dark_light::detect() failed: {:?}", e);
-                    e.to_string()
-                })?;
-                match mode {
-                    Mode::Dark => tauri::Theme::Dark,
-                    _ => tauri::Theme::Light,
+                match dark_light::detect() {
+                    Ok(Mode::Dark) => tauri::Theme::Dark,
+                    Ok(_) => tauri::Theme::Light,
+                    Err(error) => {
+                        log::warn!(
+                            "save_settings: system theme detection failed, using window theme: {:?}",
+                            error
+                        );
+                        win.theme().unwrap_or(tauri::Theme::Dark)
+                    }
                 }
             };
             crate::apply_window_effect(&win, &mica_effect, &current_theme, round_corners);
@@ -89,7 +125,6 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
         new_settings.language,
         new_settings.theme
     );
-    manager.save(new_settings)?;
     Ok(())
 }
 
