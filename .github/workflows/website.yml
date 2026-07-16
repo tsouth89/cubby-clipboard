@@ -1,0 +1,33 @@
+name: Website
+
+on:
+  pull_request:
+    paths:
+      - 'product_pages/**'
+      - '.github/scripts/check-site.mjs'
+      - '.github/workflows/website.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'product_pages/**'
+      - '.github/scripts/check-site.mjs'
+      - '.github/workflows/website.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: 'website-${{ github.ref }}'
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: node .github/scripts/check-site.mjs

@@ -1,8 +1,0 @@
-title: Cubby Clipboard
-description: A better clipboard history for Windows 11
-url: "https://cubbyclipboard.com"
-baseurl: ""
-theme: null
-exclude:
-  - README.md
-  - GITHUB_PAGES_SETUP.md
