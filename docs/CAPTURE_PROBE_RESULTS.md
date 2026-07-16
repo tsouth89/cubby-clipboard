@@ -34,6 +34,24 @@ cargo run --locked --bin clipboard_probe -- --burst 100 --interval-ms 10 --timeo
 - Verify content remains available after disconnecting or closing the source session.
 - Move the proven event and retry behavior into Cubby's production capture engine.
 
+## NinjaOne remote-session validation
+
+Test date: 2026-07-16
+
+An interactive mixed-content run copied text and screenshots from a NinjaOne remote-control session:
+
+| Requested items | Clipboard events | Distinct text | Distinct images | Read failures | Result |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 20 | 24 | 16 | 4 | 0 | Pass |
+
+Command:
+
+```powershell
+cargo run --bin clipboard_probe -- --expect-items 20 --timeout-seconds 300
+```
+
+The probe reached the target without timing out. Four additional clipboard notifications did not contain a new distinct text or image payload and were correctly treated as remote synchronization churn.
+
 For a remote text run, use:
 
 ```powershell
