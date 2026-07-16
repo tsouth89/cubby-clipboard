@@ -82,6 +82,8 @@
     "hotkeyDesc": "Raccourci pour afficher ou masquer Cubby",
     "hotkeyPlaceholder": "Cliquez pour enregistrer...",
     "hotkeyRecording": "Appuyez sur les touches...",
+    "replaceWinV": "Remplacer le raccourci du presse-papiers Windows",
+    "replaceWinVDesc": "Cubby utilise Win+V, donc l'historique du presse-papiers Windows ne s'ouvre plus. Le sélecteur d'emoji reste disponible avec Win+Point.",
     "ignoredApps": "Applications ignorées",
     "ignoredAppsDesc": "Ne pas capturer le presse-papiers de ces applications",
     "noIgnoredApps": "Aucune application ignorée",

@@ -82,6 +82,8 @@
     "hotkeyDesc": "显示/隐藏 Cubby 的快捷键",
     "hotkeyPlaceholder": "点击以录制...",
     "hotkeyRecording": "按下按键...",
+    "replaceWinV": "替换 Windows 剪贴板快捷键",
+    "replaceWinVDesc": "Cubby 将接管 Win+V，因此不会打开 Windows 剪贴板历史记录。表情符号选择器仍可通过 Win+句点打开。",
     "ignoredApps": "忽略的应用",
     "ignoredAppsDesc": "不从这些应用捕获剪贴板",
     "noIgnoredApps": "没有忽略的应用",

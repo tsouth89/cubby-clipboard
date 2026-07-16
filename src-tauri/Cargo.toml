@@ -5,6 +5,7 @@ description = "A native-feeling clipboard history replacement for Windows 11"
 authors = ["SouthForge AI", "PastePaw contributors"]
 license = "GPL-3.0"
 edition = "2021"
+default-run = "cubby"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

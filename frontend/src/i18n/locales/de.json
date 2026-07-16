@@ -82,6 +82,8 @@
     "hotkeyDesc": "Tastenkombination zum Anzeigen oder Ausblenden von Cubby",
     "hotkeyPlaceholder": "Klicken, um aufzuzeichnen...",
     "hotkeyRecording": "Tasten drücken...",
+    "replaceWinV": "Windows-Zwischenablage ersetzen",
+    "replaceWinVDesc": "Cubby übernimmt Win+V, daher wird der Windows-Zwischenablageverlauf nicht geöffnet. Die Emoji-Auswahl bleibt mit Win+Punkt verfügbar.",
     "ignoredApps": "Ignorierte Anwendungen",
     "ignoredAppsDesc": "Zwischenablage dieser Anwendungen nicht erfassen",
     "noIgnoredApps": "Keine ignorierten Anwendungen",

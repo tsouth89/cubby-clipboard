@@ -13,6 +13,7 @@ pub struct AppSettings {
     pub max_items: i64,
     pub auto_delete_days: i64,
     pub hotkey: String,
+    pub replace_win_v: bool,
     pub auto_paste: bool,
     pub ignore_ghost_clips: bool,
     pub startup_with_windows: bool,
@@ -31,7 +32,8 @@ impl Default for AppSettings {
             language: "en".to_string(),
             max_items: 1000,
             auto_delete_days: 30,
-            hotkey: "Alt+V".to_string(),
+            hotkey: "Win+Alt+V".to_string(),
+            replace_win_v: true,
             auto_paste: false,
             ignore_ghost_clips: false,
             startup_with_windows: false,
@@ -126,12 +128,14 @@ mod tests {
         .expect("existing settings should remain readable");
 
         assert_eq!(settings.hotkey, "Ctrl+Shift+V");
+        assert!(settings.replace_win_v);
     }
 
     #[test]
-    fn new_settings_use_alt_v() {
+    fn new_settings_use_win_alt_v() {
         let settings = AppSettings::default();
 
-        assert_eq!(settings.hotkey, "Alt+V");
+        assert_eq!(settings.hotkey, "Win+Alt+V");
+        assert!(settings.replace_win_v);
     }
 }

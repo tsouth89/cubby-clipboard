@@ -21,6 +21,7 @@ mod models;
 mod settings_commands;
 mod settings_manager;
 mod shortcuts;
+mod win_v_replacement;
 
 use database::Database;
 use models::get_runtime;
@@ -200,6 +201,9 @@ pub fn run_app() {
                 SettingsManager::new(app.handle(), &db_for_settings).await
             });
             app.manage(Arc::new(settings_manager));
+            app.manage(Arc::new(
+                win_v_replacement::WinVReplacementManager::new(),
+            ));
 
             log::info!("Database path: {}", db_path_str);
             if let Ok(log_dir) = app.path().app_log_dir() {
@@ -280,25 +284,75 @@ pub fn run_app() {
             }
 
             let manager = app_handle.state::<Arc<SettingsManager>>();
-            let shortcut_settings = manager.get();
-            if let Err(error) =
-                shortcuts::register_standard_shortcut(&app_handle, &shortcut_settings.hotkey)
-            {
-                log::error!("SHORTCUT: Startup registration failed: {}", error);
-                let fallback = "Ctrl+Shift+V";
-                if shortcut_settings.hotkey != fallback
-                    && shortcuts::register_standard_shortcut(&app_handle, fallback).is_ok()
-                {
-                    let mut recovered = shortcut_settings.clone();
-                    recovered.hotkey = fallback.to_string();
-                    if let Err(save_error) = manager.save(recovered) {
+            let mut shortcut_settings = manager.get();
+            let mut shortcuts_ready = match shortcuts::register_shortcuts(
+                &app_handle,
+                &shortcut_settings.hotkey,
+                shortcut_settings.replace_win_v,
+            ) {
+                Ok(()) => true,
+                Err(error) => {
+                    log::error!("SHORTCUT: Startup registration failed: {}", error);
+                    let replacement_disabled = shortcut_settings.replace_win_v
+                        && shortcuts::register_shortcuts(
+                            &app_handle,
+                            &shortcut_settings.hotkey,
+                            false,
+                        )
+                        .is_ok();
+
+                    let recovered = if replacement_disabled {
+                        shortcut_settings.replace_win_v = false;
+                        log::warn!("SHORTCUT: Disabled Win+V replacement after startup conflict");
+                        true
+                    } else {
+                        let fallback = "Win+Ctrl+Alt+V";
+                        if shortcut_settings.hotkey != fallback
+                            && shortcuts::register_shortcuts(&app_handle, fallback, false).is_ok()
+                        {
+                            shortcut_settings.hotkey = fallback.to_string();
+                            shortcut_settings.replace_win_v = false;
+                            log::warn!("SHORTCUT: Fell back to {}", fallback);
+                            true
+                        } else {
+                            shortcut_settings.replace_win_v = false;
+                            log::error!("SHORTCUT: No startup shortcut could be registered");
+                            false
+                        }
+                    };
+
+                    if let Err(save_error) = manager.save(shortcut_settings.clone()) {
                         log::error!(
-                            "SHORTCUT: Failed to persist fallback shortcut: {}",
+                            "SHORTCUT: Failed to persist recovered shortcut settings: {}",
                             save_error
                         );
                     }
-                    log::warn!("SHORTCUT: Fell back to {}", fallback);
+                    recovered
                 }
+            };
+
+            let replacement =
+                app_handle.state::<Arc<win_v_replacement::WinVReplacementManager>>();
+            if !shortcuts_ready {
+                shortcut_settings.replace_win_v = false;
+            }
+            if let Err(error) =
+                replacement.configure(shortcuts_ready && shortcut_settings.replace_win_v)
+            {
+                log::error!("WIN_V: Startup failed: {}", error);
+                shortcut_settings.replace_win_v = false;
+                shortcuts_ready = shortcuts::register_shortcuts(
+                    &app_handle,
+                    &shortcut_settings.hotkey,
+                    false,
+                )
+                .is_ok();
+                if let Err(save_error) = manager.save(shortcut_settings.clone()) {
+                    log::error!("WIN_V: Failed to persist disabled state: {}", save_error);
+                }
+            }
+            if !shortcuts_ready {
+                log::error!("SHORTCUT: Cubby started without a working global shortcut");
             }
             let handle_for_clip = app_handle.clone();
             let db_for_clip = db_for_clipboard.clone();

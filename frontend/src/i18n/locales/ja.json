@@ -82,6 +82,8 @@
     "hotkeyDesc": "Cubby を表示または非表示にするショートカット",
     "hotkeyPlaceholder": "クリックして記録...",
     "hotkeyRecording": "キーを押してください...",
+    "replaceWinV": "Windows のクリップボードショートカットを置き換える",
+    "replaceWinVDesc": "Cubby が Win+V を使用するため、Windows のクリップボード履歴は開きません。絵文字ピッカーは Win+ピリオドで引き続き利用できます。",
     "ignoredApps": "除外するアプリ",
     "ignoredAppsDesc": "これらのアプリからはクリップボードを取得しません",
     "noIgnoredApps": "除外するアプリはありません",

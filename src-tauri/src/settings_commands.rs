@@ -37,8 +37,24 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
     let current = manager.get();
     new_settings.ignored_apps = current.ignored_apps.clone();
 
-    if new_settings.hotkey != current.hotkey {
-        crate::shortcuts::register_standard_shortcut(&app, &new_settings.hotkey)?;
+    let shortcut_settings_changed = new_settings.hotkey != current.hotkey
+        || new_settings.replace_win_v != current.replace_win_v;
+    if shortcut_settings_changed {
+        crate::shortcuts::register_shortcuts(
+            &app,
+            &new_settings.hotkey,
+            new_settings.replace_win_v,
+        )?;
+    }
+
+    if new_settings.replace_win_v != current.replace_win_v {
+        let replacement = app.state::<Arc<crate::win_v_replacement::WinVReplacementManager>>();
+        if let Err(error) = replacement.configure(new_settings.replace_win_v) {
+            let _ =
+                crate::shortcuts::register_shortcuts(&app, &current.hotkey, current.replace_win_v);
+            let _ = replacement.configure(current.replace_win_v);
+            return Err(error);
+        }
     }
 
     // Window effect
@@ -94,7 +110,12 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
         new_settings.theme
     );
     if let Err(error) = manager.save(new_settings) {
-        let _ = crate::shortcuts::register_standard_shortcut(&app, &current.hotkey);
+        if shortcut_settings_changed {
+            let _ =
+                crate::shortcuts::register_shortcuts(&app, &current.hotkey, current.replace_win_v);
+            let replacement = app.state::<Arc<crate::win_v_replacement::WinVReplacementManager>>();
+            let _ = replacement.configure(current.replace_win_v);
+        }
         let _ = manager.save(current);
         return Err(error);
     }

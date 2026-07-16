@@ -82,6 +82,8 @@
     "hotkeyDesc": "Shortcut to show or hide Cubby",
     "hotkeyPlaceholder": "Click to record...",
     "hotkeyRecording": "Press keys...",
+    "replaceWinV": "Replace Windows clipboard shortcut",
+    "replaceWinVDesc": "Cubby takes over Win+V, so Windows Clipboard History will not open. Emoji picker remains available with Win+Period.",
     "ignoredApps": "Ignored Applications",
     "ignoredAppsDesc": "Don't capture clipboard from these apps",
     "noIgnoredApps": "No ignored applications",

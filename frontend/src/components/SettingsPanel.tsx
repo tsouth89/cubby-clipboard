@@ -550,6 +550,25 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                           </span>
                         </button>
                       )}
+                      <div className="flex items-center justify-between rounded-lg border border-border bg-accent/20 p-3">
+                        <div className="pr-4">
+                          <span className="text-sm font-medium">
+                            {t('settings.replaceWinV')}
+                          </span>
+                          <p className="text-xs text-muted-foreground">
+                            {t('settings.replaceWinVDesc')}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => updateSetting('replace_win_v', !settings.replace_win_v)}
+                          className={`h-6 w-11 shrink-0 rounded-full transition-colors ${settings.replace_win_v ? 'bg-primary' : 'bg-accent'}`}
+                          aria-label={t('settings.replaceWinV')}
+                        >
+                          <div
+                            className={`h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${settings.replace_win_v ? 'translate-x-5' : 'translate-x-0.5'}`}
+                          />
+                        </button>
+                      </div>
                     </div>
                   </section>
 
