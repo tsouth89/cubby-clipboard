@@ -3,7 +3,7 @@
     windows_subsystem = "windows"
 )]
 
-use PastePaw::run_app;
+use cubby::run_app;
 
 fn main() {
     run_app();

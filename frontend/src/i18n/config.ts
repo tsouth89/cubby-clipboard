@@ -38,7 +38,7 @@ i18n
     detection: {
       order: ['localStorage', 'navigator'],
       caches: ['localStorage'],
-      lookupLocalStorage: 'pastepaw_language',
+      lookupLocalStorage: 'cubby_language',
     },
   });
 

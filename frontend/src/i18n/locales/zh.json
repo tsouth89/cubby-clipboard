@@ -79,7 +79,7 @@
     "ignoreGhostClips": "忽略临时剪贴",
     "ignoreGhostClipsDesc": "忽略临时剪贴板项目",
     "hotkey": "全局快捷键",
-    "hotkeyDesc": "显示/隐藏 PastePaw 的快捷键",
+    "hotkeyDesc": "显示/隐藏 Cubby 的快捷键",
     "hotkeyPlaceholder": "点击以录制...",
     "hotkeyRecording": "按下按键...",
     "ignoredApps": "忽略的应用",

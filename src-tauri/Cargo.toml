@@ -1,8 +1,8 @@
 [package]
-name = "PastePaw"
-version = "1.3.7"
-description = "A beautiful clipboard history manager"
-authors = ["XueshiQiao"]
+name = "cubby"
+version = "0.1.0"
+description = "A native-feeling clipboard history replacement for Windows 11"
+authors = ["SouthForge AI", "PastePaw contributors"]
 license = "GPL-3.0"
 edition = "2021"
 
@@ -28,15 +28,11 @@ once_cell = "1"
 base64 = "0.22.1"
 tauri-plugin-autostart = "2"
 tauri-plugin-log = "2.8.0"
-tauri-plugin-updater = "2"
-tauri-plugin-process = "2"
-tauri-plugin-aptabase = "1"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-notification = "2"
 log = "0.4.29"
 window-vibrancy = { git = "https://github.com/XueshiQiao/window-vibrancy.git" }
-reqwest = { version = "0.13.1", features = ["json"] }
 dark-light = "2.0.0"
 tauri-plugin-clipboard-x = "2.0.1"
 tauri-plugin-dialog = "2"

@@ -19,20 +19,6 @@ pub struct AppSettings {
     pub round_corners: bool,
     pub float_above_taskbar: bool,
 
-    // AI
-    pub ai_provider: String,
-    pub ai_api_key: String,
-    pub ai_model: String,
-    pub ai_base_url: String,
-    pub ai_prompt_summarize: String,
-    pub ai_prompt_translate: String,
-    pub ai_prompt_explain_code: String,
-    pub ai_prompt_fix_grammar: String,
-    pub ai_title_summarize: String,
-    pub ai_title_translate: String,
-    pub ai_title_explain_code: String,
-    pub ai_title_fix_grammar: String,
-
     // Privacy
     pub ignored_apps: HashSet<String>,
 }
@@ -51,21 +37,6 @@ impl Default for AppSettings {
             startup_with_windows: false,
             round_corners: false,
             float_above_taskbar: true,
-
-            ai_provider: "openai".to_string(),
-            ai_api_key: "".to_string(),
-            ai_model: "gpt-3.5-turbo".to_string(),
-            ai_base_url: "https://api.openai.com/v1".to_string(),
-
-            ai_prompt_summarize: "Summarize this content concisely.".to_string(),
-            ai_prompt_translate: "Translate this to English (or user language).".to_string(),
-            ai_prompt_explain_code: "Explain this code snippet.".to_string(),
-            ai_prompt_fix_grammar: "Fix grammar and spelling.".to_string(),
-
-            ai_title_summarize: "Summarize".to_string(),
-            ai_title_translate: "Translate".to_string(),
-            ai_title_explain_code: "Explain Code".to_string(),
-            ai_title_fix_grammar: "Fix Grammar".to_string(),
 
             ignored_apps: HashSet::new(),
         }

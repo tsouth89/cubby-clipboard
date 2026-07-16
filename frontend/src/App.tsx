@@ -9,7 +9,6 @@ import { ControlBar } from './components/ControlBar';
 import { DragPreview } from './components/DragPreview';
 import { ContextMenu } from './components/ContextMenu';
 import { FolderModal } from './components/FolderModal';
-import { AiResultDialog } from './components/AiResultDialog';
 import { useKeyboard } from './hooks/useKeyboard';
 import { useTheme } from './hooks/useTheme';
 import { useLanguage } from './hooks/useLanguage';
@@ -557,30 +556,6 @@ function App() {
   const [folderModalMode, setFolderModalMode] = useState<'create' | 'rename'>('create');
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
 
-  // AI Result State
-  const [aiResult, setAiResult] = useState({
-    isOpen: false,
-    title: '',
-    content: '',
-  });
-
-  const handleAiAction = async (clipId: string, action: string, title: string) => {
-    try {
-      const toastId = toast.loading(t('ai.processing'));
-      const result = await invoke<string>('ai_process_clip', { clipId, action });
-      toast.dismiss(toastId);
-      setAiResult({
-        isOpen: true,
-        title,
-        content: result,
-      });
-    } catch (error) {
-      toast.dismiss();
-      console.error('AI Processing Failed:', error);
-      toast.error(t('ai.error', { error: String(error) }));
-    }
-  };
-
   const handleContextMenu = useCallback(
     (e: React.MouseEvent, type: 'card' | 'folder', itemId: string) => {
       e.preventDefault();
@@ -642,10 +617,7 @@ function App() {
         data-el="app-window"
         className={`relative h-full w-full overflow-hidden ${settings?.mica_effect === 'clear' ? 'bg-background/95' : ''}`}
       >
-        <div
-          data-el="app-frame"
-          className="flex h-full w-full flex-col font-sans text-foreground"
-        >
+        <div data-el="app-frame" className="flex h-full w-full flex-col font-sans text-foreground">
           {draggingClipId && (
             <DragPreview
               clip={clips.find((c) => c.id === draggingClipId)!}
@@ -661,30 +633,6 @@ function App() {
               options={
                 contextMenu.type === 'card'
                   ? [
-                      {
-                        label: `${settings?.ai_title_summarize || t('contextMenu.summarize')}`,
-                        onClick: () =>
-                          handleAiAction(contextMenu.itemId, 'summarize', t('ai.summary')),
-                      },
-                      {
-                        label: `${settings?.ai_title_translate || t('contextMenu.translate')}`,
-                        onClick: () =>
-                          handleAiAction(contextMenu.itemId, 'translate', t('ai.translation')),
-                      },
-                      {
-                        label: `${settings?.ai_title_explain_code || t('contextMenu.explainCode')}`,
-                        onClick: () =>
-                          handleAiAction(
-                            contextMenu.itemId,
-                            'explain_code',
-                            t('ai.codeExplanation')
-                          ),
-                      },
-                      {
-                        label: `${settings?.ai_title_fix_grammar || t('contextMenu.fixGrammar')}`,
-                        onClick: () =>
-                          handleAiAction(contextMenu.itemId, 'fix_grammar', t('ai.grammarCheck')),
-                      },
                       {
                         label: t('contextMenu.delete'),
                         danger: true,
@@ -772,13 +720,6 @@ function App() {
                 setNewFolderName('');
               }}
               onSubmit={handleCreateOrRenameFolder}
-            />
-
-            <AiResultDialog
-              isOpen={aiResult.isOpen}
-              title={aiResult.title}
-              content={aiResult.content}
-              onClose={() => setAiResult((prev) => ({ ...prev, isOpen: false }))}
             />
           </main>
           <Toaster richColors position="bottom-center" theme={effectiveTheme} />
