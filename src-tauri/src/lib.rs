@@ -677,6 +677,13 @@ pub fn apply_window_effect(
     );
     use window_vibrancy::{apply_acrylic, apply_mica, clear_acrylic, clear_mica, clear_tabbed};
 
+    // Keep WebView2's preferred color scheme and the native DWM material on the
+    // same resolved theme. This is especially important for Acrylic, whose
+    // Windows 11 transient backdrop otherwise may remain light while Cubby is dark.
+    if let Err(error) = window.set_theme(Some(*theme)) {
+        log::error!("THEME:Failed to set resolved window theme: {:?}", error);
+    }
+
     match effect {
         "solid" | "clear" => {
             if let Err(e) = clear_acrylic(window) {
@@ -745,6 +752,29 @@ pub fn apply_window_effect(
             }
             if let Err(e) = apply_acrylic(window, Some(tint)) {
                 log::error!("THEME:Failed to apply acrylic: {:?}", e);
+            }
+            // Some Windows 11 builds reset the immersive flag while changing the
+            // system backdrop type, so assert it again after Acrylic is active.
+            if let Ok(handle) = window.hwnd() {
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::Graphics::Dwm::{
+                    DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                };
+                let hwnd = HWND(handle.0 as _);
+                let dark_mode = u32::from(matches!(theme, tauri::Theme::Dark));
+                unsafe {
+                    if let Err(error) = DwmSetWindowAttribute(
+                        hwnd,
+                        DWMWA_USE_IMMERSIVE_DARK_MODE,
+                        &dark_mode as *const _ as _,
+                        std::mem::size_of_val(&dark_mode) as u32,
+                    ) {
+                        log::error!(
+                            "THEME:Failed to restore Acrylic immersive dark mode: {:?}",
+                            error
+                        );
+                    }
+                }
             }
             log::info!("THEME:Applied Acrylic effect (Theme: {})", theme);
         }

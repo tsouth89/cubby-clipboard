@@ -72,7 +72,7 @@ function App() {
     windowEffect === 'solid'
       ? 'bg-[#171719]'
       : windowEffect === 'acrylic'
-        ? 'bg-background/[0.10]'
+        ? 'bg-background/[0.58]'
         : 'bg-background/[0.08]';
 
   const appWindow = getCurrentWindow();
