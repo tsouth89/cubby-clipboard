@@ -20,6 +20,16 @@ Cubby began as a fork of [PastePaw](https://github.com/XueshiQiao/PastePaw), whi
 
 The inherited shell is being evaluated against a WinUI 3 prototype. Tauri is not a permanent architecture decision; Cubby will use the option that best meets the Windows focus, accessibility, rendering, performance, and packaging requirements.
 
+## Relationship to Win+V
+
+Cubby is designed as a focused replacement for Windows Clipboard History, not for every panel bundled into the Windows `Win+V` surface.
+
+- Cubby uses `Win+V` by default and can release it in Settings. `Win+Period` remains the Windows shortcut for emoji, GIF, kaomoji, and symbol pickers.
+- Selecting a clip pastes it into the previously focused app. In supported remote-control tools, Cubby may restore the synchronized clipboard and ask for a final `Ctrl+V` so large logs are not typed character by character.
+- Clearing history preserves pinned clips by default. A separate confirmed action clears everything, including pins.
+- History is local, searchable, and intended to extend well beyond Windows Clipboard History's short retention window.
+- Cloud sync is intentionally absent until it can be offered with clear privacy and encryption guarantees.
+
 ## Development
 
 Requirements:

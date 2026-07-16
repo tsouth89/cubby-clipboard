@@ -15,6 +15,17 @@
   "clipList": {
     "empty": "No clips yet",
     "emptyDesc": "Copy something to your clipboard and it will appear here.",
+    "noMatches": "No matching clips",
+    "noMatchesDesc": "Try a different search or clear the current filters.",
+    "emptyFolder": "This folder is empty",
+    "emptyFolderDesc": "Move a clip here or choose another folder.",
+    "noImages": "No images in this view",
+    "noImagesDesc": "Copy an image or switch back to All.",
+    "noText": "No text in this view",
+    "noTextDesc": "Copy some text or switch back to All.",
+    "loadFailed": "Couldn’t load clipboard history",
+    "loadFailedDesc": "Cubby kept your data. Try loading it again.",
+    "retry": "Try again",
     "loadingClips": "Loading clips...",
     "imageSize": "Image ({{size}}KB)",
     "textLength": "{{count}} characters"
