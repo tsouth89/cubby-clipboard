@@ -390,8 +390,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         value={
                           settings.mica_effect === 'clear'
                             ? 'solid'
-                            : settings.mica_effect === 'mica_alt' ||
-                                settings.mica_effect === 'auto'
+                            : settings.mica_effect === 'mica_alt' || settings.mica_effect === 'auto'
                               ? 'acrylic'
                               : settings.mica_effect || 'solid'
                         }

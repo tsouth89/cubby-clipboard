@@ -81,9 +81,7 @@ function App() {
       : windowEffect === 'mica'
         ? 'border-white/[0.10]'
         : 'border-white/[0.09]';
-  const windowGeometry = hasRoundedCorners
-    ? 'p-2'
-    : 'p-0';
+  const windowGeometry = hasRoundedCorners ? 'p-2' : 'p-0';
   const windowShape = hasRoundedCorners
     ? 'rounded-[10px] shadow-[0_24px_80px_rgba(0,0,0,0.48),0_6px_24px_rgba(0,0,0,0.32)]'
     : 'rounded-none shadow-none';
@@ -595,10 +593,7 @@ function App() {
         data-el="app-window"
         className={`relative h-full w-full overflow-hidden border ${windowBorder} ${windowShape} ${windowSurface}`}
       >
-        <div
-          data-el="app-frame"
-          className="flex h-full w-full flex-col font-sans text-foreground"
-        >
+        <div data-el="app-frame" className="flex h-full w-full flex-col font-sans text-foreground">
           {contextMenu && (
             <ContextMenu
               x={contextMenu.x}

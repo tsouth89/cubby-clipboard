@@ -125,9 +125,7 @@ export const ClipCard = memo(function ClipCard({
       }}
       className={clsx(
         'group relative flex cursor-default select-none items-center overflow-hidden rounded-[10px] border transition-colors duration-100',
-        isCompact
-          ? 'min-h-[72px] gap-2 px-2.5 py-2'
-          : 'min-h-[92px] gap-2.5 px-3 py-2.5',
+        isCompact ? 'min-h-[72px] gap-2 px-2.5 py-2' : 'min-h-[92px] gap-2.5 px-3 py-2.5',
         isSelected
           ? 'border-white/[0.1] bg-white/[0.09]'
           : 'border-transparent bg-white/[0.035] hover:border-white/[0.075] hover:bg-white/[0.065]'
