@@ -8,6 +8,7 @@ import { PREVIEW_CHAR_LIMIT } from '../constants';
 
 interface ClipCardProps {
   clip: ClipboardItem;
+  density: 'compact' | 'comfortable';
   isSelected: boolean;
   onSelect: () => void;
   onPaste: () => void;
@@ -63,6 +64,7 @@ function imageLabel(source: string) {
 
 export const ClipCard = memo(function ClipCard({
   clip,
+  density,
   isSelected,
   onSelect,
   onPaste,
@@ -106,6 +108,7 @@ export const ClipCard = memo(function ClipCard({
       : null,
     formatBytes(imageMetadata.size_bytes),
   ].filter(Boolean);
+  const isCompact = density === 'compact';
 
   return (
     <article
@@ -121,15 +124,30 @@ export const ClipCard = memo(function ClipCard({
         onContextMenu?.(event);
       }}
       className={clsx(
-        'group relative flex min-h-[92px] cursor-default select-none items-center gap-2.5 overflow-hidden rounded-[10px] border px-3 py-2.5 transition-colors duration-100',
+        'group relative flex cursor-default select-none items-center overflow-hidden rounded-[10px] border transition-colors duration-100',
+        isCompact
+          ? 'min-h-[72px] gap-2 px-2.5 py-2'
+          : 'min-h-[92px] gap-2.5 px-3 py-2.5',
         isSelected
           ? 'border-white/[0.1] bg-white/[0.09]'
           : 'border-transparent bg-white/[0.035] hover:border-white/[0.075] hover:bg-white/[0.065]'
       )}
     >
-      {isSelected && <div className="absolute inset-y-2.5 left-0 w-[3px] rounded-r bg-primary" />}
+      {isSelected && (
+        <div
+          className={clsx(
+            'absolute left-0 w-[3px] rounded-r bg-primary',
+            isCompact ? 'inset-y-2' : 'inset-y-2.5'
+          )}
+        />
+      )}
 
-      <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-white/[0.075] bg-black/15">
+      <div
+        className={clsx(
+          'flex shrink-0 items-center justify-center overflow-hidden rounded-lg border border-white/[0.075] bg-black/15',
+          isCompact ? 'h-7 w-7' : 'h-8 w-8'
+        )}
+      >
         {clip.source_icon ? (
           <img
             src={`data:image/png;base64,${clip.source_icon}`}
@@ -146,7 +164,12 @@ export const ClipCard = memo(function ClipCard({
       <div className="min-w-0 flex-1">
         {clip.clip_type === 'image' ? (
           <div className="flex min-w-0 items-center gap-3">
-            <div className="h-[68px] w-[120px] shrink-0 overflow-hidden rounded-lg border border-white/10 bg-black/20">
+            <div
+              className={clsx(
+                'shrink-0 overflow-hidden rounded-lg border border-white/10 bg-black/20',
+                isCompact ? 'h-[52px] w-[92px]' : 'h-[68px] w-[120px]'
+              )}
+            >
               {imageSrc ? (
                 <img src={imageSrc} alt="" className="h-full w-full object-cover" />
               ) : (
@@ -175,7 +198,8 @@ export const ClipCard = memo(function ClipCard({
           <>
             <p
               className={clsx(
-                'line-clamp-3 whitespace-pre-wrap break-words text-[13px] leading-[18px] text-foreground/95',
+                'whitespace-pre-wrap break-words text-[13px] text-foreground/95',
+                isCompact ? 'line-clamp-2 leading-[17px]' : 'line-clamp-3 leading-[18px]',
                 kind === 'Code' && 'font-mono text-[12px] leading-[17px] text-foreground/90'
               )}
             >

@@ -8,6 +8,7 @@ interface ClipListProps {
   isLoading: boolean;
   hasMore: boolean;
   resetToken: number;
+  density: 'compact' | 'comfortable';
   selectedClipId: string | null;
   onSelectClip: (clipId: string) => void;
   onPaste: (clipId: string) => void;
@@ -21,6 +22,7 @@ export function ClipList({
   isLoading,
   hasMore,
   resetToken,
+  density,
   selectedClipId,
   onSelectClip,
   onPaste,
@@ -79,6 +81,7 @@ export function ClipList({
           <ClipCard
             key={clip.id}
             clip={clip}
+            density={density}
             isSelected={selectedClipId === clip.id}
             onSelect={() => onSelectClip(clip.id)}
             onPaste={() => onPaste(clip.id)}

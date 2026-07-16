@@ -418,6 +418,44 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                       </div>
                     </div>
 
+                    <div className="space-y-3">
+                      <div>
+                        <span className="text-sm font-medium">History density</span>
+                        <p className="text-xs text-muted-foreground">
+                          Choose larger previews or fit more clipboard items in the flyout.
+                        </p>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {(
+                          [
+                            ['comfortable', 'Comfortable', 'Larger previews and more context'],
+                            ['compact', 'Compact', 'More history visible at once'],
+                          ] as const
+                        ).map(([value, label, description]) => {
+                          const selected = (settings.density ?? 'comfortable') === value;
+                          return (
+                            <button
+                              key={value}
+                              type="button"
+                              onClick={() => updateSetting('density', value)}
+                              aria-pressed={selected}
+                              className={clsx(
+                                'rounded-lg border px-3 py-2.5 text-left transition-colors',
+                                selected
+                                  ? 'border-primary/60 bg-primary/10 text-foreground'
+                                  : 'border-border bg-accent/20 text-muted-foreground hover:border-primary/35 hover:text-foreground'
+                              )}
+                            >
+                              <span className="block text-xs font-medium">{label}</span>
+                              <span className="mt-0.5 block text-[11px] opacity-75">
+                                {description}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
                     <div className="flex items-center justify-between rounded-lg border border-border bg-accent/20 p-3">
                       <div>
                         <span className="text-sm font-medium">

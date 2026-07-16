@@ -20,6 +20,7 @@ pub struct AppSettings {
     pub startup_with_windows: bool,
     pub round_corners: bool,
     pub float_above_taskbar: bool,
+    pub density: String,
 
     // Privacy
     pub ignored_apps: HashSet<String>,
@@ -41,6 +42,7 @@ impl Default for AppSettings {
             startup_with_windows: false,
             round_corners: true,
             float_above_taskbar: true,
+            density: "comfortable".to_string(),
 
             ignored_apps: HashSet::new(),
         }
@@ -132,6 +134,7 @@ mod tests {
         assert_eq!(settings.hotkey, "Ctrl+Shift+V");
         assert!(settings.replace_win_v);
         assert_eq!(settings.remote_paste_mode, "copy_then_paste");
+        assert_eq!(settings.density, "comfortable");
     }
 
     #[test]
@@ -141,5 +144,6 @@ mod tests {
         assert_eq!(settings.hotkey, "Win+Alt+V");
         assert!(settings.replace_win_v);
         assert_eq!(settings.remote_paste_mode, "copy_then_paste");
+        assert_eq!(settings.density, "comfortable");
     }
 }

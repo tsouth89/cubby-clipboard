@@ -62,6 +62,7 @@ function App() {
   useLanguage(settings?.language);
   const { t } = useTranslation();
   const hasRoundedCorners = settings?.round_corners ?? true;
+  const density = settings?.density ?? 'comfortable';
   const windowEffect =
     settings?.mica_effect === 'clear'
       ? 'solid'
@@ -696,6 +697,7 @@ function App() {
               isLoading={isLoading}
               hasMore={hasMore}
               resetToken={clipListResetToken}
+              density={density}
               selectedClipId={selectedClipId}
               onSelectClip={setSelectedClipId}
               onPaste={handlePaste}
