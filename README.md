@@ -56,8 +56,9 @@ The current upstream baseline has no meaningful automated tests. Adding a Window
 
 Remote-session capture is a first-class reliability target. Cubby must be tested with Windows Remote Desktop and representative third-party remote-control tools, including rapid sequential copies, delayed-rendered content, reconnects, and text, image, HTML, RTF, and file-list formats.
 
-Cubby includes a remote-session trigger and a Ninja Remote workflow optimized
-for large clipboard items. See [Remote-session behavior](docs/REMOTE_SESSIONS.md).
+Cubby includes a remote-session trigger and workflows optimized for remote
+desktop and remote support tools, including large clipboard items. See
+[Remote-session behavior](docs/REMOTE_SESSIONS.md).
 
 ## Repository layout
 
