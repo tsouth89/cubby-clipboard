@@ -25,7 +25,6 @@ export interface Settings {
   startup_with_windows: boolean;
   show_in_taskbar: boolean;
   hotkey: string;
-  replace_win_v: boolean;
   theme: string;
   language?: string;
   mica_effect?: string;

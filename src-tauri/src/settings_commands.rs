@@ -40,7 +40,6 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
     if new_settings.hotkey != current.hotkey {
         crate::shortcuts::register_standard_shortcut(&app, &new_settings.hotkey)?;
     }
-    crate::shortcuts::set_replace_win_v(new_settings.replace_win_v);
 
     // Window effect
     let theme_str = new_settings.theme.clone();
@@ -96,7 +95,6 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
     );
     if let Err(error) = manager.save(new_settings) {
         let _ = crate::shortcuts::register_standard_shortcut(&app, &current.hotkey);
-        crate::shortcuts::set_replace_win_v(current.replace_win_v);
         let _ = manager.save(current);
         return Err(error);
     }

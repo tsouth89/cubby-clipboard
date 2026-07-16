@@ -300,11 +300,6 @@ pub fn run_app() {
                     log::warn!("SHORTCUT: Fell back to {}", fallback);
                 }
             }
-            if let Err(error) = shortcuts::start_win_v_hook(app_handle.clone()) {
-                log::error!("SHORTCUT: Win+V hook startup failed: {}", error);
-            }
-            shortcuts::set_replace_win_v(shortcut_settings.replace_win_v);
-
             let handle_for_clip = app_handle.clone();
             let db_for_clip = db_for_clipboard.clone();
             clipboard::init(&handle_for_clip, db_for_clip);
