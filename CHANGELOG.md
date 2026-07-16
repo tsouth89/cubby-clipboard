@@ -1,6 +1,36 @@
 # Changelog
 
-All notable changes to PastePaw will be documented in this file.
+All notable Cubby Clipboard changes are documented here. PastePaw entries below v0.1.0 are retained as upstream history and attribution.
+
+## v0.1.0
+
+### Added
+- Native Windows clipboard capture with contention retries and burst handling
+- Cursor-anchored Windows 11 flyout with system accent, Mica/Acrylic effects, and automatic dismissal
+- Optional native `Win+V` replacement without requiring PowerToys or another remapping tool
+- Keyboard-first search, navigation, paste, plain-text paste, deletion, and persistent pinning
+- Reliable local and Ninja Remote workflows, including a large-text clipboard-sync mode
+- Text and image history with source application context, previews, folders, and contextual empty/error states
+- Native-style clear-unpinned and explicit clear-everything actions
+
+### Privacy and release notes
+- Clipboard history remains local and Cubby includes no telemetry or cloud AI integrations
+- This first release is unsigned; Windows SmartScreen may warn until signing and reputation are established
+- Winget and Microsoft Store publishing are intentionally deferred until Cubby's package identities are reserved
+
+### 新增
+- 使用原生 Windows 剪贴板通知、竞争重试与突发复制处理
+- 跟随鼠标位置的 Windows 11 弹出窗口，支持系统强调色、Mica/Acrylic 与自动关闭
+- 可选的原生 `Win+V` 替代方案，无需 PowerToys 或其他按键映射工具
+- 键盘优先的搜索、导航、粘贴、纯文本粘贴、删除与持久固定
+- 本地及 Ninja Remote 可靠工作流，包括适合大段文本的剪贴板同步模式
+- 文本与图片历史、来源应用信息、预览、文件夹及清晰的空状态和错误状态
+- 类原生的“清除未固定项目”与明确的“清除全部”操作
+
+### 隐私与发布说明
+- 剪贴板历史仅保存在本地，Cubby 不包含遥测或云端 AI 集成
+- 首个版本暂未签名，在建立签名与信誉之前 Windows SmartScreen 可能显示警告
+- 在 Cubby 软件包标识完成预留之前，暂不发布至 Winget 与 Microsoft Store
 
 ## v1.3.7
 

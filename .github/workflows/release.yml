@@ -1,223 +1,192 @@
 name: Release
+
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
 
+concurrency:
+  group: 'release-${{ github.ref }}'
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
 jobs:
-  create-release:
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
-    outputs:
-      release_id: ${{ steps.create-release.outputs.id || steps.create-draft-release.outputs.id }}
+  validate:
+    name: Validate release candidate
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract changelog for version
-        if: github.event_name != 'workflow_dispatch'
-        id: changelog
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run format:check
+      - run: pnpm run release:check
+      - run: pnpm run build
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+  create-release:
+    name: Create GitHub release
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.release.outputs.id }}
+      tag: ${{ steps.metadata.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Validate version and prepare release metadata
+        id: metadata
+        shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          # Extract the section between "## v{VERSION}" and the next "## v" heading
-          CONTENT=$(sed -n "/^## v${VERSION}/,/^## v/{/^## v${VERSION}/d;/^## v/d;p}" CHANGELOG.md)
-          EOF_MARKER=$(openssl rand -hex 8)
-          echo "body<<$EOF_MARKER" >> $GITHUB_OUTPUT
-          echo "$CONTENT" >> $GITHUB_OUTPUT
-          echo "$EOF_MARKER" >> $GITHUB_OUTPUT
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          CARGO_VERSION=$(node -e "const fs=require('fs'); const text=fs.readFileSync('src-tauri/Cargo.toml','utf8'); const match=text.match(/^version = \"([^\"]+)\"/m); if (!match) process.exit(1); process.stdout.write(match[1])")
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
 
-      - name: Create Release
-        if: github.event_name != 'workflow_dispatch'
-        id: create-release
+          if [ "$VERSION" != "$CARGO_VERSION" ] || [ "$VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "Version mismatch: tauri=$VERSION cargo=$CARGO_VERSION package=$PACKAGE_VERSION"
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=draft-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+            echo "name=Cubby Clipboard v${VERSION} test build" >> "$GITHUB_OUTPUT"
+            echo "draft=true" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            EXPECTED_TAG="v${VERSION}"
+            if [ "${{ github.ref_name }}" != "$EXPECTED_TAG" ]; then
+              echo "Tag ${{ github.ref_name }} does not match configured version $EXPECTED_TAG"
+              exit 1
+            fi
+            echo "tag=$EXPECTED_TAG" >> "$GITHUB_OUTPUT"
+            echo "name=Cubby Clipboard $EXPECTED_TAG" >> "$GITHUB_OUTPUT"
+            echo "draft=false" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Extract changelog
+        id: changelog
+        shell: bash
+        run: |
+          VERSION="${{ steps.metadata.outputs.version }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BODY="Unsigned test build for v${VERSION} from commit ${{ github.sha }}. Use for release-candidate testing only."
+          else
+            BODY=$(awk -v heading="## v${VERSION}" '
+              $0 == heading { capture=1; next }
+              capture && /^## v/ { exit }
+              capture { print }
+            ' CHANGELOG.md)
+            if [ -z "$BODY" ]; then
+              echo "CHANGELOG.md has no section for v${VERSION}"
+              exit 1
+            fi
+          fi
+
+          DELIMITER=$(openssl rand -hex 12)
+          echo "body<<$DELIMITER" >> "$GITHUB_OUTPUT"
+          echo "$BODY" >> "$GITHUB_OUTPUT"
+          echo "$DELIMITER" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        id: release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: 'PastePaw ${{ github.ref_name }}'
+          tag_name: ${{ steps.metadata.outputs.tag }}
+          name: ${{ steps.metadata.outputs.name }}
           body: ${{ steps.changelog.outputs.body }}
-          draft: false
-          prerelease: false
-
-      - name: Create Draft Release (workflow_dispatch)
-        if: github.event_name == 'workflow_dispatch'
-        id: create-draft-release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: draft-${{ github.sha }}
-          name: 'Draft Build (${{ github.ref_name }} @ ${{ github.sha }})'
-          body: 'Test build from `${{ github.ref_name }}` at `${{ github.sha }}`'
+          target_commitish: ${{ github.sha }}
           draft: true
-          prerelease: true
+          prerelease: ${{ steps.metadata.outputs.prerelease }}
 
-  release:
+  build-installers:
+    name: Build ${{ matrix.arch }} installer
     needs: create-release
+    runs-on: windows-latest
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: 'windows-latest'
-            target: 'x86_64-pc-windows-msvc'
-          - platform: 'windows-latest'
-            target: 'aarch64-pc-windows-msvc'
-
-    runs-on: ${{ matrix.platform }}
-
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v4
         with:
           version: 9
 
-      - name: Install Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
           targets: ${{ matrix.target }}
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
-          path: ~/.cargo
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
 
-      - name: Install frontend dependencies
-        run: pnpm install
-        working-directory: frontend
+      - run: pnpm install --frozen-lockfile
 
-      - name: Get version info
-        id: version
-        run: echo "VERSION=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-        shell: bash
-
-      - name: Build the app
-        uses: tauri-apps/tauri-action@v0
+      - name: Build and upload NSIS installer
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          projectPath: src-tauri
+          projectPath: .
           releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: --target ${{ matrix.target }}
+          uploadUpdaterJson: false
+          releaseAssetNamePattern: '[name]_[version]_[arch][setup].[ext]'
+          args: --target ${{ matrix.target }} --bundles nsis
 
-      - name: Trigger Apps Gallery Update
-        if: success() && github.event_name != 'workflow_dispatch'
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.GALLERY_UPDATE_PAT }}
-          repository: XueshiQiao/XueshiQiao.github.io
-          event-type: app_released
-
-  virustotal-scan:
-    needs: release
+  publish-release:
+    name: Publish validated release
     if: github.event_name != 'workflow_dispatch'
+    needs: [create-release, build-installers]
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    outputs:
-      x64_sha: ${{ steps.vt.outputs.X64_SHA }}
-      arm64_sha: ${{ steps.vt.outputs.ARM64_SHA }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download installers
-        run: |
-          gh release download ${{ github.ref_name }} --pattern "*x64-setup.exe" --dir ./installers
-          gh release download ${{ github.ref_name }} --pattern "*arm64-setup.exe" --dir ./installers
+      - name: Publish release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload to VirusTotal and get URLs
-        id: vt
-        run: |
-          X64_FILE=$(ls ./installers/*x64-setup.exe)
-          ARM64_FILE=$(ls ./installers/*arm64-setup.exe)
-
-          X64_SHA=$(sha256sum "$X64_FILE" | cut -d' ' -f1)
-          ARM64_SHA=$(sha256sum "$ARM64_FILE" | cut -d' ' -f1)
-
-          # Write hashes BEFORE curl so they are always recorded even if VT upload fails
-          echo "X64_SHA=${X64_SHA}" >> $GITHUB_OUTPUT
-          echo "ARM64_SHA=${ARM64_SHA}" >> $GITHUB_OUTPUT
-          echo "X64_URL=https://www.virustotal.com/gui/file/$X64_SHA" >> $GITHUB_OUTPUT
-          echo "ARM64_URL=https://www.virustotal.com/gui/file/$ARM64_SHA" >> $GITHUB_OUTPUT
-
-          # VT upload is informational — failures must not block the release
-          curl -s --request POST \
-            --url https://www.virustotal.com/api/v3/files \
-            --header "x-apikey: ${{ secrets.VT_API_KEY }}" \
-            --form "file=@$X64_FILE" || true
-
-          sleep 16
-
-          curl -s --request POST \
-            --url https://www.virustotal.com/api/v3/files \
-            --header "x-apikey: ${{ secrets.VT_API_KEY }}" \
-            --form "file=@$ARM64_FILE" || true
-
-      - name: Append VirusTotal results to release notes
-        run: |
-          gh release view ${{ github.ref_name }} --json body -q .body > release_body.txt
-          cat >> release_body.txt << EOF
-
-          ---
-          🔍 **VirusTotal Scan Results** (70+ antivirus engines):
-          - [x64 installer](${{ steps.vt.outputs.X64_URL }})
-          - [arm64 installer](${{ steps.vt.outputs.ARM64_URL }})
-          EOF
-          gh release edit ${{ github.ref_name }} --notes-file release_body.txt
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  publish-winget:
-    needs: virustotal-scan
-    if: github.event_name != 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Verify installer hashes are stable
-        run: |
-          gh release download ${{ github.ref_name }} --pattern "*x64-setup.exe" --dir ./verify
-          gh release download ${{ github.ref_name }} --pattern "*arm64-setup.exe" --dir ./verify
-
-          X64_CURRENT=$(sha256sum ./verify/*x64-setup.exe | cut -d' ' -f1)
-          ARM64_CURRENT=$(sha256sum ./verify/*arm64-setup.exe | cut -d' ' -f1)
-
-          EXPECTED_X64="${{ needs.virustotal-scan.outputs.x64_sha }}"
-          EXPECTED_ARM64="${{ needs.virustotal-scan.outputs.arm64_sha }}"
-
-          if [ "$X64_CURRENT" != "$EXPECTED_X64" ]; then
-            echo "ERROR: x64 installer hash changed after VirusTotal scan!"
-            echo "  VirusTotal scan saw: $EXPECTED_X64"
-            echo "  Current hash:        $X64_CURRENT"
-            exit 1
-          fi
-          if [ "$ARM64_CURRENT" != "$EXPECTED_ARM64" ]; then
-            echo "ERROR: arm64 installer hash changed after VirusTotal scan!"
-            echo "  VirusTotal scan saw: $EXPECTED_ARM64"
-            echo "  Current hash:        $ARM64_CURRENT"
-            exit 1
-          fi
-          echo "Hash verification passed — installers are stable."
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish to winget-pkgs
-        uses: vedantmgoyal9/winget-releaser@v2
-        with:
-          identifier: XueshiQiao.PastePaw
-          installers-regex: '.*-setup\.exe$'
-          release-tag: ${{ github.ref_name }}
-          token: ${{ secrets.WINGET_TOKEN }}
-
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
+        run: gh release edit "$RELEASE_TAG" --draft=false --prerelease=false
