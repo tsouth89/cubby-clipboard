@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 
 interface KeyboardOptions {
+  disabled?: boolean;
   onClose?: () => void;
   onSearch?: () => void;
   onDelete?: () => void;
@@ -24,6 +25,7 @@ export function useKeyboard(options: KeyboardOptions) {
       if (e.isComposing) return;
 
       const current = optionsRef.current;
+      if (current.disabled) return;
       const target = e.target as HTMLElement | null;
       const isEditing =
         target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;

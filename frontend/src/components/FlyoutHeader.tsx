@@ -1,5 +1,5 @@
 import { FolderItem } from '../types';
-import { ChevronDown, Filter, Plus, Search, Settings2, X } from 'lucide-react';
+import { ChevronDown, Filter, MoreHorizontal, Plus, Search, Settings2, X } from 'lucide-react';
 
 export type ContentFilter = 'all' | 'text' | 'images';
 
@@ -12,6 +12,7 @@ interface FlyoutHeaderProps {
   selectedFolder: string | null;
   onSelectFolder: (folderId: string | null) => void;
   onAddFolder: () => void;
+  onOpenHistoryMenu: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onOpenSettings: () => void;
 }
 
@@ -24,6 +25,7 @@ export function FlyoutHeader({
   selectedFolder,
   onSelectFolder,
   onAddFolder,
+  onOpenHistoryMenu,
   onOpenSettings,
 }: FlyoutHeaderProps) {
   return (
@@ -106,6 +108,15 @@ export function FlyoutHeader({
             title="New folder"
           >
             <Plus size={15} />
+          </button>
+          <button
+            type="button"
+            onClick={onOpenHistoryMenu}
+            className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-white/[0.07] hover:text-foreground"
+            title="Clipboard history actions"
+            aria-label="Clipboard history actions"
+          >
+            <MoreHorizontal size={15} />
           </button>
           <button
             type="button"
