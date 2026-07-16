@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2.0.0",
-  "productName": "PastePaw",
-  "version": "1.3.7",
-  "identifier": "me.xueshi.pastepaw",
+  "productName": "Cubby Clipboard",
+  "version": "0.1.0",
+  "identifier": "ai.southforge.cubbyclipboard",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "PastePaw",
+        "title": "Cubby",
         "width": 1920,
         "height": 540,
         "minWidth": 700,
@@ -33,8 +33,8 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$DATA/PastePaw/images/**",
-          "$LOCALDATA/PastePaw/images/**"
+          "$DATA/Cubby Clipboard/images/**",
+          "$LOCALDATA/Cubby Clipboard/images/**"
         ]
       },
       "capabilities": [
@@ -53,14 +53,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "createUpdaterArtifacts": true
-  },
-  "plugins": {
-    "updater": {
-      "endpoints": [
-        "https://github.com/XueshiQiao/PastePaw/releases/latest/download/latest.json"
-      ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDAxNDhBMzY2RUIxMTkzQTcKUldTbmt4SHJacU5JQVEzdWxCUXNWcE9hN2N2QzhzSjB3OC9RT0lPbVNUSXR2YlZQRWxsaE8ydzMK"
-    }
+    "createUpdaterArtifacts": false
   }
 }

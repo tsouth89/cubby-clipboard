@@ -79,7 +79,7 @@
     "ignoreGhostClips": "Ignore Ghost Clips",
     "ignoreGhostClipsDesc": "Ignore temporary clipboard items",
     "hotkey": "Global Hotkey",
-    "hotkeyDesc": "Shortcut to show/hide PastePaw",
+    "hotkeyDesc": "Shortcut to show or hide Cubby",
     "hotkeyPlaceholder": "Click to record...",
     "hotkeyRecording": "Press keys...",
     "ignoredApps": "Ignored Applications",

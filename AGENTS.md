@@ -1,21 +1,20 @@
-# PastePaw Development Guide
+# Cubby Development Guide
 
-**Windows-only** clipboard history manager built with Rust + Tauri 2.x + React + TypeScript. Do not add macOS/Linux code or `#[cfg(target_os = ...)]` branches.
+**Windows-only** clipboard history replacement currently built with Rust + Tauri 2.x + React + TypeScript. Tauri remains under evaluation against WinUI 3. Do not add macOS/Linux product work.
 
 ## Project Structure
 
 ```
-PastePaw/
+Cubby/
 ├── src-tauri/src/
 │   ├── lib.rs               # App bootstrap, window animation, tray, hotkey, blur handler
-│   ├── commands.rs          # Tauri IPC commands (clips, paste, folders, AI, shortcuts)
+│   ├── commands.rs          # Tauri IPC commands (clips, paste, folders, shortcuts)
 │   ├── settings_commands.rs # Settings IPC (get_settings, save_settings, ignored apps)
 │   ├── clipboard.rs         # Clipboard polling loop, content capture
 │   ├── database.rs          # SQLite via sqlx (clips, folders, settings tables)
 │   ├── models.rs            # Shared types + global tokio runtime (get_runtime())
 │   ├── settings_manager.rs  # In-memory settings cache with DB persistence
 │   ├── constants.rs         # WINDOW_HEIGHT (330.0), WINDOW_MARGIN (0.0)
-│   ├── ai.rs                # AI clip processing
 │   └── main.rs              # Entry point
 ├── frontend/src/
 │   ├── App.tsx              # Root component, keyboard shortcuts, IPC calls

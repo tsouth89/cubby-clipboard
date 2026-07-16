@@ -1,7 +1,6 @@
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_clipboard_x::{start_listening, stop_listening, write_text};
 
-use crate::ai::{self, AiAction, AiConfig};
 use crate::database::Database;
 use crate::models::{Clip, ClipboardItem, Folder, FolderItem};
 use crate::settings_manager::SettingsManager;
@@ -12,96 +11,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
-
-#[tauri::command]
-pub async fn ai_process_clip(
-    app: AppHandle,
-    clip_id: String,
-    action: String,
-    db: tauri::State<'_, Arc<Database>>,
-) -> Result<String, String> {
-    let pool = &db.pool;
-
-    // 1. Get Clip
-    let clip: Clip = sqlx::query_as(r#"SELECT * FROM clips WHERE uuid = ?"#)
-        .bind(&clip_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("Clip not found")?;
-
-    let text_content =
-        if clip.clip_type == "text" || clip.clip_type == "html" || clip.clip_type == "url" {
-            String::from_utf8_lossy(&clip.content).to_string()
-        } else {
-            return Err("AI processing only supported for text content".to_string());
-        };
-
-    // 2. Get AI Config
-    let manager = app.state::<Arc<SettingsManager>>();
-    let settings = manager.get();
-
-    if settings.ai_api_key.is_empty() {
-        return Err("AI API Key is missing in settings".to_string());
-    }
-
-    let config = AiConfig {
-        provider: settings.ai_provider,
-        api_key: settings.ai_api_key,
-        model: settings.ai_model,
-        base_url: if settings.ai_base_url.is_empty() {
-            None
-        } else {
-            Some(settings.ai_base_url)
-        },
-    };
-
-    let ai_action = match action.as_str() {
-        "summarize" => AiAction::Summarize,
-        "translate" => AiAction::Translate,
-        "explain_code" => AiAction::ExplainCode,
-        "fix_grammar" => AiAction::FixGrammar,
-        _ => return Err("Invalid AI action".to_string()),
-    };
-
-    let custom_prompt = match ai_action {
-        AiAction::Summarize => Some(settings.ai_prompt_summarize),
-        AiAction::Translate => Some(settings.ai_prompt_translate),
-        AiAction::ExplainCode => Some(settings.ai_prompt_explain_code),
-        AiAction::FixGrammar => Some(settings.ai_prompt_fix_grammar),
-    };
-
-    // 3. Call AI
-    let result = ai::process_text(&text_content, ai_action.clone(), &config, custom_prompt)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // 4. Update Metadata
-    let mut metadata: serde_json::Value = if let Some(meta_str) = &clip.metadata {
-        serde_json::from_str(meta_str).unwrap_or(serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-
-    let key = match ai_action {
-        AiAction::Summarize => "ai_summary",
-        AiAction::Translate => "ai_translation",
-        AiAction::ExplainCode => "ai_explanation",
-        AiAction::FixGrammar => "ai_grammar_fix",
-    };
-
-    metadata[key] = serde_json::json!(result);
-    let new_metadata_str = metadata.to_string();
-
-    sqlx::query("UPDATE clips SET metadata = ? WHERE uuid = ?")
-        .bind(&new_metadata_str)
-        .bind(&clip_id)
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(result)
-}
 
 fn clip_to_list_item(clip: &Clip, image_path: Option<&str>) -> ClipboardItem {
     let content_str = if clip.clip_type == "image" {
@@ -1008,7 +917,9 @@ pub async fn register_global_shortcut(
         .global_shortcut()
         .on_shortcut(shortcut, move |_app, _shortcut, event| {
             if event.state() == ShortcutState::Pressed {
-                if win_clone.is_visible().unwrap_or(false) && win_clone.is_focused().unwrap_or(false) {
+                if win_clone.is_visible().unwrap_or(false)
+                    && win_clone.is_focused().unwrap_or(false)
+                {
                     crate::animate_window_hide(&win_clone, None);
                 } else {
                     crate::position_window_at_bottom(&win_clone);
@@ -1084,4 +995,3 @@ pub fn get_layout_config() -> serde_json::Value {
         "window_height": crate::constants::WINDOW_HEIGHT,
     })
 }
-

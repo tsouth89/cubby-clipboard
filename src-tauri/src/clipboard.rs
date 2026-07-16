@@ -87,7 +87,7 @@ pub fn init(app: &AppHandle, db: Arc<Database>) {
         let db = db_clone.clone();
 
         // Capture source app info IMMEDIATELY at event time, before debounce delay.
-        // If we wait until after the delay, the user may have already switched to PastePaw,
+        // If we wait until after the delay, the user may have already switched to Cubby,
         // causing frontmostApplication to return our own app instead of the real source.
         let source_app_info = get_clipboard_owner_app_info();
 
@@ -126,7 +126,6 @@ struct ClipboardImageRead {
     decode_ms: u128,
     source_type: &'static str,
 }
-
 
 fn read_clipboard_image_with_clipboard_rs(
     source_type: &'static str,
@@ -482,8 +481,8 @@ fn calculate_hash(content: &[u8]) -> String {
 fn get_image_store_dir() -> std::path::PathBuf {
     let current_dir = std::env::current_dir().unwrap_or(std::path::PathBuf::from("."));
     let app_data_dir = match dirs::data_dir() {
-        Some(path) => path.join("PastePaw"),
-        None => current_dir.join("PastePaw"),
+        Some(path) => path.join("Cubby Clipboard"),
+        None => current_dir.join("Cubby Clipboard"),
     };
     app_data_dir.join("images")
 }
@@ -880,4 +879,3 @@ pub fn send_paste_input() {
         log::info!("send_paste_input: SendInput returned {}", result);
     }
 }
-

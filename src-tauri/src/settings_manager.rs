@@ -83,46 +83,6 @@ impl SettingsManager {
             }
         }
 
-        // AI
-        if let Some(v) = get_val(pool, "ai_provider").await {
-            settings.ai_provider = v;
-        }
-        if let Some(v) = get_val(pool, "ai_api_key").await {
-            settings.ai_api_key = v;
-        }
-        if let Some(v) = get_val(pool, "ai_model").await {
-            settings.ai_model = v;
-        }
-        if let Some(v) = get_val(pool, "ai_base_url").await {
-            settings.ai_base_url = v;
-        }
-
-        if let Some(v) = get_val(pool, "ai_prompt_summarize").await {
-            settings.ai_prompt_summarize = v;
-        }
-        if let Some(v) = get_val(pool, "ai_prompt_translate").await {
-            settings.ai_prompt_translate = v;
-        }
-        if let Some(v) = get_val(pool, "ai_prompt_explain_code").await {
-            settings.ai_prompt_explain_code = v;
-        }
-        if let Some(v) = get_val(pool, "ai_prompt_fix_grammar").await {
-            settings.ai_prompt_fix_grammar = v;
-        }
-
-        if let Some(v) = get_val(pool, "ai_title_summarize").await {
-            settings.ai_title_summarize = v;
-        }
-        if let Some(v) = get_val(pool, "ai_title_translate").await {
-            settings.ai_title_translate = v;
-        }
-        if let Some(v) = get_val(pool, "ai_title_explain_code").await {
-            settings.ai_title_explain_code = v;
-        }
-        if let Some(v) = get_val(pool, "ai_title_fix_grammar").await {
-            settings.ai_title_fix_grammar = v;
-        }
-
         // Ignored Apps
         if let Ok(apps) = sqlx::query_scalar::<_, String>("SELECT app_name FROM ignored_apps")
             .fetch_all(pool)

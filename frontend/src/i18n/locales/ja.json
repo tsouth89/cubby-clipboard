@@ -79,7 +79,7 @@
     "ignoreGhostClips": "ゴーストクリップを無視",
     "ignoreGhostClipsDesc": "一時的なクリップボード項目を無視します",
     "hotkey": "グローバルホットキー",
-    "hotkeyDesc": "PastePaw を表示または非表示にするショートカット",
+    "hotkeyDesc": "Cubby を表示または非表示にするショートカット",
     "hotkeyPlaceholder": "クリックして記録...",
     "hotkeyRecording": "キーを押してください...",
     "ignoredApps": "除外するアプリ",

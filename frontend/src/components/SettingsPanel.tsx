@@ -5,11 +5,8 @@ import {
   Plus,
   FolderOpen,
   Settings as SettingsIcon,
-  BrainCircuit,
   Folder as FolderIcon,
   MoreHorizontal,
-  Eye,
-  EyeOff,
 } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { useTheme } from '../hooks/useTheme';
@@ -20,8 +17,6 @@ import { FlaskConical } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getVersion } from '@tauri-apps/api/app';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { check } from '@tauri-apps/plugin-updater';
-import { relaunch } from '@tauri-apps/plugin-process';
 import { toast } from 'sonner';
 import { ConfirmDialog } from './ConfirmDialog';
 import { Select } from './ui/Select';
@@ -33,79 +28,13 @@ interface SettingsPanelProps {
   onClose: () => void;
 }
 
-type Tab = 'general' | 'ai' | 'folders';
-
-function PromptEditor({
-  label,
-  value,
-  titleValue,
-  placeholder,
-  onSave,
-  onSaveTitle,
-}: {
-  label: string;
-  value: string;
-  titleValue?: string;
-  placeholder: string;
-  onSave: (val: string) => void;
-  onSaveTitle?: (val: string) => void;
-}) {
-  const { t } = useTranslation();
-  const [localValue, setLocalValue] = useState(value);
-  const [localTitle, setLocalTitle] = useState(titleValue || label);
-
-  // Sync with prop if it changes externally
-  useEffect(() => {
-    setLocalValue(value);
-  }, [value]);
-
-  useEffect(() => {
-    setLocalTitle(titleValue || label);
-  }, [titleValue, label]);
-
-  return (
-    <div className="space-y-2 rounded-lg border border-border/40 bg-accent/5 p-3">
-      <div className="flex items-center justify-between gap-4">
-        <input
-          type="text"
-          value={localTitle}
-          onChange={(e) => setLocalTitle(e.target.value)}
-          onBlur={() => {
-            if (onSaveTitle && localTitle !== (titleValue || label)) {
-              onSaveTitle(localTitle);
-            }
-          }}
-          className="bg-transparent text-xs font-semibold text-foreground/70 outline-none transition-colors focus:text-primary"
-          title="Click to rename action"
-        />
-        <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-          {t('settings.actionName')}
-        </span>
-      </div>
-      <textarea
-        value={localValue}
-        onChange={(e) => setLocalValue(e.target.value)}
-        onBlur={() => {
-          if (localValue !== value) {
-            onSave(localValue);
-          }
-        }}
-        placeholder={placeholder}
-        className="min-h-[60px] w-full resize-none rounded-md border border-border bg-input px-3 py-2 text-xs text-foreground transition-all focus:outline-none focus:ring-1 focus:ring-primary/30"
-      />
-    </div>
-  );
-}
+type Tab = 'general' | 'folders';
 
 export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPanelProps) {
   const [activeTab, setActiveTab] = useState<Tab>('general');
   const [settings, setSettings] = useState<Settings>(initialSettings);
   const [_historySize, setHistorySize] = useState<number>(0);
   const [isRecordingMode, setIsRecordingMode] = useState(false);
-  const [showApiKey, setShowApiKey] = useState(false);
-  const [localApiKey, setLocalApiKey] = useState(initialSettings.ai_api_key || '');
-  const [localBaseUrl, setLocalBaseUrl] = useState(initialSettings.ai_base_url || '');
-  const [localModel, setLocalModel] = useState(initialSettings.ai_model || 'gpt-3.5-turbo');
   // Folder Management State
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [newFolderName, setNewFolderName] = useState('');
@@ -134,7 +63,11 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
           if (updates.hotkey) {
             await invoke('register_global_shortcut', { hotkey: updates.hotkey });
           }
-          if ('round_corners' in updates || 'mica_effect' in updates || 'float_above_taskbar' in updates) {
+          if (
+            'round_corners' in updates ||
+            'mica_effect' in updates ||
+            'float_above_taskbar' in updates
+          ) {
             await invoke('refresh_window');
           }
         } catch (error) {
@@ -179,7 +112,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     updateSetting('language', newLanguage);
     // Change language immediately
     i18n.changeLanguage(newLanguage);
-    localStorage.setItem('pastepaw_language', newLanguage);
+    localStorage.setItem('cubby_language', newLanguage);
   };
 
   // Use use-shortcut-recorder for recording (shows current keys held in real-time)
@@ -225,7 +158,6 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     invoke<string[]>('get_ignored_apps').then(setIgnoredApps).catch(console.error);
     getVersion().then(setAppVersion).catch(console.error);
     loadFolders();
-
   }, []);
 
   const handleAddIgnoredApp = async () => {
@@ -351,38 +283,6 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     setIsRecordingMode(false);
   };
 
-  const handleCheckUpdate = async () => {
-    try {
-      const loadingToast = toast.loading('Checking for updates...');
-      const update = await check();
-      toast.dismiss(loadingToast);
-
-      if (update && update.available) {
-        toast.info(`Update v${update.version} available!`, {
-          duration: 10000,
-          action: {
-            label: 'Download & Restart',
-            onClick: async () => {
-              try {
-                const dlToast = toast.loading(`Downloading v${update.version}...`);
-                await update.downloadAndInstall();
-                toast.dismiss(dlToast);
-                toast.success('Update installed. Restarting...');
-                await relaunch();
-              } catch (e) {
-                toast.error(`Update failed: ${e}`);
-              }
-            },
-          },
-        });
-      } else {
-        toast.success('You are on the latest version.');
-      }
-    } catch (e) {
-      toast.error(`Check failed: ${e}`);
-    }
-  };
-
   return (
     <>
       <ConfirmDialog
@@ -430,18 +330,6 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
               >
                 <SettingsIcon size={16} />
                 {t('settings.general')}
-              </button>
-              <button
-                onClick={() => setActiveTab('ai')}
-                className={clsx(
-                  'flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors',
-                  activeTab === 'ai'
-                    ? 'bg-accent text-accent-foreground'
-                    : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-                )}
-              >
-                <BrainCircuit size={16} />
-                {t('settings.ai')}
               </button>
               <button
                 onClick={() => setActiveTab('folders')}
@@ -504,43 +392,60 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                     </div>
 
                     <div className="space-y-3">
-                        <label className="block">
-                          <span className="text-sm font-medium">{t('settings.windowEffect')}</span>
-                        </label>
-                        <Select
-                          value={settings.mica_effect || 'clear'}
-                          onChange={(val) => updateSetting('mica_effect', val)}
-                          options={[
-                            { value: 'mica_alt', label: 'Mica Alt' },
-                            { value: 'mica', label: 'Mica' },
-                            { value: 'clear', label: 'Clear' },
-                          ]}
-                        />
-                      </div>
+                      <label className="block">
+                        <span className="text-sm font-medium">{t('settings.windowEffect')}</span>
+                      </label>
+                      <Select
+                        value={settings.mica_effect || 'clear'}
+                        onChange={(val) => updateSetting('mica_effect', val)}
+                        options={[
+                          { value: 'mica_alt', label: 'Mica Alt' },
+                          { value: 'mica', label: 'Mica' },
+                          { value: 'clear', label: 'Clear' },
+                        ]}
+                      />
+                    </div>
 
                     <div className="flex items-center justify-between rounded-lg border border-border bg-accent/20 p-3">
                       <div>
-                        <span className="text-sm font-medium">{t('settings.floatAboveTaskbar')}</span>
-                        <p className="text-xs text-muted-foreground">{t('settings.floatAboveTaskbarDesc')}</p>
+                        <span className="text-sm font-medium">
+                          {t('settings.floatAboveTaskbar')}
+                        </span>
+                        <p className="text-xs text-muted-foreground">
+                          {t('settings.floatAboveTaskbarDesc')}
+                        </p>
                       </div>
                       <button
-                        onClick={() => updateSetting('float_above_taskbar', !(settings.float_above_taskbar ?? true))}
+                        onClick={() =>
+                          updateSetting(
+                            'float_above_taskbar',
+                            !(settings.float_above_taskbar ?? true)
+                          )
+                        }
                         className={`h-6 w-11 rounded-full transition-colors ${(settings.float_above_taskbar ?? true) ? 'bg-primary' : 'bg-accent'}`}
                       >
-                        <span className={`block h-4 w-4 rounded-full bg-white transition-transform ${(settings.float_above_taskbar ?? true) ? 'translate-x-6' : 'translate-x-1'}`} />
+                        <span
+                          className={`block h-4 w-4 rounded-full bg-white transition-transform ${(settings.float_above_taskbar ?? true) ? 'translate-x-6' : 'translate-x-1'}`}
+                        />
                       </button>
                     </div>
 
                     <div className="flex items-center justify-between rounded-lg border border-border bg-accent/20 p-3">
                       <div>
                         <span className="text-sm font-medium">{t('settings.roundCorners')}</span>
-                        <p className="text-xs text-muted-foreground">{t('settings.roundCornersDesc')}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {t('settings.roundCornersDesc')}
+                        </p>
                       </div>
                       <button
-                        onClick={() => updateSetting('round_corners', !(settings.round_corners ?? false))}
+                        onClick={() =>
+                          updateSetting('round_corners', !(settings.round_corners ?? false))
+                        }
                         className={`h-6 w-11 rounded-full transition-colors ${(settings.round_corners ?? false) ? 'bg-primary' : 'bg-accent'}`}
                       >
-                        <span className={`block h-4 w-4 rounded-full bg-white transition-transform ${(settings.round_corners ?? false) ? 'translate-x-6' : 'translate-x-1'}`} />
+                        <span
+                          className={`block h-4 w-4 rounded-full bg-white transition-transform ${(settings.round_corners ?? false) ? 'translate-x-6' : 'translate-x-1'}`}
+                        />
                       </button>
                     </div>
 
@@ -752,145 +657,6 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                 </>
               )}
 
-              {/* --- AI PROCESSING TAB --- */}
-              {activeTab === 'ai' && (
-                <>
-                  <section className="space-y-4">
-                    <h3 className="text-sm font-medium text-muted-foreground">
-                      {t('settings.aiConfiguration')}
-                    </h3>
-
-                    <div className="space-y-3">
-                      <label className="block">
-                        <span className="text-sm font-medium">{t('settings.provider')}</span>
-                      </label>
-                      <Select
-                        value={settings.ai_provider || 'openai'}
-                        onChange={(newProvider) => {
-                          const updates: Partial<Settings> = { ai_provider: newProvider };
-
-                          // Auto-fill Base URL and Model based on provider
-                          if (newProvider === 'openai') {
-                            updates.ai_base_url = 'https://api.openai.com/v1';
-                            setLocalBaseUrl('https://api.openai.com/v1');
-                          } else if (newProvider === 'deepseek') {
-                            updates.ai_base_url = 'https://api.deepseek.com';
-                            updates.ai_model = 'deepseek-chat';
-                            setLocalBaseUrl('https://api.deepseek.com');
-                            setLocalModel('deepseek-chat');
-                          }
-
-                          updateSettings(updates);
-                        }}
-                        options={[
-                          { value: 'openai', label: t('settings.providerOpenAI') },
-                          { value: 'deepseek', label: t('settings.providerDeepSeek') },
-                          { value: 'custom', label: t('settings.providerCustom') },
-                        ]}
-                      />
-                    </div>
-
-                    <div className="space-y-3">
-                      <label className="block">
-                        <span className="text-sm font-medium">{t('settings.apiKey')}</span>
-                      </label>
-                      <div className="relative">
-                        <input
-                          type={showApiKey ? 'text' : 'password'}
-                          value={localApiKey}
-                          onChange={(e) => setLocalApiKey(e.target.value)}
-                          onBlur={() => updateSetting('ai_api_key', localApiKey)}
-                          placeholder="sk-..."
-                          className="w-full rounded-lg border border-border bg-input py-2 pl-3 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowApiKey(!showApiKey)}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
-                        >
-                          {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="space-y-3">
-                      <label className="block">
-                        <span className="text-sm font-medium">{t('settings.model')}</span>
-                      </label>
-                      <input
-                        type="text"
-                        value={localModel}
-                        onChange={(e) => setLocalModel(e.target.value)}
-                        onBlur={() => updateSetting('ai_model', localModel)}
-                        placeholder="gpt-4o, deepseek-chat, etc."
-                        className="w-full rounded-lg border border-border bg-input px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                      />
-                    </div>
-
-                    <div className="space-y-3">
-                      <label className="block">
-                        <span className="text-sm font-medium">{t('settings.baseUrl')}</span>
-                      </label>
-                      <input
-                        type="text"
-                        value={localBaseUrl}
-                        onChange={(e) => setLocalBaseUrl(e.target.value)}
-                        onBlur={() => updateSetting('ai_base_url', localBaseUrl)}
-                        placeholder="https://api.openai.com/v1"
-                        className="w-full rounded-lg border border-border bg-input px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                      />
-                    </div>
-                  </section>
-
-                  <section className="space-y-4 border-t border-border/50 pt-4">
-                    <h3 className="text-sm font-medium text-muted-foreground">
-                      {t('settings.customPrompts')}
-                    </h3>
-                    <p className="text-xs italic text-muted-foreground">
-                      {t('settings.customPromptsDesc')}
-                    </p>
-
-                    <div className="space-y-4">
-                      <PromptEditor
-                        label={t('settings.aiSummarize')}
-                        value={settings.ai_prompt_summarize || ''}
-                        titleValue={settings.ai_title_summarize}
-                        onSave={(val) => updateSetting('ai_prompt_summarize', val)}
-                        onSaveTitle={(val) => updateSetting('ai_title_summarize', val)}
-                        placeholder={t('settings.aiSummarizePlaceholder')}
-                      />
-
-                      <PromptEditor
-                        label={t('settings.aiTranslate')}
-                        value={settings.ai_prompt_translate || ''}
-                        titleValue={settings.ai_title_translate}
-                        onSave={(val) => updateSetting('ai_prompt_translate', val)}
-                        onSaveTitle={(val) => updateSetting('ai_title_translate', val)}
-                        placeholder={t('settings.aiTranslatePlaceholder')}
-                      />
-
-                      <PromptEditor
-                        label={t('settings.aiExplainCode')}
-                        value={settings.ai_prompt_explain_code || ''}
-                        titleValue={settings.ai_title_explain_code}
-                        onSave={(val) => updateSetting('ai_prompt_explain_code', val)}
-                        onSaveTitle={(val) => updateSetting('ai_title_explain_code', val)}
-                        placeholder={t('settings.aiExplainCodePlaceholder')}
-                      />
-
-                      <PromptEditor
-                        label={t('settings.aiFixGrammar')}
-                        value={settings.ai_prompt_fix_grammar || ''}
-                        titleValue={settings.ai_title_fix_grammar}
-                        onSave={(val) => updateSetting('ai_prompt_fix_grammar', val)}
-                        onSaveTitle={(val) => updateSetting('ai_title_fix_grammar', val)}
-                        placeholder={t('settings.aiFixGrammarPlaceholder')}
-                      />
-                    </div>
-                  </section>
-                </>
-              )}
-
               {/* --- FOLDERS TAB --- */}
               {activeTab === 'folders' && (
                 <section className="space-y-4">
@@ -1018,17 +784,22 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
         {/* Footer */}
         <div className="flex flex-col items-center gap-1 border-t border-border bg-background px-4 py-3 text-center">
           <button
-            onClick={() => openUrl('https://github.com/XueshiQiao/PastePaw').catch(console.error)}
+            onClick={() =>
+              openUrl('https://github.com/SouthForge-AI/cubby-clipboard').catch(console.error)
+            }
             className="text-xs text-muted-foreground transition-colors hover:text-foreground"
           >
-            PastePaw {appVersion || '...'}
+            Cubby {appVersion || '...'}
           </button>
-          <div className="flex gap-2 text-xs text-muted-foreground">
-            <a href="https://pastepaw.com" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">© 2026 PastePaw</a>
-            <span>•</span>
-            <button onClick={handleCheckUpdate} className="underline hover:text-foreground">
-              {t('settings.checkForUpdates')}
-            </button>
+          <div className="text-xs text-muted-foreground">
+            <a
+              href="https://github.com/SouthForge-AI/cubby-clipboard"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline hover:text-foreground"
+            >
+              © 2026 SouthForge AI
+            </a>
           </div>
         </div>
       </div>

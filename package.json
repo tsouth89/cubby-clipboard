@@ -1,7 +1,7 @@
 {
-  "name": "pastepaw",
-  "version": "1.3.0",
-  "description": "A beautiful clipboard history manager",
+  "name": "cubby-clipboard",
+  "version": "0.1.0",
+  "description": "A native-feeling clipboard history replacement for Windows 11",
   "license": "GPL-3.0",
   "type": "module",
   "scripts": {
@@ -17,8 +17,6 @@
     "@tauri-apps/plugin-clipboard-manager": "^2.0.0",
     "@tauri-apps/plugin-log": "^2.8.0",
     "@tauri-apps/plugin-opener": "^2.0.0",
-    "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-updater": "^2.10.0",
     "clsx": "^2.0.0",
     "date-fns": "^2.30.0",
     "framer-motion": "^12.38.0",

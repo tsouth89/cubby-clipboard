@@ -1,4 +1,3 @@
-#![allow(non_snake_case)] // crate name PastePaw is intentional
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
@@ -8,7 +7,6 @@ use tauri::{
     tray::{TrayIcon, TrayIconBuilder},
     Manager,
 };
-use tauri_plugin_aptabase::EventTracker;
 #[cfg(not(feature = "app-store"))]
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -16,7 +14,6 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 static IS_ANIMATING: AtomicBool = AtomicBool::new(false);
 static LAST_SHOW_TIME: AtomicI64 = AtomicI64::new(0);
 
-mod ai;
 mod clipboard;
 mod commands;
 mod constants;
@@ -32,8 +29,8 @@ use settings_manager::SettingsManager;
 pub fn run_app() {
     let data_dir = get_data_dir();
     fs::create_dir_all(&data_dir).ok();
-    let db_path = data_dir.join("paste_paw.db");
-    let db_path_str = db_path.to_str().unwrap_or("paste_paw.db").to_string();
+    let db_path = data_dir.join("cubby.db");
+    let db_path_str = db_path.to_str().unwrap_or("cubby.db").to_string();
 
     let rt = get_runtime().expect("Failed to get global tokio runtime");
     let _guard = rt.enter();
@@ -80,12 +77,10 @@ pub fn run_app() {
 
     #[cfg(not(feature = "app-store"))]
     {
-        builder = builder
-            .plugin(tauri_plugin_autostart::init(
-                MacosLauncher::LaunchAgent,
-                Some(vec!["--flag1", "--flag2"]),
-            ))
-            .plugin(tauri_plugin_updater::Builder::new().build());
+        builder = builder.plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec!["--flag1", "--flag2"]),
+        ));
     }
 
     builder
@@ -95,8 +90,8 @@ pub fn run_app() {
             use tauri_plugin_notification::NotificationExt;
             if let Err(e) = app.notification()
                 .builder()
-                .title("PastePaw")
-                .body("PastePaw is already running")
+                .title("Cubby")
+                .body("Cubby is already running")
                 .show() {
                 log::error!("Failed to send notification: {:?}", e);
             }
@@ -106,8 +101,6 @@ pub fn run_app() {
         .plugin(tauri_plugin_clipboard_x::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_aptabase::Builder::new("A-US-2920723583").build())
         .manage(db_arc.clone())
         .on_window_event(|window, event| {
             match event {
@@ -115,7 +108,7 @@ pub fn run_app() {
                     log::info!("THEME:System theme changed to: {:?}, win.theme(): {:?}", theme, window.theme());
                     let label = window.label().to_string();
                     let app_handle = window.app_handle().clone();
-                    let theme_ = theme.clone();
+                    let theme_ = *theme;
 
                     // Update tray icon to match new system theme
                     if let Some(tray) = app_handle.tray_by_id("main") {
@@ -140,61 +133,58 @@ pub fn run_app() {
                         }
                     });
                 }
-                tauri::WindowEvent::Focused(focused) => {
-                    if !focused {
-                        let label = window.label();
-                        // Only auto-hide the main window
-                        if label == "main" {
-                            if window.app_handle().get_webview_window("settings").is_some() {
-                                // Settings window is open, keep main window visible
-                                return;
-                            }
+                tauri::WindowEvent::Focused(false) => {
+                    let label = window.label();
+                    // Only auto-hide the main window
+                    if label != "main" {
+                        return;
+                    }
+                    if window.app_handle().get_webview_window("settings").is_some() {
+                        // Settings window is open, keep main window visible
+                        return;
+                    }
 
-                            // Debounce: Ignore blur events immediately after showing
-                            let last_show = LAST_SHOW_TIME.load(Ordering::SeqCst);
-                            let now = chrono::Local::now().timestamp_millis();
-                            let debounce_ms = 500;
-                            if now - last_show < debounce_ms {
-                                return;
-                            }
+                    // Debounce: Ignore blur events immediately after showing
+                    let last_show = LAST_SHOW_TIME.load(Ordering::SeqCst);
+                    let now = chrono::Local::now().timestamp_millis();
+                    let debounce_ms = 500;
+                    if now - last_show < debounce_ms {
+                        return;
+                    }
 
-                        if let Some(win) = window.app_handle().get_webview_window(label) {
-                                 // Safety checks:
-                                 // 1. If we are already animating (e.g. hiding via hotkey), don't interfere.
-                                 if IS_ANIMATING.load(Ordering::SeqCst) {
-                                     return;
-                                 }
-                                 // 2. If the window is not visible (e.g. just hidden programmatically), don't try to move/show it.
-                                 if !win.is_visible().unwrap_or(false) {
-                                     return;
-                                 }
+                    if let Some(win) = window.app_handle().get_webview_window(label) {
+                        // Safety checks:
+                        // 1. If we are already animating (e.g. hiding via hotkey), don't interfere.
+                        if IS_ANIMATING.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        // 2. If the window is not visible (e.g. just hidden programmatically), don't try to move/show it.
+                        if !win.is_visible().unwrap_or(false) {
+                            return;
+                        }
 
-                                 // Check if cursor is on a different monitor
-                                 let current_monitor = win.current_monitor().ok().flatten();
-                                 let cursor_monitor = get_monitor_at_cursor(&win);
+                        // Check if cursor is on a different monitor
+                        let current_monitor = win.current_monitor().ok().flatten();
+                        let cursor_monitor = get_monitor_at_cursor(&win);
+                        let moved_screens =
+                            if let (Some(cm), Some(crm)) = (&current_monitor, &cursor_monitor) {
+                                cm.position().x != crm.position().x
+                                    || cm.position().y != crm.position().y
+                            } else {
+                                false
+                            };
 
-                                 let mut moved_screens = false;
-                                 if let (Some(cm), Some(crm)) = (&current_monitor, &cursor_monitor) {
-                                     if cm.position().x != crm.position().x || cm.position().y != crm.position().y {
-                                         moved_screens = true;
-                                     }
-                                 }
-
-                                 if moved_screens {
-                                     // User clicked on another screen, move window there immediately
-                                     position_window_at_bottom(&win);
-                                     let _ = win.show();
-                                     let _ = win.set_focus();
-                                 } else {
-                                     // Normal blur handling (hide)
-                                     if win.is_visible().unwrap_or(false) {
-                                         let win_clone = win.clone();
-                                         std::thread::spawn(move || {
-                                             crate::animate_window_hide(&win_clone, None);
-                                         });
-                                     }
-                                 }
-                            }
+                        if moved_screens {
+                            // User clicked on another screen, move window there immediately
+                            position_window_at_bottom(&win);
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        } else {
+                            // Normal blur handling (hide)
+                            let win_clone = win.clone();
+                            std::thread::spawn(move || {
+                                crate::animate_window_hide(&win_clone, None);
+                            });
                         }
                     }
                 }
@@ -202,7 +192,7 @@ pub fn run_app() {
             }
         })
         .setup(move |app| {
-            log::info!("PastePaw starting...");
+            log::info!("Cubby starting...");
 
             // Initialize Settings Manager
             let db_for_settings = db_arc.clone();
@@ -211,7 +201,6 @@ pub fn run_app() {
             });
             app.manage(Arc::new(settings_manager));
 
-            let _ = app.track_event("startup", None);
             log::info!("Database path: {}", db_path_str);
             if let Ok(log_dir) = app.path().app_log_dir() {
                 log::info!("Log directory: {:?}", log_dir);
@@ -222,7 +211,7 @@ pub fn run_app() {
             let version = env!("CARGO_PKG_VERSION");
             let title = format!("v{}", version);
             let title_i = MenuItem::with_id(app, "title", &title, false, None::<&str>)?;
-            let quit_i = MenuItem::with_id(app, "quit", "Quit PastePaw", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit", "Quit Cubby", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
             let separator_i = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(app, &[&title_i, &show_i, &separator_i, &quit_i])?;
@@ -244,7 +233,7 @@ pub fn run_app() {
                 .menu(&menu);
 
             let _tray = tray_builder
-                .tooltip("PastePaw")
+                .tooltip("Cubby")
                 .on_menu_event(move |app, event| {
                     if event.id.as_ref() == "quit" {
                         app.exit(0);
@@ -358,7 +347,6 @@ pub fn run_app() {
             commands::pick_file,
             commands::get_layout_config,
             commands::test_log,
-            commands::ai_process_clip,
             commands::focus_window,
             commands::refresh_window
         ])
@@ -388,8 +376,16 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
         let s = manager.get();
         let is_mica = s.mica_effect != "clear";
         let no_corners = !s.round_corners;
-        let side = if is_mica && no_corners { 0.0 } else { constants::WINDOW_MARGIN };
-        let bottom = if is_mica && no_corners { 0.0 } else { constants::WINDOW_MARGIN };
+        let side = if is_mica && no_corners {
+            0.0
+        } else {
+            constants::WINDOW_MARGIN
+        };
+        let bottom = if is_mica && no_corners {
+            0.0
+        } else {
+            constants::WINDOW_MARGIN
+        };
         (side, bottom, s.float_above_taskbar)
     };
 
@@ -440,7 +436,10 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
                         let _ = SetWindowPos(
                             hwnd,
                             Some(hwnd_topmost),
-                            0, 0, 0, 0,
+                            0,
+                            0,
+                            0,
+                            0,
                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                         );
                     }
@@ -453,11 +452,10 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
 
             for i in 1..=steps {
                 let current_y = start_y as f64 + dy * i as f64;
-                let _ =
-                    window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                        x: work_area.position.x + side_margin_px,
-                        y: current_y as i32,
-                    }));
+                let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+                    x: work_area.position.x + side_margin_px,
+                    y: current_y as i32,
+                }));
                 std::thread::sleep(duration);
             }
 
@@ -488,8 +486,16 @@ pub fn animate_window_hide(
         let s = manager.get();
         let is_mica = s.mica_effect != "clear";
         let no_corners = !s.round_corners;
-        let side = if is_mica && no_corners { 0.0 } else { constants::WINDOW_MARGIN };
-        let bottom = if is_mica && no_corners { 0.0 } else { constants::WINDOW_MARGIN };
+        let side = if is_mica && no_corners {
+            0.0
+        } else {
+            constants::WINDOW_MARGIN
+        };
+        let bottom = if is_mica && no_corners {
+            0.0
+        } else {
+            constants::WINDOW_MARGIN
+        };
         (side, bottom, s.float_above_taskbar)
     };
 
@@ -521,11 +527,10 @@ pub fn animate_window_hide(
 
             for i in 1..=steps {
                 let current_y = start_y as f64 + dy * i as f64;
-                let _ =
-                    window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                        x: work_area.position.x + side_margin_px,
-                        y: current_y as i32,
-                    }));
+                let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+                    x: work_area.position.x + side_margin_px,
+                    y: current_y as i32,
+                }));
                 std::thread::sleep(duration);
             }
 
@@ -542,8 +547,8 @@ pub fn animate_window_hide(
 fn get_data_dir() -> std::path::PathBuf {
     let current_dir = std::env::current_dir().unwrap_or(std::path::PathBuf::from("."));
     match dirs::data_dir() {
-        Some(path) => path.join("PastePaw"),
-        None => current_dir.join("PastePaw"),
+        Some(path) => path.join("Cubby Clipboard"),
+        None => current_dir.join("Cubby Clipboard"),
     }
 }
 
@@ -571,7 +576,12 @@ pub fn get_monitor_at_cursor(window: &tauri::WebviewWindow) -> Option<tauri::Mon
     found.or_else(|| window.current_monitor().ok().flatten())
 }
 
-pub fn apply_window_effect(window: &tauri::WebviewWindow, effect: &str, theme: &tauri::Theme, round_corners: bool) {
+pub fn apply_window_effect(
+    window: &tauri::WebviewWindow,
+    effect: &str,
+    theme: &tauri::Theme,
+    round_corners: bool,
+) {
     log::info!(
         "THEME:apply_window_effect called: effect={}, theme={:?}, round_corners={}",
         effect,
@@ -596,7 +606,16 @@ pub fn apply_window_effect(window: &tauri::WebviewWindow, effect: &str, theme: &
             }
             log::info!("THEME:Applied Mica effect (Theme: {})", theme);
         }
-        "mica_alt" | "auto" | _ => {
+        "mica_alt" | "auto" => {
+            if let Err(e) = clear_mica(window) {
+                log::error!("THEME:Failed to clear mica: {:?}", e);
+            }
+            if let Err(e) = apply_tabbed(window, Some(matches!(theme, tauri::Theme::Dark))) {
+                log::error!("THEME:Failed to apply tabbed: {:?}", e);
+            }
+            log::info!("THEME:Applied Tabbed effect (Theme: {})", theme);
+        }
+        _ => {
             if let Err(e) = clear_mica(window) {
                 log::error!("THEME:Failed to clear mica: {:?}", e);
             }
@@ -616,7 +635,11 @@ pub fn apply_window_effect(window: &tauri::WebviewWindow, effect: &str, theme: &
             DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND,
         };
         let hwnd = HWND(handle.0 as _);
-        let corner_pref = if use_rounded { DWMWCP_ROUND.0 } else { DWMWCP_DONOTROUND.0 };
+        let corner_pref = if use_rounded {
+            DWMWCP_ROUND.0
+        } else {
+            DWMWCP_DONOTROUND.0
+        };
         unsafe {
             let _ = DwmSetWindowAttribute(
                 hwnd,
