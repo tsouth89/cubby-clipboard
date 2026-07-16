@@ -35,7 +35,7 @@ use windows::Win32::System::ProcessStatus::{GetModuleBaseNameW, GetModuleFileNam
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_INSERT, VK_SHIFT,
+    SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL, VK_V,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::{
@@ -978,14 +978,14 @@ unsafe fn extract_icon(path: &str) -> Option<String> {
 
 #[cfg(target_os = "windows")]
 pub fn send_paste_input() {
-    log::info!("send_paste_input: sending Shift+Insert");
+    log::info!("send_paste_input: sending Ctrl+V");
     unsafe {
         let inputs = vec![
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT {
-                        wVk: VK_SHIFT,
+                        wVk: VK_CONTROL,
                         ..Default::default()
                     },
                 },
@@ -994,7 +994,7 @@ pub fn send_paste_input() {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT {
-                        wVk: VK_INSERT,
+                        wVk: VK_V,
                         ..Default::default()
                     },
                 },
@@ -1003,7 +1003,7 @@ pub fn send_paste_input() {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT {
-                        wVk: VK_INSERT,
+                        wVk: VK_V,
                         dwFlags: KEYEVENTF_KEYUP,
                         ..Default::default()
                     },
@@ -1013,7 +1013,7 @@ pub fn send_paste_input() {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT {
-                        wVk: VK_SHIFT,
+                        wVk: VK_CONTROL,
                         dwFlags: KEYEVENTF_KEYUP,
                         ..Default::default()
                     },

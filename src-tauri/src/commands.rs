@@ -475,7 +475,8 @@ async fn restore_clip(
                     crate::animate_window_hide(
                         window,
                         Some(Box::new(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(200));
+                            crate::restore_previous_foreground_window();
+                            std::thread::sleep(std::time::Duration::from_millis(100));
                             crate::clipboard::send_paste_input();
                         })),
                     );

@@ -1,5 +1,5 @@
 use std::fs;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicIsize, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{
     image::Image,
@@ -13,6 +13,7 @@ use tauri_plugin_autostart::MacosLauncher;
 static IS_ANIMATING: AtomicBool = AtomicBool::new(false);
 static LAST_SHOW_TIME: AtomicI64 = AtomicI64::new(0);
 static SHOW_GENERATION: AtomicU64 = AtomicU64::new(0);
+static PREVIOUS_FOREGROUND_WINDOW: AtomicIsize = AtomicIsize::new(0);
 
 mod clipboard;
 mod commands;
@@ -409,6 +410,8 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
         manager.get().float_above_taskbar
     };
 
+    remember_foreground_window(&window);
+
     std::thread::spawn(move || {
         if let Some(monitor) = get_monitor_at_cursor(&window) {
             let scale_factor = monitor.scale_factor();
@@ -487,6 +490,57 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
         }
         IS_ANIMATING.store(false, Ordering::SeqCst);
     });
+}
+
+fn remember_foreground_window(window: &tauri::WebviewWindow) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+        let foreground = unsafe { GetForegroundWindow() };
+        let foreground_value = foreground.0 as isize;
+        let cubby_hwnd = window.hwnd().ok().map(|handle| handle.0 as isize);
+
+        if foreground_value != 0 && Some(foreground_value) != cubby_hwnd {
+            PREVIOUS_FOREGROUND_WINDOW.store(foreground_value, Ordering::SeqCst);
+            log::debug!(
+                "FOCUS: remembered foreground window {:?} before showing Cubby",
+                foreground
+            );
+        }
+    }
+}
+
+pub fn restore_previous_foreground_window() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{IsWindow, SetForegroundWindow};
+
+        let value = PREVIOUS_FOREGROUND_WINDOW.load(Ordering::SeqCst);
+        if value == 0 {
+            log::warn!("FOCUS: no previous foreground window is available");
+            return false;
+        }
+
+        let target = HWND(value as _);
+        if !unsafe { IsWindow(Some(target)).as_bool() } {
+            log::warn!("FOCUS: remembered foreground window is no longer valid");
+            PREVIOUS_FOREGROUND_WINDOW.store(0, Ordering::SeqCst);
+            return false;
+        }
+
+        let restored = unsafe { SetForegroundWindow(target).as_bool() };
+        log::info!(
+            "FOCUS: SetForegroundWindow({:?}) returned {}",
+            target,
+            restored
+        );
+        restored
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    false
 }
 
 fn suppress_native_window_frame(window: &tauri::WebviewWindow) {
