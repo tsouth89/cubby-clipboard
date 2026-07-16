@@ -42,6 +42,8 @@
     "copyPlainText": "Copy as plain text",
     "pastePlainText": "Paste as plain text",
     "delete": "Delete",
+    "clearUnpinned": "Clear unpinned items…",
+    "clearAll": "Clear everything…",
     "rename": "Rename",
     "moveToFolder": "Move to Folder",
     "summarize": "Summarize (AI)",
@@ -147,6 +149,19 @@
     "clipDeleteFailed": "Failed to delete clip",
     "folderDeleteFailed": "Failed to delete folder",
     "folderRenameFailed": "Failed to rename folder",
-    "copyFailed": "Failed to copy"
+    "copyFailed": "Failed to copy",
+    "clearUnpinnedSuccess_one": "Cleared {{count}} unpinned item",
+    "clearUnpinnedSuccess_other": "Cleared {{count}} unpinned items",
+    "clearAllSuccess": "Clipboard history cleared",
+    "clearFailed": "Failed to clear clipboard history"
+  },
+  "clearHistory": {
+    "unpinnedTitle": "Clear unpinned items?",
+    "unpinnedMessage": "Remove every unpinned item from Cubby? Your pinned items will stay.",
+    "allTitle": "Clear everything?",
+    "allMessage": "Remove every item from Cubby, including pinned items? This cannot be undone.",
+    "confirmUnpinned": "Clear unpinned",
+    "confirmAll": "Clear everything",
+    "clearing": "Clearing…"
   }
 }

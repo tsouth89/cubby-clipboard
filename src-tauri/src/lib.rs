@@ -373,6 +373,7 @@ pub fn run_app() {
             commands::hide_window,
             commands::get_clipboard_history_size,
             commands::clear_clipboard_history,
+            commands::clear_unpinned_clips,
             commands::clear_all_clips,
             commands::remove_duplicate_clips,
             commands::register_global_shortcut,

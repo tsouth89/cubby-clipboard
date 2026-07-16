@@ -94,21 +94,6 @@ async fn cleanup_orphan_clip_image_files(pool: &SqlitePool) -> Result<(), String
     Ok(())
 }
 
-async fn cleanup_all_clip_image_files(pool: &SqlitePool) -> Result<(), String> {
-    let all_paths: Vec<Option<String>> = sqlx::query_scalar(r#"SELECT file_path FROM clip_images"#)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    for path in all_paths.into_iter().flatten() {
-        if !path.is_empty() {
-            crate::clipboard::remove_full_image_file(&path);
-        }
-    }
-
-    Ok(())
-}
-
 pub async fn migrate_images_to_files(pool: &SqlitePool) -> Result<(), String> {
     log::info!("Starting background image migration...");
 
@@ -898,20 +883,72 @@ pub async fn clear_clipboard_history(db: tauri::State<'_, Arc<Database>>) -> Res
     Ok(())
 }
 
+async fn clear_clips_in_pool(
+    pool: &SqlitePool,
+    preserve_pinned: bool,
+) -> Result<(u64, Vec<String>), String> {
+    let clip_filter = if preserve_pinned {
+        "is_pinned = 0 OR is_deleted = 1"
+    } else {
+        "1 = 1"
+    };
+    let image_filter = if preserve_pinned {
+        "clip_uuid NOT IN (SELECT uuid FROM clips WHERE is_pinned = 1 AND is_deleted = 0)"
+    } else {
+        "1 = 1"
+    };
+    let image_paths_sql = format!("SELECT file_path FROM clip_images WHERE {image_filter}");
+    let delete_images_sql = format!("DELETE FROM clip_images WHERE {image_filter}");
+    let delete_clips_sql = format!("DELETE FROM clips WHERE {clip_filter}");
+
+    let mut transaction = pool.begin().await.map_err(|error| error.to_string())?;
+    let image_paths: Vec<Option<String>> = sqlx::query_scalar(&image_paths_sql)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    sqlx::query(&delete_images_sql)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| error.to_string())?;
+    let deleted = sqlx::query(&delete_clips_sql)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| error.to_string())?
+        .rows_affected();
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    Ok((
+        deleted,
+        image_paths
+            .into_iter()
+            .flatten()
+            .filter(|path| !path.is_empty())
+            .collect(),
+    ))
+}
+
+fn remove_clip_image_files(image_paths: Vec<String>) {
+    for path in image_paths {
+        crate::clipboard::remove_full_image_file(&path);
+    }
+}
+
+#[tauri::command]
+pub async fn clear_unpinned_clips(db: tauri::State<'_, Arc<Database>>) -> Result<u64, String> {
+    let (deleted, image_paths) = clear_clips_in_pool(&db.pool, true).await?;
+    remove_clip_image_files(image_paths);
+    Ok(deleted)
+}
+
 #[tauri::command]
 pub async fn clear_all_clips(db: tauri::State<'_, Arc<Database>>) -> Result<(), String> {
-    let pool = &db.pool;
-
-    cleanup_all_clip_image_files(pool).await?;
-
-    sqlx::query(r#"DELETE FROM clip_images"#)
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    sqlx::query(r#"DELETE FROM clips"#)
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (_, image_paths) = clear_clips_in_pool(&db.pool, false).await?;
+    remove_clip_image_files(image_paths);
     Ok(())
 }
 
@@ -1042,7 +1079,7 @@ pub fn get_system_accent_color() -> Result<serde_json::Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::toggle_clip_pin_in_pool;
+    use super::{clear_clips_in_pool, toggle_clip_pin_in_pool};
     use crate::database::Database;
     use sqlx::sqlite::SqlitePoolOptions;
 
@@ -1080,5 +1117,71 @@ mod tests {
             toggle_clip_pin_in_pool(&database.pool, "missing").await,
             Err("Clipboard item not found".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn bulk_clear_preserves_only_active_pinned_clips() {
+        let database = test_database().await;
+        for (uuid, pinned, deleted) in [
+            ("pinned", 1, 0),
+            ("ordinary", 0, 0),
+            ("deleted-pinned", 1, 1),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO clips
+                    (uuid, clip_type, content, text_preview, content_hash, is_pinned, is_deleted)
+                VALUES (?, 'image', X'', ?, ?, ?, ?)
+                "#,
+            )
+            .bind(uuid)
+            .bind(uuid)
+            .bind(format!("hash-{uuid}"))
+            .bind(pinned)
+            .bind(deleted)
+            .execute(&database.pool)
+            .await
+            .expect("clip should be inserted");
+
+            sqlx::query(
+                r#"
+                INSERT INTO clip_images (clip_uuid, full_content, file_path)
+                VALUES (?, X'', ?)
+                "#,
+            )
+            .bind(uuid)
+            .bind(format!("{uuid}.png"))
+            .execute(&database.pool)
+            .await
+            .expect("image metadata should be inserted");
+        }
+        let (deleted, image_paths) = clear_clips_in_pool(&database.pool, true)
+            .await
+            .expect("clear should succeed");
+        assert_eq!(deleted, 2);
+        assert_eq!(image_paths.len(), 2);
+
+        let remaining_clips: Vec<String> =
+            sqlx::query_scalar("SELECT uuid FROM clips ORDER BY uuid")
+                .fetch_all(&database.pool)
+                .await
+                .expect("remaining clips should load");
+        let remaining_images: Vec<String> =
+            sqlx::query_scalar("SELECT clip_uuid FROM clip_images ORDER BY clip_uuid")
+                .fetch_all(&database.pool)
+                .await
+                .expect("remaining image metadata should load");
+        assert_eq!(remaining_clips, vec!["pinned"]);
+        assert_eq!(remaining_images, vec!["pinned"]);
+
+        let (deleted, _) = clear_clips_in_pool(&database.pool, false)
+            .await
+            .expect("full clear should succeed");
+        assert_eq!(deleted, 1);
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM clips")
+            .fetch_one(&database.pool)
+            .await
+            .expect("clip count should load");
+        assert_eq!(remaining, 0);
     }
 }

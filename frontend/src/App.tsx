@@ -8,6 +8,7 @@ import { ClipList } from './components/ClipList';
 import { ContentFilter, FlyoutHeader } from './components/FlyoutHeader';
 import { ContextMenu } from './components/ContextMenu';
 import { FolderModal } from './components/FolderModal';
+import { ConfirmDialog } from './components/ConfirmDialog';
 import { useKeyboard } from './hooks/useKeyboard';
 import { useTheme } from './hooks/useTheme';
 import { useLanguage } from './hooks/useLanguage';
@@ -52,6 +53,14 @@ function App() {
   const [theme, setTheme] = useState('system');
   const [settings, setSettings] = useState<Settings | null>(null);
   const [pasteContext, setPasteContext] = useState<PasteContext | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    type: 'card' | 'folder' | 'history';
+    x: number;
+    y: number;
+    itemId: string;
+  } | null>(null);
+  const [clearRequest, setClearRequest] = useState<'unpinned' | 'all' | null>(null);
+  const [isClearing, setIsClearing] = useState(false);
 
   // Add Folder Modal State
   const [showAddFolderModal, setShowAddFolderModal] = useState(false);
@@ -440,6 +449,7 @@ function App() {
 
   useEffect(() => {
     const focusSearchOnTyping = (event: KeyboardEvent) => {
+      if (contextMenu || clearRequest || showAddFolderModal) return;
       const target = event.target as HTMLElement | null;
       const isEditing =
         target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
@@ -456,7 +466,7 @@ function App() {
 
     document.addEventListener('keydown', focusSearchOnTyping);
     return () => document.removeEventListener('keydown', focusSearchOnTyping);
-  }, []);
+  }, [clearRequest, contextMenu, showAddFolderModal]);
 
   const handleNavigateUp = useCallback(() => {
     if (visibleClips.length === 0) return;
@@ -506,6 +516,7 @@ function App() {
   }, [selectedClipId, handleCopy]);
 
   useKeyboard({
+    disabled: Boolean(contextMenu || clearRequest || showAddFolderModal),
     onClose: () => {
       if (searchQuery) {
         setSearchQuery('');
@@ -564,14 +575,6 @@ function App() {
     }
   }, [hasMore, isLoading, selectedFolder, loadClips, searchQuery]);
 
-  // Context Menu State
-  const [contextMenu, setContextMenu] = useState<{
-    type: 'card' | 'folder';
-    x: number;
-    y: number;
-    itemId: string;
-  } | null>(null);
-
   // New Folder Modal Rename Mode
   const [folderModalMode, setFolderModalMode] = useState<'create' | 'rename'>('create');
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
@@ -588,6 +591,16 @@ function App() {
     },
     []
   );
+
+  const handleHistoryMenu = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    setContextMenu({
+      type: 'history',
+      x: rect.right,
+      y: rect.bottom + 4,
+      itemId: '',
+    });
+  }, []);
 
   const handleCloseContextMenu = useCallback(() => {
     setContextMenu(null);
@@ -630,6 +643,36 @@ function App() {
     }
   };
 
+  const handleClearClips = async (mode: 'unpinned' | 'all') => {
+    if (isClearing) return;
+    setIsClearing(true);
+    try {
+      const deleted =
+        mode === 'unpinned'
+          ? await invoke<number>('clear_unpinned_clips')
+          : (await invoke('clear_all_clips'), totalClipCount);
+
+      setSelectedClipId(null);
+      setClipListResetToken((token) => token + 1);
+      await Promise.all([
+        loadClips(selectedFolder, false, searchQuery),
+        loadFolders(),
+        refreshTotalCount(),
+      ]);
+      toast.success(
+        mode === 'unpinned'
+          ? t('notifications.clearUnpinnedSuccess', { count: deleted })
+          : t('notifications.clearAllSuccess')
+      );
+      setClearRequest(null);
+    } catch (error) {
+      console.error('Failed to clear clipboard history:', error);
+      toast.error(t('notifications.clearFailed'));
+    } finally {
+      setIsClearing(false);
+    }
+  };
+
   return (
     <div
       data-el="app-root"
@@ -646,72 +689,110 @@ function App() {
               y={contextMenu.y}
               onClose={handleCloseContextMenu}
               options={
-                contextMenu.type === 'card'
-                  ? (() => {
-                      const clip = clips.find((item) => item.id === contextMenu.itemId);
-                      return [
+                contextMenu.type === 'history'
+                  ? [
+                      {
+                        label: t('contextMenu.clearUnpinned'),
+                        disabled: totalClipCount === 0,
+                        onClick: () => setClearRequest('unpinned'),
+                      },
+                      {
+                        label: t('contextMenu.clearAll'),
+                        danger: true,
+                        disabled: totalClipCount === 0,
+                        onClick: () => setClearRequest('all'),
+                      },
+                    ]
+                  : contextMenu.type === 'card'
+                    ? (() => {
+                        const clip = clips.find((item) => item.id === contextMenu.itemId);
+                        return [
+                          {
+                            label: clip?.is_pinned ? 'Unpin' : 'Pin',
+                            onClick: () => handleTogglePin(contextMenu.itemId),
+                          },
+                          {
+                            label: t('contextMenu.paste'),
+                            onClick: () => handlePaste(contextMenu.itemId),
+                          },
+                          {
+                            label: t('contextMenu.pastePlainText'),
+                            disabled: clip?.clip_type === 'image',
+                            onClick: () => handlePaste(contextMenu.itemId, true),
+                          },
+                          {
+                            label: t('contextMenu.copy'),
+                            onClick: () => handleCopy(contextMenu.itemId),
+                          },
+                          {
+                            label: t('contextMenu.copyPlainText'),
+                            disabled: clip?.clip_type === 'image',
+                            onClick: () => handleCopy(contextMenu.itemId, true),
+                          },
+                          ...(clip?.folder_id
+                            ? [
+                                {
+                                  label: 'Remove from folder',
+                                  onClick: () => handleMoveClip(contextMenu.itemId, null),
+                                },
+                              ]
+                            : []),
+                          ...folders.map((folder) => ({
+                            label: `Move to ${folder.name}`,
+                            disabled: clip?.folder_id === folder.id,
+                            onClick: () => handleMoveClip(contextMenu.itemId, folder.id),
+                          })),
+                          {
+                            label: t('contextMenu.delete'),
+                            danger: true,
+                            onClick: () => handleDelete(contextMenu.itemId),
+                          },
+                        ];
+                      })()
+                    : [
                         {
-                          label: clip?.is_pinned ? 'Unpin' : 'Pin',
-                          onClick: () => handleTogglePin(contextMenu.itemId),
+                          label: t('contextMenu.rename'),
+                          onClick: () => {
+                            setFolderModalMode('rename');
+                            setEditingFolderId(contextMenu.itemId);
+                            const folder = folders.find((f) => f.id === contextMenu.itemId);
+                            setNewFolderName(folder ? folder.name : '');
+                            setShowAddFolderModal(true);
+                          },
                         },
-                        {
-                          label: t('contextMenu.paste'),
-                          onClick: () => handlePaste(contextMenu.itemId),
-                        },
-                        {
-                          label: t('contextMenu.pastePlainText'),
-                          disabled: clip?.clip_type === 'image',
-                          onClick: () => handlePaste(contextMenu.itemId, true),
-                        },
-                        {
-                          label: t('contextMenu.copy'),
-                          onClick: () => handleCopy(contextMenu.itemId),
-                        },
-                        {
-                          label: t('contextMenu.copyPlainText'),
-                          disabled: clip?.clip_type === 'image',
-                          onClick: () => handleCopy(contextMenu.itemId, true),
-                        },
-                        ...(clip?.folder_id
-                          ? [
-                              {
-                                label: 'Remove from folder',
-                                onClick: () => handleMoveClip(contextMenu.itemId, null),
-                              },
-                            ]
-                          : []),
-                        ...folders.map((folder) => ({
-                          label: `Move to ${folder.name}`,
-                          disabled: clip?.folder_id === folder.id,
-                          onClick: () => handleMoveClip(contextMenu.itemId, folder.id),
-                        })),
                         {
                           label: t('contextMenu.delete'),
                           danger: true,
-                          onClick: () => handleDelete(contextMenu.itemId),
+                          onClick: () => handleDeleteFolder(contextMenu.itemId),
                         },
-                      ];
-                    })()
-                  : [
-                      {
-                        label: t('contextMenu.rename'),
-                        onClick: () => {
-                          setFolderModalMode('rename');
-                          setEditingFolderId(contextMenu.itemId);
-                          const folder = folders.find((f) => f.id === contextMenu.itemId);
-                          setNewFolderName(folder ? folder.name : '');
-                          setShowAddFolderModal(true);
-                        },
-                      },
-                      {
-                        label: t('contextMenu.delete'),
-                        danger: true,
-                        onClick: () => handleDeleteFolder(contextMenu.itemId),
-                      },
-                    ]
+                      ]
               }
             />
           )}
+
+          <ConfirmDialog
+            isOpen={clearRequest !== null}
+            title={
+              clearRequest === 'all' ? t('clearHistory.allTitle') : t('clearHistory.unpinnedTitle')
+            }
+            message={
+              clearRequest === 'all'
+                ? t('clearHistory.allMessage')
+                : t('clearHistory.unpinnedMessage')
+            }
+            confirmText={
+              isClearing
+                ? t('clearHistory.clearing')
+                : clearRequest === 'all'
+                  ? t('clearHistory.confirmAll')
+                  : t('clearHistory.confirmUnpinned')
+            }
+            isBusy={isClearing}
+            onConfirm={() => {
+              if (clearRequest) void handleClearClips(clearRequest);
+            }}
+            onCancel={() => setClearRequest(null)}
+          />
 
           <FlyoutHeader
             searchQuery={searchQuery}
@@ -730,6 +811,7 @@ function App() {
               setNewFolderName('');
               setShowAddFolderModal(true);
             }}
+            onOpenHistoryMenu={handleHistoryMenu}
             onOpenSettings={openSettings}
           />
 
