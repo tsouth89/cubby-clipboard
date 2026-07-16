@@ -49,6 +49,7 @@ function App() {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [clipListResetToken, setClipListResetToken] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [theme, setTheme] = useState('system');
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -189,6 +190,7 @@ function App() {
 
       try {
         setIsLoading(true);
+        setLoadError(false);
 
         const currentOffset = append ? clips.length : 0;
 
@@ -261,6 +263,8 @@ function App() {
         }
       } catch (error) {
         console.error('Failed to load clips:', error);
+        setLoadError(true);
+        setHasMore(false);
       } finally {
         setIsLoading(false);
       }
@@ -436,6 +440,58 @@ function App() {
       }),
     [clips, contentFilter]
   );
+
+  const emptyState = useMemo(() => {
+    if (searchQuery.trim()) {
+      return {
+        title: t('clipList.noMatches'),
+        description: t('clipList.noMatchesDesc'),
+      };
+    }
+    if (selectedFolder) {
+      return {
+        title: t('clipList.emptyFolder'),
+        description: t('clipList.emptyFolderDesc'),
+      };
+    }
+    if (contentFilter === 'images') {
+      return {
+        title: t('clipList.noImages'),
+        description: t('clipList.noImagesDesc'),
+      };
+    }
+    if (contentFilter === 'text') {
+      return {
+        title: t('clipList.noText'),
+        description: t('clipList.noTextDesc'),
+      };
+    }
+    return {
+      title: t('clipList.empty'),
+      description: t('clipList.emptyDesc'),
+    };
+  }, [contentFilter, searchQuery, selectedFolder, t]);
+
+  useEffect(() => {
+    if (
+      contentFilter !== 'all' &&
+      clips.length > 0 &&
+      visibleClips.length === 0 &&
+      hasMore &&
+      !isLoading
+    ) {
+      loadClips(selectedFolder, true, searchQuery);
+    }
+  }, [
+    clips.length,
+    contentFilter,
+    hasMore,
+    isLoading,
+    loadClips,
+    searchQuery,
+    selectedFolder,
+    visibleClips.length,
+  ]);
 
   useEffect(() => {
     if (visibleClips.length === 0) {
@@ -821,16 +877,20 @@ function App() {
           >
             <ClipList
               clips={visibleClips}
-              isLoading={isLoading}
+              isLoading={isLoading || (visibleClips.length === 0 && hasMore)}
               hasMore={hasMore}
               resetToken={clipListResetToken}
               density={density}
               selectedClipId={selectedClipId}
+              loadError={loadError}
+              emptyTitle={emptyState.title}
+              emptyDescription={emptyState.description}
               onSelectClip={setSelectedClipId}
               onPaste={handlePaste}
               onCopy={handleCopy}
               onTogglePin={handleTogglePin}
               onLoadMore={loadMore}
+              onRetry={refreshCurrentFolder}
               onCardContextMenu={(e, clipId) => handleContextMenu(e, 'card', clipId)}
             />
 
