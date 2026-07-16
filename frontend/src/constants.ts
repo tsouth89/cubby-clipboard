@@ -7,4 +7,4 @@ export const LAYOUT = {
   WINDOW_PADDING: 10,
 };
 
-export const PREVIEW_CHAR_LIMIT = 220;
+export const PREVIEW_CHAR_LIMIT = 420;

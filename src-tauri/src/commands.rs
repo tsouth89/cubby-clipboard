@@ -950,3 +950,28 @@ pub fn get_layout_config() -> serde_json::Value {
         "window_height": crate::constants::WINDOW_HEIGHT,
     })
 }
+
+#[tauri::command]
+pub fn get_system_accent_color() -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::UI::ViewManagement::{UIColorType, UISettings};
+
+        let settings = UISettings::new().map_err(|error| error.to_string())?;
+        let color = settings
+            .GetColorValue(UIColorType::Accent)
+            .map_err(|error| error.to_string())?;
+
+        Ok(serde_json::json!({
+            "red": color.R,
+            "green": color.G,
+            "blue": color.B,
+            "alpha": color.A,
+        }))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("System accent color is only available on Windows".to_string())
+    }
+}

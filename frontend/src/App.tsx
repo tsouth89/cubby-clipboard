@@ -11,6 +11,7 @@ import { FolderModal } from './components/FolderModal';
 import { useKeyboard } from './hooks/useKeyboard';
 import { useTheme } from './hooks/useTheme';
 import { useLanguage } from './hooks/useLanguage';
+import { useSystemAccent } from './hooks/useSystemAccent';
 import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
 import { generateDemoClips } from './debug/demoData';
@@ -56,6 +57,7 @@ function App() {
   const [newFolderName, setNewFolderName] = useState('');
 
   const effectiveTheme = useTheme(theme);
+  useSystemAccent();
   useLanguage(settings?.language);
   const { t } = useTranslation();
 
@@ -668,13 +670,7 @@ function App() {
             <span>{totalClipCount.toLocaleString()} items</span>
             <div className="ml-auto flex items-center gap-3">
               <span>
-                <kbd>↑↓</kbd> Navigate
-              </span>
-              <span>
                 <kbd>Enter</kbd> Paste
-              </span>
-              <span>
-                <kbd>Ctrl+Enter</kbd> Copy
               </span>
               <span>
                 <kbd>Esc</kbd> Close
