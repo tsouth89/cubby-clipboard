@@ -56,3 +56,27 @@ For each client, test:
 - A capture failure is visible in local diagnostics and never silently reported as successful.
 
 These targets are a starting contract. Results from real applications and remote products should tighten the implementation and expand the regression suite.
+
+## Capture probe
+
+The Windows-only capture probe exercises the native clipboard notification path without involving the application UI:
+
+```powershell
+Push-Location src-tauri
+
+# Automated local burst. Every marker must produce its own clipboard update.
+cargo run --bin clipboard_probe -- --burst 100 --interval-ms 25
+
+# Interactive mode for RDP, NinjaOne, and other application testing.
+cargo run --bin clipboard_probe -- --timeout-seconds 300
+
+# Require 20 distinct readable text copies while ignoring remote sync churn.
+cargo run --bin clipboard_probe -- --expect-text 20 --timeout-seconds 300
+
+# Require 20 distinct text or screenshot copies.
+cargo run --bin clipboard_probe -- --expect-items 20 --timeout-seconds 300
+
+Pop-Location
+```
+
+Each event is emitted as JSON containing the clipboard sequence number, advertised formats, text or image status, dimensions or length, and a SHA-256 digest. Clipboard contents and image bytes are not printed. Burst mode exits unsuccessfully if it misses a marker, cannot read an update, or reaches the timeout. `--expect-text` counts distinct readable text. `--expect-items` counts distinct readable text or images and ignores non-content synchronization updates.
