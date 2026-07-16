@@ -32,7 +32,7 @@ cargo run --locked --bin clipboard_probe -- --burst 100 --interval-ms 10 --timeo
 - Run the interactive probe during RDP and NinjaOne sessions.
 - Add HTML, RTF, image, physical file-list, and virtual-file burst fixtures.
 - Verify content remains available after disconnecting or closing the source session.
-- Move the proven event and retry behavior into Cubby's production capture engine.
+- Run the new controlled-contention scenario and record the retry margin.
 
 ## NinjaOne remote-session validation
 

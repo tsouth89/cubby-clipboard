@@ -39,6 +39,7 @@ mod windows_probe {
     struct Config {
         burst_count: Option<usize>,
         interval_ms: u64,
+        contention_ms: u64,
         timeout_seconds: u64,
         expect_text: Option<usize>,
         expect_items: Option<usize>,
@@ -93,6 +94,7 @@ mod windows_probe {
                     .burst_count
                     .expect("internal writer requires --burst"),
                 config.interval_ms,
+                config.contention_ms,
             );
             return;
         }
@@ -151,13 +153,14 @@ mod windows_probe {
                 },
                 "expected_distinct_text": config.expect_text,
                 "expected_distinct_items": config.expect_items,
+                "contention_ms": config.contention_ms,
                 "timeout_seconds": config.timeout_seconds
             })
         );
 
         let mut writer = config
             .burst_count
-            .map(|count| spawn_burst_writer(count, config.interval_ms));
+            .map(|count| spawn_burst_writer(count, config.interval_ms, config.contention_ms));
 
         unsafe {
             let mut message = MSG::default();
@@ -220,6 +223,7 @@ mod windows_probe {
     fn parse_args() -> Config {
         let mut burst_count = None;
         let mut interval_ms = 25;
+        let mut contention_ms = 0;
         let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
         let mut expect_text = None;
         let mut expect_items = None;
@@ -231,6 +235,9 @@ mod windows_probe {
                 "--burst" => burst_count = Some(parse_value(&mut args, "--burst")),
                 "--interval-ms" => {
                     interval_ms = parse_value(&mut args, "--interval-ms");
+                }
+                "--contention-ms" => {
+                    contention_ms = parse_value(&mut args, "--contention-ms");
                 }
                 "--timeout-seconds" => {
                     timeout_seconds = parse_value(&mut args, "--timeout-seconds");
@@ -244,7 +251,7 @@ mod windows_probe {
                 "--writer" => writer = true,
                 "--help" | "-h" => {
                     println!(
-                        "Usage: clipboard_probe [--burst COUNT] [--interval-ms MS] [--expect-text COUNT] [--expect-items COUNT] [--timeout-seconds SECONDS]"
+                        "Usage: clipboard_probe [--burst COUNT] [--interval-ms MS] [--contention-ms MS] [--expect-text COUNT] [--expect-items COUNT] [--timeout-seconds SECONDS]"
                     );
                     std::process::exit(0);
                 }
@@ -258,6 +265,7 @@ mod windows_probe {
         Config {
             burst_count,
             interval_ms,
+            contention_ms,
             timeout_seconds,
             expect_text,
             expect_items,
@@ -281,7 +289,7 @@ mod windows_probe {
             })
     }
 
-    fn run_burst_writer(count: usize, interval_ms: u64) {
+    fn run_burst_writer(count: usize, interval_ms: u64, contention_ms: u64) {
         thread::sleep(Duration::from_millis(250));
         let clipboard = ClipboardContext::new().unwrap_or_else(|error| {
             eprintln!("failed to create burst clipboard context: {error}");
@@ -310,11 +318,41 @@ mod windows_probe {
                 break;
             }
 
+            if contention_ms > 0 {
+                hold_clipboard_open(contention_ms).unwrap_or_else(|error| {
+                    eprintln!(
+                        "failed to create clipboard contention after marker {index}: {error}"
+                    );
+                    std::process::exit(1);
+                });
+            }
+
             thread::sleep(Duration::from_millis(interval_ms));
         }
     }
 
-    fn spawn_burst_writer(count: usize, interval_ms: u64) -> Child {
+    fn hold_clipboard_open(contention_ms: u64) -> Result<(), String> {
+        let mut last_error = None;
+        for attempt in 0..10_u32 {
+            match unsafe { OpenClipboard(None) } {
+                Ok(()) => {
+                    thread::sleep(Duration::from_millis(contention_ms));
+                    unsafe {
+                        CloseClipboard().map_err(|error| error.to_string())?;
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    thread::sleep(Duration::from_millis(1_u64 << attempt.min(6)));
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| "unknown clipboard lock error".to_string()))
+    }
+
+    fn spawn_burst_writer(count: usize, interval_ms: u64, contention_ms: u64) -> Child {
         Command::new(env::current_exe().expect("resolve clipboard probe executable"))
             .args([
                 "--writer",
@@ -322,6 +360,8 @@ mod windows_probe {
                 &count.to_string(),
                 "--interval-ms",
                 &interval_ms.to_string(),
+                "--contention-ms",
+                &contention_ms.to_string(),
             ])
             .spawn()
             .unwrap_or_else(|error| {
