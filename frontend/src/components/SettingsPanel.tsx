@@ -785,7 +785,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
         <div className="flex flex-col items-center gap-1 border-t border-border bg-background px-4 py-3 text-center">
           <button
             onClick={() =>
-              openUrl('https://github.com/SouthForge-AI/cubby-clipboard').catch(console.error)
+              openUrl('https://github.com/tsouth89/cubby-clipboard').catch(console.error)
             }
             className="text-xs text-muted-foreground transition-colors hover:text-foreground"
           >
@@ -793,7 +793,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
           </button>
           <div className="text-xs text-muted-foreground">
             <a
-              href="https://github.com/SouthForge-AI/cubby-clipboard"
+              href="https://github.com/tsouth89/cubby-clipboard"
               target="_blank"
               rel="noopener noreferrer"
               className="underline hover:text-foreground"
