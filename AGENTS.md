@@ -28,9 +28,10 @@ Cubby/
 ## Architecture & Key Systems
 
 ### Window Show/Hide State Machine
-All show/hide goes through `lib.rs`. Two global atomics guard it:
+All show/hide goes through `lib.rs`. Three global atomics guard it:
 - `IS_ANIMATING: AtomicBool` — prevents concurrent animations. Both `animate_window_show` and `animate_window_hide` use `compare_exchange(false, true)` at entry and set back to `false` on exit.
 - `LAST_SHOW_TIME: AtomicI64` — timestamp set on show; blur events within 500ms are ignored to prevent immediate re-hide.
+- `SHOW_GENERATION: AtomicU64` — invalidates the native outside-click watcher whenever a newer flyout invocation starts.
 
 `position_window_near_cursor()` is the public entry point — it calls `animate_window_show()`.
 
@@ -45,16 +46,20 @@ if win.is_visible().unwrap_or(false) && win.is_focused().unwrap_or(false) {
 Both places must have identical toggle logic. Issue #6 was caused by `register_global_shortcut` missing the toggle.
 
 ### Cursor-anchored flyout
-The main window is a fixed-size compact flyout. `animate_window_show` reads the
-physical cursor position, prefers opening below and to the right, flips left or
-up when space is constrained, and clamps the final rectangle to the active
-monitor work area. Do not restore full-monitor shelf sizing.
+The main window is a compact flyout. `animate_window_show` reads the physical
+cursor position and opens below and to the right. It shortens vertically to stay
+below the cursor when at least `MIN_WINDOW_HEIGHT` remains, and only flips upward
+inside the final minimum-height region near the taskbar. It may flip left near
+the monitor's right edge. Do not restore full-monitor shelf sizing.
 
 ### Blur → Auto-hide
 `on_window_event` → `Focused(false)` → skips if: settings window is open,
 `LAST_SHOW_TIME` debounce < 500ms, `IS_ANIMATING` is true, or window is already
-hidden. Otherwise it hides immediately. The next invocation repositions near the
-current cursor.
+hidden. Otherwise it hides immediately. A generation-scoped native mouse watcher
+also hides the main flyout when any mouse button is pressed outside its window
+rectangle. This is required because Windows can deny the initial focus handoff,
+leaving no later blur event. The next invocation repositions near the current
+cursor.
 
 ### Settings
 `SettingsManager` is managed state (`app.manage(Arc::new(settings_manager))`). Access via `window.state::<Arc<SettingsManager>>().get()`. Persisted to DB. Settings changes that affect hotkey require calling `commands::register_global_shortcut` which unregisters the old shortcut and re-registers with the toggle logic.

@@ -1,5 +1,5 @@
 use std::fs;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{
     image::Image,
@@ -12,6 +12,7 @@ use tauri_plugin_autostart::MacosLauncher;
 
 static IS_ANIMATING: AtomicBool = AtomicBool::new(false);
 static LAST_SHOW_TIME: AtomicI64 = AtomicI64::new(0);
+static SHOW_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 mod clipboard;
 mod commands;
@@ -164,29 +165,10 @@ pub fn run_app() {
                             return;
                         }
 
-                        // Check if cursor is on a different monitor
-                        let current_monitor = win.current_monitor().ok().flatten();
-                        let cursor_monitor = get_monitor_at_cursor(&win);
-                        let moved_screens =
-                            if let (Some(cm), Some(crm)) = (&current_monitor, &cursor_monitor) {
-                                cm.position().x != crm.position().x
-                                    || cm.position().y != crm.position().y
-                            } else {
-                                false
-                            };
-
-                        if moved_screens {
-                            // User clicked on another screen, move window there immediately
-                            position_window_near_cursor(&win);
-                            let _ = win.show();
-                            let _ = win.set_focus();
-                        } else {
-                            // Normal blur handling (hide)
-                            let win_clone = win.clone();
-                            std::thread::spawn(move || {
-                                crate::animate_window_hide(&win_clone, None);
-                            });
-                        }
+                        let win_clone = win.clone();
+                        std::thread::spawn(move || {
+                            crate::animate_window_hide(&win_clone, None);
+                        });
                     }
                 }
                 _ => {}
@@ -418,6 +400,7 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
     }
 
     LAST_SHOW_TIME.store(chrono::Local::now().timestamp_millis(), Ordering::SeqCst);
+    let show_generation = SHOW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
     let window = window.clone();
     let float_above_taskbar = {
@@ -430,7 +413,8 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
             let scale_factor = monitor.scale_factor();
             let work_area = monitor.work_area();
             let window_width_px = (constants::WINDOW_WIDTH * scale_factor) as u32;
-            let window_height_px = (constants::WINDOW_HEIGHT * scale_factor) as u32;
+            let desired_height_px = (constants::WINDOW_HEIGHT * scale_factor) as u32;
+            let minimum_height_px = (constants::MIN_WINDOW_HEIGHT * scale_factor) as u32;
             let margin_px = (constants::WINDOW_MARGIN * scale_factor) as i32;
             let cursor_offset_px = (constants::CURSOR_OFFSET * scale_factor) as i32;
             let cursor = cursor_position().unwrap_or(windows::Win32::Foundation::POINT {
@@ -443,8 +427,6 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
             let work_right = work_area.position.x + work_area.size.width as i32 - margin_px;
             let work_bottom = work_area.position.y + work_area.size.height as i32 - margin_px;
             let max_x = (work_right - window_width_px as i32).max(work_left);
-            let max_y = (work_bottom - window_height_px as i32).max(work_top);
-
             let right_candidate = cursor.x + cursor_offset_px;
             let left_candidate = cursor.x - cursor_offset_px - window_width_px as i32;
             let mut target_x = if right_candidate + window_width_px as i32 <= work_right {
@@ -453,16 +435,16 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
                 left_candidate
             };
 
-            let below_candidate = cursor.y + cursor_offset_px;
-            let above_candidate = cursor.y - cursor_offset_px - window_height_px as i32;
-            let mut target_y = if below_candidate + window_height_px as i32 <= work_bottom {
-                below_candidate
-            } else {
-                above_candidate
-            };
+            let (target_y, window_height_px) = calculate_vertical_placement(
+                cursor.y,
+                work_top,
+                work_bottom,
+                desired_height_px,
+                minimum_height_px,
+                cursor_offset_px,
+            );
 
             target_x = target_x.clamp(work_left, max_x);
-            target_y = target_y.clamp(work_top, max_y);
 
             let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize {
                 width: window_width_px,
@@ -507,6 +489,8 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
                     }
                 }
             }
+
+            watch_for_outside_click(window.clone(), show_generation);
         }
         IS_ANIMATING.store(false, Ordering::SeqCst);
     });
@@ -548,6 +532,81 @@ fn cursor_position() -> Option<windows::Win32::Foundation::POINT> {
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
     let mut point = POINT { x: 0, y: 0 };
     unsafe { GetCursorPos(&mut point).is_ok().then_some(point) }
+}
+
+fn calculate_vertical_placement(
+    cursor_y: i32,
+    work_top: i32,
+    work_bottom: i32,
+    desired_height: u32,
+    minimum_height: u32,
+    cursor_offset: i32,
+) -> (i32, u32) {
+    let below_candidate = cursor_y + cursor_offset;
+    let available_below = (work_bottom - below_candidate).max(0) as u32;
+
+    if available_below >= minimum_height {
+        return (below_candidate, desired_height.min(available_below));
+    }
+
+    let available_above = (cursor_y - cursor_offset - work_top).max(minimum_height as i32) as u32;
+    let height = desired_height.min(available_above);
+    (
+        (cursor_y - cursor_offset - height as i32).max(work_top),
+        height,
+    )
+}
+
+fn point_is_inside_rect(
+    point: windows::Win32::Foundation::POINT,
+    rect: windows::Win32::Foundation::RECT,
+) -> bool {
+    point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
+}
+
+fn watch_for_outside_click(window: tauri::WebviewWindow, generation: u64) {
+    std::thread::spawn(move || {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+        let Ok(raw_handle) = window.hwnd() else {
+            return;
+        };
+        let hwnd = windows::Win32::Foundation::HWND(raw_handle.0 as _);
+        let mut buttons_were_down = false;
+
+        loop {
+            if SHOW_GENERATION.load(Ordering::SeqCst) != generation
+                || !window.is_visible().unwrap_or(false)
+            {
+                break;
+            }
+
+            let buttons_down = unsafe {
+                GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0
+                    || GetAsyncKeyState(VK_RBUTTON.0 as i32) < 0
+                    || GetAsyncKeyState(VK_MBUTTON.0 as i32) < 0
+            };
+
+            if buttons_down && !buttons_were_down {
+                if let Some(cursor) = cursor_position() {
+                    let mut rect = windows::Win32::Foundation::RECT::default();
+                    let has_rect = unsafe { GetWindowRect(hwnd, &mut rect).is_ok() };
+                    let is_inside = has_rect && point_is_inside_rect(cursor, rect);
+
+                    if !is_inside {
+                        animate_window_hide(&window, None);
+                        break;
+                    }
+                }
+            }
+
+            buttons_were_down = buttons_down;
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    });
 }
 
 pub fn get_monitor_at_cursor(window: &tauri::WebviewWindow) -> Option<tauri::Monitor> {
@@ -653,5 +712,62 @@ pub fn update_tray_icon(tray: &TrayIcon, theme: &tauri::Theme) {
     };
     if let Ok(icon) = Image::from_bytes(icon_data) {
         let _ = tray.set_icon(Some(icon));
+    }
+}
+
+#[cfg(test)]
+mod flyout_tests {
+    use super::{calculate_vertical_placement, point_is_inside_rect};
+    use windows::Win32::Foundation::{POINT, RECT};
+
+    #[test]
+    fn opens_full_height_below_the_cursor_when_space_allows() {
+        assert_eq!(
+            calculate_vertical_placement(250, 12, 1392, 620, 300, 14),
+            (264, 620)
+        );
+    }
+
+    #[test]
+    fn shrinks_below_the_cursor_before_flipping_upward() {
+        assert_eq!(
+            calculate_vertical_placement(962, 12, 1392, 620, 300, 14),
+            (976, 416)
+        );
+    }
+
+    #[test]
+    fn flips_upward_only_when_too_little_space_remains_below() {
+        assert_eq!(
+            calculate_vertical_placement(1272, 12, 1392, 620, 300, 14),
+            (638, 620)
+        );
+    }
+
+    #[test]
+    fn detects_points_inside_the_flyout_rectangle() {
+        let rect = RECT {
+            left: 100,
+            top: 200,
+            right: 620,
+            bottom: 820,
+        };
+
+        assert!(point_is_inside_rect(POINT { x: 100, y: 200 }, rect));
+        assert!(point_is_inside_rect(POINT { x: 619, y: 819 }, rect));
+    }
+
+    #[test]
+    fn treats_edges_and_external_clicks_as_outside() {
+        let rect = RECT {
+            left: 100,
+            top: 200,
+            right: 620,
+            bottom: 820,
+        };
+
+        assert!(!point_is_inside_rect(POINT { x: 99, y: 400 }, rect));
+        assert!(!point_is_inside_rect(POINT { x: 620, y: 400 }, rect));
+        assert!(!point_is_inside_rect(POINT { x: 300, y: 820 }, rect));
     }
 }
