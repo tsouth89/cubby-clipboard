@@ -381,6 +381,7 @@ pub fn run_app() {
             settings_commands::get_ignored_apps,
             commands::pick_file,
             commands::get_layout_config,
+            commands::get_paste_context,
             commands::get_system_accent_color,
             commands::test_log,
             commands::focus_window,

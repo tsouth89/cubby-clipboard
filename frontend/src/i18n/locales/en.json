@@ -19,6 +19,12 @@
     "imageSize": "Image ({{size}}KB)",
     "textLength": "{{count}} characters"
   },
+  "pasteContext": {
+    "ninjaCopy": "Ninja Remote · Select, then press Ctrl+V",
+    "ninjaKeystrokes": "Ninja Remote · Paste as keystrokes",
+    "remote": "Remote session · Clipboard sync enabled",
+    "copyAction": "Copy"
+  },
   "folders": {
     "all": "All Clips",
     "addFolder": "Add Folder",

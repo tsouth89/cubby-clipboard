@@ -990,6 +990,13 @@ pub fn get_layout_config() -> serde_json::Value {
 }
 
 #[tauri::command]
+pub fn get_paste_context(
+    settings: tauri::State<'_, Arc<crate::settings_manager::SettingsManager>>,
+) -> crate::paste_engine::PasteContext {
+    crate::paste_engine::paste_context(settings.get().remote_paste_mode)
+}
+
+#[tauri::command]
 pub fn get_system_accent_color() -> Result<serde_json::Value, String> {
     #[cfg(target_os = "windows")]
     {

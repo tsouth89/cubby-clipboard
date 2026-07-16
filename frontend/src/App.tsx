@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { ClipboardItem as AppClipboardItem, FolderItem, Settings } from './types';
+import { ClipboardItem as AppClipboardItem, FolderItem, PasteContext, Settings } from './types';
 import { ClipList } from './components/ClipList';
 import { ContentFilter, FlyoutHeader } from './components/FlyoutHeader';
 import { ContextMenu } from './components/ContextMenu';
@@ -51,6 +51,7 @@ function App() {
   const [hasMore, setHasMore] = useState(true);
   const [theme, setTheme] = useState('system');
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [pasteContext, setPasteContext] = useState<PasteContext | null>(null);
 
   // Add Folder Modal State
   const [showAddFolderModal, setShowAddFolderModal] = useState(false);
@@ -101,6 +102,16 @@ function App() {
       unlistenDemo.then((fs) => fs.forEach((f) => f()));
     };
   }, []);
+
+  const refreshPasteContext = useCallback(() => {
+    invoke<PasteContext>('get_paste_context').then(setPasteContext).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    refreshPasteContext();
+    window.addEventListener('focus', refreshPasteContext);
+    return () => window.removeEventListener('focus', refreshPasteContext);
+  }, [refreshPasteContext]);
 
   const openSettings = useCallback(async () => {
     // Check if settings window already exists
@@ -680,10 +691,28 @@ function App() {
             />
           </main>
           <footer className="drag-area flex h-9 shrink-0 items-center border-t border-white/[0.07] px-3 text-[10px] text-muted-foreground">
-            <span>{totalClipCount.toLocaleString()} items</span>
+            <div className="flex min-w-0 items-center gap-2">
+              <span>{totalClipCount.toLocaleString()} items</span>
+              {pasteContext?.target_kind !== 'standard' && (
+                <>
+                  <span className="h-1 w-1 shrink-0 rounded-full bg-primary" />
+                  <span className="truncate text-foreground/75">
+                    {pasteContext?.target_kind === 'ninja'
+                      ? pasteContext.remote_paste_mode === 'copy_then_paste'
+                        ? t('pasteContext.ninjaCopy')
+                        : t('pasteContext.ninjaKeystrokes')
+                      : t('pasteContext.remote')}
+                  </span>
+                </>
+              )}
+            </div>
             <div className="ml-auto flex items-center gap-3">
               <span>
-                <kbd>Enter</kbd> Paste
+                <kbd>Enter</kbd>{' '}
+                {pasteContext?.target_kind === 'ninja' &&
+                pasteContext.remote_paste_mode === 'copy_then_paste'
+                  ? t('pasteContext.copyAction')
+                  : t('contextMenu.paste')}
               </span>
               <span>
                 <kbd>Esc</kbd> Close

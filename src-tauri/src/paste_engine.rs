@@ -19,6 +19,25 @@ pub enum PasteStrategy {
     NinjaRemote = 2,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PasteContext {
+    pub target_kind: &'static str,
+    pub remote_paste_mode: String,
+}
+
+pub fn paste_context(remote_paste_mode: String) -> PasteContext {
+    let target_kind = match previous_paste_strategy() {
+        PasteStrategy::Standard => "standard",
+        PasteStrategy::RemoteSession => "remote",
+        PasteStrategy::NinjaRemote => "ninja",
+    };
+
+    PasteContext {
+        target_kind,
+        remote_paste_mode,
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub fn remember_foreground_window(excluded_hwnd: Option<isize>) -> Option<isize> {
     use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
@@ -370,8 +389,8 @@ pub fn restore_previous_foreground_window() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        paste_settle_delay, paste_strategy_for_process, should_auto_paste,
-        should_auto_paste_with_mode, PasteStrategy,
+        paste_context, paste_settle_delay, paste_strategy_for_process, set_previous_target,
+        should_auto_paste, should_auto_paste_with_mode, PasteStrategy,
     };
 
     #[test]
@@ -419,5 +438,15 @@ mod tests {
             PasteStrategy::NinjaRemote,
             "paste_as_keystrokes"
         ));
+    }
+
+    #[test]
+    fn exposes_remote_context_for_the_flyout() {
+        set_previous_target(1, PasteStrategy::NinjaRemote);
+
+        let context = paste_context("copy_then_paste".to_string());
+
+        assert_eq!(context.target_kind, "ninja");
+        assert_eq!(context.remote_paste_mode, "copy_then_paste");
     }
 }

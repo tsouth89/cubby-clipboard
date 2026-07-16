@@ -36,6 +36,11 @@ export interface Settings {
   ignore_ghost_clips: boolean;
 }
 
+export interface PasteContext {
+  target_kind: 'standard' | 'remote' | 'ninja';
+  remote_paste_mode: 'copy_then_paste' | 'paste_as_keystrokes';
+}
+
 export type ClipType = 'text' | 'image' | 'html' | 'rtf' | 'file' | 'url';
 
 export const CLIP_TYPE_LABELS: Record<ClipType, string> = {
