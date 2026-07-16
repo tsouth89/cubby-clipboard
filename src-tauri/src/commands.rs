@@ -468,7 +468,6 @@ async fn restore_clip(
                     .state::<Arc<crate::settings_manager::SettingsManager>>()
                     .get()
                     .remote_paste_mode;
-                let app_handle = window.app_handle().clone();
                 let content = if clip.clip_type == "image" {
                     "[Image]".to_string()
                 } else {
@@ -489,15 +488,6 @@ async fn restore_clip(
                                 log::info!(
                                     "PASTE: Ninja clipboard is ready; waiting for physical Ctrl+V"
                                 );
-                                if crate::paste_engine::take_remote_copy_hint() {
-                                    use tauri_plugin_notification::NotificationExt;
-                                    let _ = app_handle
-                                        .notification()
-                                        .builder()
-                                        .title("Cubby")
-                                        .body("Copied — press Ctrl+V")
-                                        .show();
-                                }
                                 return;
                             }
                             std::thread::sleep(crate::paste_engine::paste_settle_delay(strategy));

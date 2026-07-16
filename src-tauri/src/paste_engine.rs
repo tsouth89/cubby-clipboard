@@ -1,5 +1,5 @@
 #[cfg(target_os = "windows")]
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU8, Ordering};
 use std::time::Duration;
 
 #[cfg(target_os = "windows")]
@@ -9,8 +9,6 @@ static PREVIOUS_INPUT_WINDOW: AtomicIsize = AtomicIsize::new(0);
 #[cfg(target_os = "windows")]
 static PREVIOUS_PASTE_STRATEGY: AtomicU8 = AtomicU8::new(PasteStrategy::Standard as u8);
 #[cfg(target_os = "windows")]
-static REMOTE_COPY_HINT_SHOWN: AtomicBool = AtomicBool::new(false);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PasteStrategy {
@@ -183,13 +181,6 @@ pub fn should_auto_paste(strategy: PasteStrategy) -> bool {
 
 pub fn should_auto_paste_with_mode(strategy: PasteStrategy, remote_paste_mode: &str) -> bool {
     strategy != PasteStrategy::NinjaRemote || remote_paste_mode == "paste_as_keystrokes"
-}
-
-#[cfg(target_os = "windows")]
-pub fn take_remote_copy_hint() -> bool {
-    REMOTE_COPY_HINT_SHOWN
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
 }
 
 #[cfg(target_os = "windows")]

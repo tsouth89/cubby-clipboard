@@ -21,7 +21,7 @@ Workflow:
 2. Double-tap Left Ctrl or Right Ctrl.
 3. Select a clip in Cubby.
 4. Cubby writes the complete item to the local clipboard, closes, restores focus
-   to Ninja, and shows `Copied — press Ctrl+V`.
+   to Ninja.
 5. Press physical Ctrl+V.
 
 This is the preferred mode for large logs, scripts, formatted text, and other
