@@ -458,22 +458,14 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
             let _ = window.show();
             let _ = window.set_focus();
 
+            suppress_native_window_frame(&window);
+
             if let Ok(handle) = window.hwnd() {
                 use windows::Win32::Foundation::HWND;
-                use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
                 use windows::Win32::UI::WindowsAndMessaging::{
                     SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
                 };
                 let hwnd = HWND(handle.0 as _);
-                let border_color: u32 = 0xFFFF_FFFE;
-                unsafe {
-                    let _ = DwmSetWindowAttribute(
-                        hwnd,
-                        DWMWA_BORDER_COLOR,
-                        &border_color as *const _ as *const std::ffi::c_void,
-                        std::mem::size_of::<u32>() as u32,
-                    );
-                }
 
                 if float_above_taskbar {
                     let hwnd_topmost = HWND(-1 as _); // HWND_TOPMOST
@@ -495,6 +487,27 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
         }
         IS_ANIMATING.store(false, Ordering::SeqCst);
     });
+}
+
+fn suppress_native_window_frame(window: &tauri::WebviewWindow) {
+    let _ = window.set_shadow(false);
+
+    #[cfg(target_os = "windows")]
+    if let Ok(handle) = window.hwnd() {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
+
+        // DWMWA_COLOR_NONE prevents Windows 11 from drawing its focused accent border.
+        let border_color: u32 = 0xFFFF_FFFE;
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                HWND(handle.0 as _),
+                DWMWA_BORDER_COLOR,
+                &border_color as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
+    }
 }
 
 pub fn animate_window_hide(
@@ -704,6 +717,8 @@ pub fn apply_window_effect(
             );
         }
     }
+
+    suppress_native_window_frame(window);
 }
 
 pub fn update_tray_icon(tray: &TrayIcon, theme: &tauri::Theme) {

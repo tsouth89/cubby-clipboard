@@ -21,7 +21,7 @@
         "fullscreen": false,
         "decorations": false,
         "transparent": true,
-        "shadow": true,
+        "shadow": false,
         "visible": false,
         "center": false,
         "skipTaskbar": true,
