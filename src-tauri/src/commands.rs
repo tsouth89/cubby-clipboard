@@ -1,5 +1,5 @@
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_clipboard_x::{start_listening, stop_listening, write_text};
+use tauri_plugin_clipboard_x::write_text;
 
 use crate::database::Database;
 use crate::models::{Clip, ClipboardItem, Folder, FolderItem};
@@ -422,11 +422,6 @@ pub async fn paste_clip(
             let content_hash = clip.content_hash.clone();
             let uuid = clip.uuid.clone();
 
-            // Stop monitor
-            if let Err(e) = stop_listening().await {
-                log::error!("Failed to stop listener: {}", e);
-            }
-
             let mut final_res = Ok(());
 
             if clip.clip_type == "image" {
@@ -466,12 +461,6 @@ pub async fn paste_clip(
                     .bind(&uuid)
                     .execute(pool)
                     .await;
-
-            // Restart monitor
-            let app_clone = app.clone();
-            if let Err(e) = start_listening(app_clone).await {
-                log::error!("Failed to restart listener: {}", e);
-            }
 
             if final_res.is_ok() {
                 let content = if clip.clip_type == "image" {

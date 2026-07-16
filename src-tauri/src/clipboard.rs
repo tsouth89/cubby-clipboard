@@ -1,10 +1,12 @@
-use tauri::{AppHandle, Emitter, Listener};
+use tauri::{AppHandle, Emitter};
 // Import functions directly from the crate root
 use crate::database::Database;
 #[cfg(target_os = "windows")]
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use clipboard_rs::common::RustImage;
 use clipboard_rs::{Clipboard, ClipboardContext};
+#[cfg(target_os = "windows")]
+use clipboard_win::Monitor;
 use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
 #[cfg(target_os = "windows")]
@@ -12,7 +14,6 @@ use std::ffi::OsStr;
 #[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStrExt;
 use std::sync::Arc;
-use tauri_plugin_clipboard_x::{read_text, start_listening};
 use uuid::Uuid;
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::MAX_PATH;
@@ -55,59 +56,28 @@ static LAST_STABLE_HASH: Lazy<parking_lot::Mutex<Option<String>>> =
 pub static CLIPBOARD_SYNC: Lazy<Arc<tokio::sync::Mutex<()>>> =
     Lazy::new(|| Arc::new(tokio::sync::Mutex::new(())));
 
-use std::sync::atomic::{AtomicU64, Ordering};
-static DEBOUNCE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 pub fn set_ignore_hash(hash: String) {
     let mut lock = IGNORE_HASH.lock();
     *lock = Some(hash);
 }
 
 pub fn init(app: &AppHandle, db: Arc<Database>) {
-    let app_clone = app.clone();
-    let db_clone = db.clone();
+    let (snapshot_tx, mut snapshot_rx) = tokio::sync::mpsc::unbounded_channel();
+    let app_for_consumer = app.clone();
+    let db_for_consumer = db.clone();
 
-    // Start monitor
-    // tauri-plugin-clipboard-x exposes start_listening(app_handle)
-    // It returns impl Future, so we need to spawn it or block.
-    // Since init is synchronous here, we spawn it.
-    let app_for_start = app.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = start_listening(app_for_start).await {
-            log::error!("CLIPBOARD: Failed to start listener: {}", e);
+        while let Some(snapshot) = snapshot_rx.recv().await {
+            process_clipboard_snapshot(app_for_consumer.clone(), db_for_consumer.clone(), snapshot)
+                .await;
         }
+        log::error!("CLIPBOARD: Native snapshot queue closed unexpectedly");
     });
 
-    // Listen to clipboard changes
-    // The event name found in source code: "plugin:clipboard-x://clipboard_changed"
-    let event_name = "plugin:clipboard-x://clipboard_changed";
-
-    app.listen(event_name, move |_event| {
-        let app = app_clone.clone();
-        let db = db_clone.clone();
-
-        // Capture source app info IMMEDIATELY at event time, before debounce delay.
-        // If we wait until after the delay, the user may have already switched to Cubby,
-        // causing frontmostApplication to return our own app instead of the real source.
-        let source_app_info = get_clipboard_owner_app_info();
-
-        // DEBOUNCE LOGIC:
-        let current_count = DEBOUNCE_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
-
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-            if DEBOUNCE_COUNTER.load(Ordering::SeqCst) != current_count {
-                log::debug!(
-                    "CLIPBOARD: Debounce: Aborting older event, current_count:{}",
-                    current_count
-                );
-                return;
-            }
-
-            process_clipboard_change(app, db, source_app_info).await;
-        });
-    });
+    std::thread::Builder::new()
+        .name("cubby-clipboard-listener".to_string())
+        .spawn(move || run_native_listener(snapshot_tx))
+        .unwrap_or_else(|error| panic!("failed to start native clipboard listener: {error}"));
 }
 
 type SourceAppInfo = (
@@ -118,6 +88,12 @@ type SourceAppInfo = (
     bool,
 );
 
+#[derive(Clone, Copy)]
+struct SourceAppIdentity {
+    process_id: u32,
+    is_explicit_owner: bool,
+}
+
 struct ClipboardImageRead {
     png_bytes: Vec<u8>,
     width: u32,
@@ -125,6 +101,132 @@ struct ClipboardImageRead {
     raw_hash: String,
     decode_ms: u128,
     source_type: &'static str,
+}
+
+enum CapturedContent {
+    Text {
+        content: Vec<u8>,
+        preview: String,
+        hash: String,
+    },
+    Image {
+        png_bytes: Vec<u8>,
+        width: u32,
+        height: u32,
+        hash: String,
+        decode_ms: u128,
+        source_type: &'static str,
+    },
+}
+
+struct ClipboardSnapshot {
+    sequence: u32,
+    source_app_identity: Option<SourceAppIdentity>,
+    content: CapturedContent,
+    materialize_ms: u128,
+}
+
+#[cfg(target_os = "windows")]
+fn run_native_listener(snapshot_tx: tokio::sync::mpsc::UnboundedSender<ClipboardSnapshot>) {
+    let mut monitor = match Monitor::new() {
+        Ok(monitor) => monitor,
+        Err(error) => {
+            log::error!("CLIPBOARD: Failed to create native listener: {}", error);
+            return;
+        }
+    };
+
+    log::info!("CLIPBOARD: Native WM_CLIPBOARDUPDATE listener started");
+
+    loop {
+        match monitor.recv() {
+            Ok(true) => {
+                let started = std::time::Instant::now();
+                let sequence =
+                    unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
+                let source_app_identity = get_clipboard_owner_identity();
+
+                if let Some(content) = materialize_clipboard_content() {
+                    let snapshot = ClipboardSnapshot {
+                        sequence,
+                        source_app_identity,
+                        content,
+                        materialize_ms: started.elapsed().as_millis(),
+                    };
+
+                    if snapshot_tx.send(snapshot).is_err() {
+                        log::error!("CLIPBOARD: Snapshot consumer stopped");
+                        return;
+                    }
+                } else {
+                    log::debug!(
+                        "CLIPBOARD: Sequence {} contained no supported text or image payload",
+                        sequence
+                    );
+                }
+            }
+            Ok(false) => {
+                log::warn!("CLIPBOARD: Native listener received shutdown");
+                return;
+            }
+            Err(error) => {
+                log::error!("CLIPBOARD: Native listener failed: {}", error);
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_native_listener(_snapshot_tx: tokio::sync::mpsc::UnboundedSender<ClipboardSnapshot>) {}
+
+fn materialize_clipboard_content() -> Option<CapturedContent> {
+    const ATTEMPTS: u32 = 5;
+
+    for attempt in 0..ATTEMPTS {
+        if let Ok(image) = read_clipboard_image_fast() {
+            return Some(CapturedContent::Image {
+                png_bytes: image.png_bytes,
+                width: image.width,
+                height: image.height,
+                hash: image.raw_hash,
+                decode_ms: image.decode_ms,
+                source_type: image.source_type,
+            });
+        }
+
+        if let Ok(ctx) = ClipboardContext::new() {
+            if let Ok(text) = ctx.get_text() {
+                if let Some(content) = capture_text(text) {
+                    return Some(content);
+                }
+            }
+        }
+
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(1_u64 << attempt));
+        }
+    }
+
+    None
+}
+
+fn capture_text(text: String) -> Option<CapturedContent> {
+    if text.is_empty() {
+        return None;
+    }
+
+    let content = text.into_bytes();
+    let preview = String::from_utf8_lossy(&content)
+        .chars()
+        .take(200)
+        .collect::<String>();
+    let hash = calculate_hash(&content);
+    Some(CapturedContent::Text {
+        content,
+        preview,
+        hash,
+    })
 }
 
 fn read_clipboard_image_with_clipboard_rs(
@@ -157,95 +259,61 @@ fn read_clipboard_image_fast() -> Result<ClipboardImageRead, String> {
     read_clipboard_image_with_clipboard_rs("clipboard-rs-image")
 }
 
-async fn process_clipboard_change(
+async fn process_clipboard_snapshot(
     app: AppHandle,
     db: Arc<Database>,
-    source_app_info: SourceAppInfo,
+    snapshot: ClipboardSnapshot,
 ) {
     let started = std::time::Instant::now();
-    let mut image_read_ms = 0u128;
-    let mut image_decode_ms = 0u128;
-    let mut text_read_ms = 0u128;
     let mut was_existing = false;
     let _guard = CLIPBOARD_SYNC.lock().await;
 
-    let mut clip_type = "text";
-    let mut clip_content = Vec::new();
-    let mut full_image_content: Option<Vec<u8>> = None;
-    let mut clip_preview = String::new();
-    let mut clip_hash = String::new();
-    let mut metadata = String::new();
-    let mut found_content = false;
-
-    // Try Image (in-memory path, no temp file write).
-    log::debug!("CLIPBOARD: Attempting to read image from clipboard");
-    let image_read_started = std::time::Instant::now();
-    if let Ok(read_image_result) = read_clipboard_image_fast() {
-        image_read_ms = image_read_started.elapsed().as_millis();
-        log::debug!(
-            "CLIPBOARD: Image read successfully, source_type={}, takes {} ms",
-            read_image_result.source_type,
-            image_read_ms
-        );
-
-        let bytes = read_image_result.png_bytes;
-        let width = read_image_result.width;
-        let height = read_image_result.height;
-        image_decode_ms = read_image_result.decode_ms;
-        let size_bytes = bytes.len();
-        clip_hash = read_image_result.raw_hash;
-        clip_content = Vec::new();
-        full_image_content = Some(bytes);
-        clip_type = "image";
-        clip_preview = "[Image]".to_string();
-        metadata = serde_json::json!({
-            "width": width,
-            "height": height,
-            "format": "png",
-            "size_bytes": size_bytes
-        })
-        .to_string();
-        found_content = true;
-        log::debug!(
-            "CLIPBOARD: Found image: {}x{}, source_type={}, png_bytes={}",
-            width,
-            height,
-            read_image_result.source_type,
-            size_bytes
-        );
-    }
-
-    if !found_content {
-        // Try Text
-        let text_read_started = std::time::Instant::now();
-        if let Ok(text) = read_text().await {
-            text_read_ms = text_read_started.elapsed().as_millis();
-            let text = text.trim();
-            if !text.is_empty() {
-                clip_content = text.as_bytes().to_vec();
-                clip_hash = calculate_hash(&clip_content);
-                clip_type = "text";
-                clip_preview = text.chars().take(200).collect::<String>();
-                found_content = true;
-                log::debug!("CLIPBOARD: Found text: {}", clip_preview);
+    let materialize_ms = snapshot.materialize_ms;
+    let sequence = snapshot.sequence;
+    let source_app_info = resolve_source_app_info(snapshot.source_app_identity);
+    let (clip_type, clip_content, clip_preview, clip_hash, full_image_content, metadata) =
+        match snapshot.content {
+            CapturedContent::Text {
+                content,
+                preview,
+                hash,
+            } => ("text", content, preview, hash, None, None),
+            CapturedContent::Image {
+                png_bytes,
+                width,
+                height,
+                hash,
+                decode_ms,
+                source_type,
+            } => {
+                let size_bytes = png_bytes.len();
+                log::debug!(
+                    "CLIPBOARD: Materialized image sequence={} {}x{} source_type={} png_bytes={} decode_ms={}",
+                    sequence,
+                    width,
+                    height,
+                    source_type,
+                    size_bytes,
+                    decode_ms
+                );
+                (
+                    "image",
+                    Vec::new(),
+                    "[Image]".to_string(),
+                    hash,
+                    Some(png_bytes),
+                    Some(
+                        serde_json::json!({
+                            "width": width,
+                            "height": height,
+                            "format": "png",
+                            "size_bytes": size_bytes
+                        })
+                        .to_string(),
+                    ),
+                )
             }
-        }
-    }
-
-    if !found_content {
-        return;
-    }
-
-    // Stable Hash Check
-    {
-        let mut lock = LAST_STABLE_HASH.lock();
-        if let Some(ref last_hash) = *lock {
-            if last_hash == &clip_hash {
-                return;
-            }
-        }
-        *lock = Some(clip_hash.clone());
-    }
+        };
 
     // Check ignore self-paste
     {
@@ -310,6 +378,17 @@ async fn process_clipboard_change(
         }
     }
 
+    // Only accepted content participates in consecutive duplicate suppression.
+    // An ignored application must not prevent the same content from being captured later.
+    {
+        let lock = LAST_STABLE_HASH.lock();
+        if let Some(ref last_hash) = *lock {
+            if last_hash == &clip_hash {
+                return;
+            }
+        }
+    }
+
     // DB Logic
     let pool = &db.pool;
 
@@ -326,7 +405,7 @@ async fn process_clipboard_change(
     let emitted_id = if let Some(existing_id) = existing_uuid {
         was_existing = true;
         if clip_type == "image" {
-            let _ = sqlx::query(
+            if let Err(error) = sqlx::query(
                 r#"
                 UPDATE clips
                 SET created_at = CURRENT_TIMESTAMP,
@@ -344,15 +423,23 @@ async fn process_clipboard_change(
             .bind(&source_icon)
             .bind(&clip_content)
             .bind(&clip_preview)
-            .bind(Some(metadata.clone()))
+            .bind(metadata.clone())
             .bind(&existing_id)
             .execute(pool)
-            .await;
+            .await
+            {
+                log::error!(
+                    "CLIPBOARD: Failed to update existing image clip {}: {}",
+                    existing_id,
+                    error
+                );
+                return;
+            }
 
             if let Some(full_bytes) = &full_image_content {
                 match persist_full_image_file(&existing_id, full_bytes) {
                     Ok(file_path) => {
-                        let _ = sqlx::query(
+                        if let Err(error) = sqlx::query(
                             r#"
                             INSERT OR REPLACE INTO clip_images (clip_uuid, full_content, file_path, file_size, storage_kind, mime_type, created_at)
                             VALUES (?, x'', ?, ?, 'file', 'image/png', CURRENT_TIMESTAMP)
@@ -362,7 +449,15 @@ async fn process_clipboard_change(
                         .bind(&file_path)
                         .bind(full_bytes.len() as i64)
                         .execute(pool)
-                        .await;
+                        .await
+                        {
+                            log::error!(
+                                "CLIPBOARD: Failed to index image file for existing clip {}: {}",
+                                existing_id,
+                                error
+                            );
+                            return;
+                        }
                     }
                     Err(e) => {
                         log::error!(
@@ -374,18 +469,26 @@ async fn process_clipboard_change(
                 }
             }
         } else {
-            let _ = sqlx::query(r#"UPDATE clips SET created_at = CURRENT_TIMESTAMP, is_deleted = 0, source_app = ?, source_icon = ? WHERE uuid = ?"#)
+            if let Err(error) = sqlx::query(r#"UPDATE clips SET created_at = CURRENT_TIMESTAMP, is_deleted = 0, source_app = ?, source_icon = ? WHERE uuid = ?"#)
                 .bind(&source_app)
                 .bind(&source_icon)
                 .bind(&existing_id)
                 .execute(pool)
-                .await;
+                .await
+            {
+                log::error!(
+                    "CLIPBOARD: Failed to update existing text clip {}: {}",
+                    existing_id,
+                    error
+                );
+                return;
+            }
         }
         existing_id
     } else {
         let clip_uuid = Uuid::new_v4().to_string();
 
-        let _ = sqlx::query(
+        if let Err(error) = sqlx::query(
             r#"
             INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash, folder_id, is_deleted, is_thumbnail, source_app, source_icon, metadata, created_at, last_accessed)
             VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -399,19 +502,24 @@ async fn process_clipboard_change(
         .bind(false)
         .bind(&source_app)
         .bind(&source_icon)
-        .bind(if clip_type == "image" {
-            Some(metadata)
-        } else {
-            None
-        })
+        .bind(metadata)
         .execute(pool)
-        .await;
+        .await
+        {
+            log::error!(
+                "CLIPBOARD: Failed to insert {} clip for sequence {}: {}",
+                clip_type,
+                sequence,
+                error
+            );
+            return;
+        }
 
         if clip_type == "image" {
             if let Some(full_bytes) = &full_image_content {
                 match persist_full_image_file(&clip_uuid, full_bytes) {
                     Ok(file_path) => {
-                        let _ = sqlx::query(
+                        if let Err(error) = sqlx::query(
                             r#"
                             INSERT OR REPLACE INTO clip_images (clip_uuid, full_content, file_path, file_size, storage_kind, mime_type, created_at)
                             VALUES (?, x'', ?, ?, 'file', 'image/png', CURRENT_TIMESTAMP)
@@ -421,7 +529,20 @@ async fn process_clipboard_change(
                         .bind(&file_path)
                         .bind(full_bytes.len() as i64)
                         .execute(pool)
-                        .await;
+                        .await
+                        {
+                            log::error!(
+                                "CLIPBOARD: Failed to index image file for new clip {}: {}",
+                                clip_uuid,
+                                error
+                            );
+                            let _ = sqlx::query(r#"DELETE FROM clips WHERE uuid = ?"#)
+                                .bind(&clip_uuid)
+                                .execute(pool)
+                                .await;
+                            remove_full_image_file(&file_path);
+                            return;
+                        }
                     }
                     Err(e) => {
                         log::error!(
@@ -442,6 +563,8 @@ async fn process_clipboard_change(
     };
     let db_write_ms = db_write_started.elapsed().as_millis();
 
+    *LAST_STABLE_HASH.lock() = Some(clip_hash.clone());
+
     let emit_started = std::time::Instant::now();
     let _ = app.emit(
         "clipboard-change",
@@ -457,14 +580,13 @@ async fn process_clipboard_change(
     let emit_ms = emit_started.elapsed().as_millis();
 
     log::info!(
-        "[perf][clipboard_ingest] type={} existing={} full_bytes={} thumb_bytes={} image_read_ms={} decode_ms={} text_read_ms={} db_lookup_ms={} db_write_ms={} emit_ms={} total_ms={}",
+        "[perf][clipboard_ingest] sequence={} type={} existing={} full_bytes={} thumb_bytes={} materialize_ms={} db_lookup_ms={} db_write_ms={} emit_ms={} total_ms={}",
+        sequence,
         clip_type,
         was_existing,
         full_image_content.as_ref().map(|v| v.len()).unwrap_or(0),
         if clip_type == "image" { clip_content.len() } else { 0 },
-        image_read_ms,
-        image_decode_ms,
-        text_read_ms,
+        materialize_ms,
         db_lookup_ms,
         db_write_ms,
         emit_ms,
@@ -508,13 +630,7 @@ pub fn remove_full_image_file(file_path: &str) {
 }
 
 #[cfg(target_os = "windows")]
-fn get_clipboard_owner_app_info() -> (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    bool,
-) {
+fn get_clipboard_owner_identity() -> Option<SourceAppIdentity> {
     unsafe {
         let (hwnd, is_explicit) = match GetClipboardOwner() {
             Ok(h) if !h.0.is_null() => (h, true),
@@ -534,20 +650,39 @@ fn get_clipboard_owner_app_info() -> (
         };
 
         if hwnd.0.is_null() {
-            return (None, None, None, None, false);
+            return None;
         }
 
         let mut process_id = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut process_id));
 
         if process_id == 0 {
-            return (None, None, None, None, false);
+            return None;
         }
+
+        Some(SourceAppIdentity {
+            process_id,
+            is_explicit_owner: is_explicit,
+        })
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_clipboard_owner_identity() -> Option<SourceAppIdentity> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_source_app_info(identity: Option<SourceAppIdentity>) -> SourceAppInfo {
+    unsafe {
+        let Some(identity) = identity else {
+            return (None, None, None, None, false);
+        };
 
         let process_handle = match OpenProcess(
             PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
             false,
-            process_id,
+            identity.process_id,
         ) {
             Ok(h) => h,
             Err(_) => return (None, None, None, None, false),
@@ -596,8 +731,19 @@ fn get_clipboard_owner_app_info() -> (
         } else {
             None
         };
-        (app_name, app_icon, exe_val, full_path, is_explicit)
+        (
+            app_name,
+            app_icon,
+            exe_val,
+            full_path,
+            identity.is_explicit_owner,
+        )
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn resolve_source_app_info(_identity: Option<SourceAppIdentity>) -> SourceAppInfo {
+    (None, None, None, None, false)
 }
 
 #[cfg(target_os = "windows")]
@@ -877,5 +1023,35 @@ pub fn send_paste_input() {
 
         let result = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
         log::info!("send_paste_input: SendInput returned {}", result);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{calculate_hash, capture_text, CapturedContent};
+
+    #[test]
+    fn capture_text_preserves_exact_whitespace() {
+        let original = "  copied text\r\nwith trailing space  ".to_string();
+        let captured = capture_text(original.clone()).expect("text should be captured");
+
+        match captured {
+            CapturedContent::Text {
+                content,
+                preview,
+                hash,
+            } => {
+                assert_eq!(content, original.as_bytes());
+                assert_eq!(preview, original);
+                assert_eq!(hash, calculate_hash(original.as_bytes()));
+            }
+            CapturedContent::Image { .. } => panic!("expected text"),
+        }
+    }
+
+    #[test]
+    fn capture_text_ignores_only_truly_empty_content() {
+        assert!(capture_text(String::new()).is_none());
+        assert!(capture_text("   ".to_string()).is_some());
     }
 }

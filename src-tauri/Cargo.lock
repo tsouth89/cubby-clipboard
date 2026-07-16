@@ -958,6 +958,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clipboard-rs",
+ "clipboard-win",
  "dark-light",
  "dirs 5.0.1",
  "futures",
