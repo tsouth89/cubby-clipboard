@@ -74,6 +74,18 @@ function App() {
       : windowEffect === 'acrylic'
         ? 'bg-background/[0.58]'
         : 'bg-background/[0.08]';
+  const windowBorder =
+    windowEffect === 'acrylic'
+      ? 'border-white/[0.14]'
+      : windowEffect === 'mica'
+        ? 'border-white/[0.10]'
+        : 'border-white/[0.09]';
+  const windowGeometry = hasRoundedCorners
+    ? 'p-2'
+    : 'p-0';
+  const windowShape = hasRoundedCorners
+    ? 'rounded-[10px] shadow-[0_24px_80px_rgba(0,0,0,0.48),0_6px_24px_rgba(0,0,0,0.32)]'
+    : 'rounded-none shadow-none';
 
   const appWindow = getCurrentWindow();
   const selectedFolderRef = useRef(selectedFolder);
@@ -574,10 +586,13 @@ function App() {
   };
 
   return (
-    <div data-el="app-root" className="relative h-screen w-full overflow-hidden bg-transparent p-2">
+    <div
+      data-el="app-root"
+      className={`relative h-screen w-full overflow-hidden bg-transparent ${windowGeometry}`}
+    >
       <div
         data-el="app-window"
-        className={`relative h-full w-full overflow-hidden border border-white/[0.11] shadow-[0_24px_80px_rgba(0,0,0,0.48),0_6px_24px_rgba(0,0,0,0.32)] ${hasRoundedCorners ? 'rounded-[10px]' : 'rounded-none'} ${windowSurface}`}
+        className={`relative h-full w-full overflow-hidden border ${windowBorder} ${windowShape} ${windowSurface}`}
       >
         <div
           data-el="app-frame"

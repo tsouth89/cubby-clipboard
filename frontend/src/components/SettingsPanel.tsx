@@ -402,10 +402,20 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                           { value: 'acrylic', label: 'Acrylic' },
                         ]}
                       />
-                      <p className="text-xs text-muted-foreground">
-                        Solid is opaque, Mica subtly uses your wallpaper, and Acrylic visibly
-                        frosts the windows behind Cubby.
-                      </p>
+                      <div className="grid grid-cols-3 gap-2 text-[11px] text-muted-foreground">
+                        <div className="rounded-lg border border-border bg-[#171719] px-2.5 py-2">
+                          <span className="block font-medium text-foreground">Solid</span>
+                          Maximum contrast
+                        </div>
+                        <div className="rounded-lg border border-white/[0.08] bg-background/80 px-2.5 py-2">
+                          <span className="block font-medium text-foreground">Mica</span>
+                          Subtle and native
+                        </div>
+                        <div className="rounded-lg border border-white/[0.12] bg-background/55 px-2.5 py-2 backdrop-blur-md">
+                          <span className="block font-medium text-foreground">Acrylic</span>
+                          Frosted and layered
+                        </div>
+                      </div>
                     </div>
 
                     <div className="flex items-center justify-between rounded-lg border border-border bg-accent/20 p-3">

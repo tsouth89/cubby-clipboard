@@ -61,6 +61,7 @@ export function FlyoutHeader({
             key={id}
             type="button"
             onClick={() => onContentFilterChange(id)}
+            aria-pressed={contentFilter === id}
             className={`relative h-full px-2.5 text-xs font-medium transition-colors ${
               contentFilter === id
                 ? 'text-foreground'

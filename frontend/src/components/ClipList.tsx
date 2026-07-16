@@ -63,6 +63,8 @@ export function ClipList({
     <div
       ref={listRef}
       data-el="clip-list"
+      role="list"
+      aria-label="Clipboard history"
       className="no-scrollbar h-full overflow-y-auto px-2 pb-2"
       onScroll={(event) => {
         if (!hasMore || isLoading) return;

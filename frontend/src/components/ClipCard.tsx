@@ -111,6 +111,9 @@ export const ClipCard = memo(function ClipCard({
     <article
       data-el="clip-card"
       data-clip-id={clip.id}
+      data-selected={isSelected}
+      role="listitem"
+      aria-current={isSelected ? 'true' : undefined}
       onMouseEnter={onSelect}
       onClick={onPaste}
       onContextMenu={(event) => {
