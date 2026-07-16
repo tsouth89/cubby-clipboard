@@ -14,7 +14,7 @@
 3. Verify `Win+V` replacement can be enabled and disabled without leaving Windows-key state stuck.
 4. Verify text, whitespace, screenshots, rapid-copy bursts, pinning, bulk clear, and restart persistence.
 5. Verify local paste plus Ninja Remote clipboard-sync paste with a large log.
-6. Confirm uninstall removes the app while preserving or removing history according to the installer choice presented to the user.
+6. Confirm uninstall removes the app cleanly, and document whether local history remains on disk.
 7. Record SHA-256 hashes for the final installers.
 
 ## Public-release decisions

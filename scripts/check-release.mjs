@@ -28,7 +28,8 @@ if (uniqueVersions.size !== 1 || uniqueVersions.has(undefined)) {
 }
 
 const version = packageVersion;
-if (!changelog.includes(`\n## v${version}\n`)) {
+const changelogHeading = new RegExp(`^## v${version.replaceAll('.', '\\.')}$`, 'm');
+if (!changelogHeading.test(changelog)) {
   throw new Error(`CHANGELOG.md has no v${version} section`);
 }
 
