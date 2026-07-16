@@ -1,460 +1,196 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="PastePaw - A beautiful clipboard history manager for macOS. Never lose what you copy again.">
-    <meta name="keywords" content="clipboard, clipboard manager, macOS, productivity, clipboard history">
-    <title>PastePaw - Clipboard History Manager for macOS</title>
-    <link rel="icon" type="image/png" href="https://raw.githubusercontent.com/XueshiQiao/PastePaw/refs/heads/main/src-tauri/icons/64x64.png">
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        :root {
-            --bg-primary: #ffffff;
-            --bg-secondary: #f8f9fa;
-            --text-primary: #1a1a1a;
-            --text-secondary: #666666;
-            --accent: #007AFF;
-            --accent-hover: #0051D5;
-            --border: #e5e5e5;
-            --shadow: rgba(0, 0, 0, 0.1);
-        }
-
-        @media (prefers-color-scheme: dark) {
-            :root {
-                --bg-primary: #1a1a1a;
-                --bg-secondary: #2a2a2a;
-                --text-primary: #ffffff;
-                --text-secondary: #a0a0a0;
-                --accent: #0A84FF;
-                --accent-hover: #409CFF;
-                --border: #3a3a3a;
-                --shadow: rgba(0, 0, 0, 0.3);
-            }
-        }
-
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
-            line-height: 1.6;
-            color: var(--text-primary);
-            background-color: var(--bg-primary);
-        }
-
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 0 20px;
-        }
-
-        header {
-            padding: 60px 0 40px;
-            text-align: center;
-        }
-
-        .logo {
-            width: 120px;
-            height: 120px;
-            margin: 0 auto 20px;
-            filter: drop-shadow(0 4px 12px var(--shadow));
-        }
-
-        h1 {
-            font-size: 3rem;
-            font-weight: 700;
-            margin-bottom: 16px;
-            background: linear-gradient(135deg, var(--accent) 0%, #5856D6 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-
-        .subtitle {
-            font-size: 1.5rem;
-            color: var(--text-secondary);
-            margin-bottom: 40px;
-        }
-
-        .cta-buttons {
-            display: flex;
-            gap: 20px;
-            justify-content: center;
-            flex-wrap: wrap;
-            margin-top: 30px;
-        }
-
-        .btn {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 14px 32px;
-            font-size: 1.1rem;
-            font-weight: 600;
-            text-decoration: none;
-            border-radius: 12px;
-            transition: all 0.3s ease;
-            border: none;
-            cursor: pointer;
-        }
-
-        .btn-primary {
-            background-color: var(--accent);
-            color: white;
-        }
-
-        .btn-primary:hover {
-            background-color: var(--accent-hover);
-            transform: translateY(-2px);
-            box-shadow: 0 8px 24px var(--shadow);
-        }
-
-        .btn-secondary {
-            background-color: var(--bg-secondary);
-            color: var(--text-primary);
-            border: 2px solid var(--border);
-        }
-
-        .btn-secondary:hover {
-            border-color: var(--accent);
-            transform: translateY(-2px);
-        }
-
-        .features {
-            padding: 80px 0;
-            background-color: var(--bg-secondary);
-        }
-
-        .features h2 {
-            text-align: center;
-            font-size: 2.5rem;
-            margin-bottom: 60px;
-        }
-
-        .features-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 40px;
-        }
-
-        .feature-card {
-            background-color: var(--bg-primary);
-            padding: 30px;
-            border-radius: 16px;
-            border: 1px solid var(--border);
-            transition: all 0.3s ease;
-        }
-
-        .feature-card:hover {
-            transform: translateY(-4px);
-            box-shadow: 0 12px 32px var(--shadow);
-        }
-
-        .feature-icon {
-            font-size: 2.5rem;
-            margin-bottom: 16px;
-        }
-
-        .feature-card h3 {
-            font-size: 1.4rem;
-            margin-bottom: 12px;
-        }
-
-        .feature-card p {
-            color: var(--text-secondary);
-            line-height: 1.6;
-        }
-
-        .screenshots {
-            padding: 80px 0;
-        }
-
-        .screenshots h2 {
-            text-align: center;
-            font-size: 2.5rem;
-            margin-bottom: 60px;
-        }
-
-        .screenshot-container {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
-            gap: 40px;
-            margin-bottom: 40px;
-        }
-
-        .screenshot-wrapper {
-            border-radius: 16px;
-            overflow: hidden;
-            border: 1px solid var(--border);
-            box-shadow: 0 8px 24px var(--shadow);
-        }
-
-        .screenshot-wrapper img {
-            width: 100%;
-            height: auto;
-            display: block;
-        }
-
-        .screenshot-caption {
-            text-align: center;
-            margin-top: 12px;
-            color: var(--text-secondary);
-            font-size: 1rem;
-        }
-
-        .keyboard-shortcuts {
-            padding: 80px 0;
-            background-color: var(--bg-secondary);
-        }
-
-        .keyboard-shortcuts h2 {
-            text-align: center;
-            font-size: 2.5rem;
-            margin-bottom: 60px;
-        }
-
-        .shortcuts-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            max-width: 800px;
-            margin: 0 auto;
-        }
-
-        .shortcut-item {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 20px;
-            background-color: var(--bg-primary);
-            border-radius: 12px;
-            border: 1px solid var(--border);
-        }
-
-        .shortcut-key {
-            font-family: 'SF Mono', 'Monaco', 'Courier New', monospace;
-            background-color: var(--bg-secondary);
-            padding: 8px 16px;
-            border-radius: 8px;
-            border: 1px solid var(--border);
-            font-size: 0.9rem;
-        }
-
-        footer {
-            padding: 60px 0;
-            text-align: center;
-            border-top: 1px solid var(--border);
-        }
-
-        .footer-links {
-            display: flex;
-            gap: 30px;
-            justify-content: center;
-            margin-bottom: 20px;
-            flex-wrap: wrap;
-        }
-
-        .footer-links a {
-            color: var(--text-secondary);
-            text-decoration: none;
-            transition: color 0.3s ease;
-        }
-
-        .footer-links a:hover {
-            color: var(--accent);
-        }
-
-        .copyright {
-            color: var(--text-secondary);
-            font-size: 0.9rem;
-        }
-
-        @media (max-width: 768px) {
-            h1 {
-                font-size: 2rem;
-            }
-
-            .subtitle {
-                font-size: 1.2rem;
-            }
-
-            .screenshot-container {
-                grid-template-columns: 1fr;
-            }
-
-            .cta-buttons {
-                flex-direction: column;
-            }
-
-            .btn {
-                width: 100%;
-                justify-content: center;
-            }
-        }
-
-        .badge {
-            display: inline-block;
-            background-color: var(--accent);
-            color: white;
-            padding: 4px 12px;
-            border-radius: 12px;
-            font-size: 0.8rem;
-            font-weight: 600;
-            margin-left: 8px;
-        }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f5ef">
+  <meta name="description" content="Cubby is a fast, private clipboard history replacement built for Windows 11, with reliable long-term history and remote-session workflows.">
+  <meta name="keywords" content="Windows 11 clipboard manager, clipboard history, Win+V replacement, remote desktop clipboard, open source clipboard manager">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://cubbyclipboard.com/">
+  <meta property="og:title" content="Cubby Clipboard — Keep what you copy">
+  <meta property="og:description" content="A friendly, reliable clipboard history replacement built for Windows 11.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="canonical" href="https://cubbyclipboard.com/">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <title>Cubby Clipboard — A better clipboard history for Windows 11</title>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <img src="https://raw.githubusercontent.com/XueshiQiao/PastePaw/refs/heads/main/src-tauri/icons/128x128.png" alt="PastePaw Logo" class="logo">
-            <h1>PastePaw</h1>
-            <p class="subtitle">A beautiful clipboard history manager for macOS</p>
-            <p style="color: var(--text-secondary); max-width: 600px; margin: 0 auto;">
-                Never lose what you copy again. PastePaw keeps track of everything you copy,
-                making it easy to access your clipboard history with a simple keyboard shortcut.
-            </p>
-            <div class="cta-buttons">
-                <a href="https://github.com/XueshiQiao/PastePaw/releases/latest" class="btn btn-primary">
-                    <span>📥</span> Download for macOS
-                </a>
-                <a href="https://github.com/XueshiQiao/PastePaw" class="btn btn-secondary">
-                    <span>⭐</span> View on GitHub
-                </a>
-            </div>
-        </header>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="shell nav-wrap">
+      <a class="brand" href="index.html" aria-label="Cubby Clipboard home">
+        <span class="brand-mark" aria-hidden="true">C</span>
+        <span>Cubby</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="#why-cubby">Why Cubby</a>
+        <a href="#privacy">Privacy</a>
+        <a href="support.html">Support</a>
+        <a class="nav-github" href="https://github.com/tsouth89/cubby-clipboard">GitHub <span aria-hidden="true">↗</span></a>
+      </nav>
     </div>
+  </header>
 
-    <section class="features">
-        <div class="container">
-            <h2>Features</h2>
-            <div class="features-grid">
-                <div class="feature-card">
-                    <div class="feature-icon">🔒</div>
-                    <h3>Private & Secure</h3>
-                    <p>All your clipboard data is stored locally on your device. Nothing is ever sent to any server.</p>
-                </div>
-
-                <div class="feature-card">
-                    <div class="feature-icon">⚡</div>
-                    <h3>Fast & Lightweight</h3>
-                    <p>Built with Rust and Tauri for blazing fast performance with minimal resource usage.</p>
-                </div>
-
-                <div class="feature-card">
-                    <div class="feature-icon">🎨</div>
-                    <h3>Beautiful Design</h3>
-                    <p>Modern interface with native macOS feel. Automatic dark mode support that follows your system preferences.</p>
-                </div>
-
-                <div class="feature-card">
-                    <div class="feature-icon">📋</div>
-                    <h3>Automatic History</h3>
-                    <p>Automatically saves everything you copy - text, images, and more. Access your history anytime.</p>
-                </div>
-
-                <div class="feature-card">
-                    <div class="feature-icon">🔍</div>
-                    <h3>Quick Search</h3>
-                    <p>Find previously copied content instantly with powerful search functionality.</p>
-                </div>
-
-                <div class="feature-card">
-                    <div class="feature-icon">📁</div>
-                    <h3>Organize with Folders</h3>
-                    <p>Create custom folders to organize your frequently used clips and keep them accessible.</p>
-                </div>
-
-                <div class="feature-card">
-                    <div class="feature-icon">🚫</div>
-                    <h3>Smart Filtering</h3>
-                    <p>Exclude sensitive apps like password managers from being recorded in clipboard history.</p>
-                </div>
-
-                <div class="feature-card">
-                    <div class="feature-icon">⌨️</div>
-                    <h3>Customizable Hotkey</h3>
-                    <p>Set your preferred keyboard shortcut to quickly access your clipboard history.</p>
-                </div>
-
-                <div class="feature-card">
-                    <div class="feature-icon">🤖</div>
-                    <h3>AI Powered</h3>
-                    <p>Built-in AI features to summarize, translate, explain code, and fix grammar in your clipboard content.</p>
-                </div>
-            </div>
+  <main id="main">
+    <section class="hero shell">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> Built for Windows 11</p>
+        <h1>Keep what you copy.<br><span>Find it when you need it.</span></h1>
+        <p class="hero-lede">Cubby is the clipboard history Windows should have shipped: fast to open, easy to search, and dependable enough for the work you do all day.</p>
+        <div class="cta-row">
+          <a class="button button-primary" href="https://github.com/tsouth89/cubby-clipboard/releases">Download for Windows <span aria-hidden="true">↓</span></a>
+          <a class="button button-secondary" href="https://github.com/tsouth89/cubby-clipboard">View on GitHub <span aria-hidden="true">↗</span></a>
         </div>
+        <p class="release-note">Early release · Windows 11 · Free and open source</p>
+      </div>
+
+      <div class="product-stage" aria-label="Preview of the Cubby clipboard history window">
+        <div class="cursor" aria-hidden="true"></div>
+        <div class="cubby-window">
+          <div class="mock-search"><span aria-hidden="true"></span>Search clipboard history</div>
+          <div class="mock-tabs">
+            <div><b>All</b><span>Text</span><span>Images</span></div>
+            <div class="mock-tools"><span aria-label="Filter">▽</span><span aria-label="Add">＋</span><span aria-label="Settings">⌘</span></div>
+          </div>
+          <div class="clip-list">
+            <article class="clip-card selected">
+              <span class="source-icon edge" aria-hidden="true">e</span>
+              <div class="clip-body"><strong>Project handoff notes</strong><p>Below is the final checklist for Friday's release…</p><small>Microsoft Edge · Text · just now</small></div>
+              <span class="more" aria-hidden="true">•••</span>
+            </article>
+            <article class="clip-card">
+              <span class="source-icon code" aria-hidden="true">›_</span>
+              <div class="clip-body"><strong>npm run build</strong><p class="mono">git checkout main &amp;&amp; git pull</p><small>Windows Terminal · Text · 4 minutes ago</small></div>
+            </article>
+            <article class="clip-card image-card">
+              <span class="source-icon snip" aria-hidden="true">⌗</span>
+              <div class="thumb" aria-hidden="true"><i></i><i></i><i></i></div>
+              <div class="clip-body"><strong>Screenshot</strong><p>1295×937 · 188 KB</p><small>Snipping Tool · Image · 8 minutes ago</small></div>
+            </article>
+            <article class="clip-card">
+              <span class="source-icon note" aria-hidden="true">N</span>
+              <div class="clip-body"><strong>Meeting follow-up</strong><p>Send the revised timeline and confirm the owner…</p><small>Notepad · Text · 12 minutes ago</small></div>
+              <span class="pin" aria-label="Pinned">◆</span>
+            </article>
+          </div>
+          <div class="mock-footer"><span>132 items</span><span><kbd>Enter</kbd> Paste &nbsp; <kbd>Esc</kbd> Close</span></div>
+        </div>
+      </div>
     </section>
 
-    <section class="screenshots">
-        <div class="container">
-            <h2>Screenshots</h2>
-            <div class="screenshot-container">
-                <div>
-                    <div class="screenshot-wrapper">
-                        <img src="screenshot_macos_light.png" alt="PastePaw Light Mode">
-                    </div>
-                    <p class="screenshot-caption">Light Mode</p>
-                </div>
-                <div>
-                    <div class="screenshot-wrapper">
-                        <img src="screenshot_macos_dark.png" alt="PastePaw Dark Mode">
-                    </div>
-                    <p class="screenshot-caption">Dark Mode</p>
-                </div>
-            </div>
-        </div>
+    <section class="trust-strip" aria-label="Cubby principles">
+      <div class="shell trust-grid">
+        <div><span aria-hidden="true">⌂</span><strong>Local by design</strong><small>Your history stays on this PC</small></div>
+        <div><span aria-hidden="true">◇</span><strong>Built for Windows</strong><small>Native shortcuts and behavior</small></div>
+        <div><span aria-hidden="true">↗</span><strong>Open source</strong><small>See exactly how it works</small></div>
+      </div>
     </section>
 
-    <section class="keyboard-shortcuts">
-        <div class="container">
-            <h2>Keyboard Shortcuts</h2>
-            <div class="shortcuts-grid">
-                <div class="shortcut-item">
-                    <span>Toggle Window</span>
-                    <code class="shortcut-key">⌃⇧V</code>
-                </div>
-                <div class="shortcut-item">
-                    <span>Focus Search</span>
-                    <code class="shortcut-key">⌘F</code>
-                </div>
-                <div class="shortcut-item">
-                    <span>Paste Selected</span>
-                    <code class="shortcut-key">Enter</code>
-                </div>
-                <div class="shortcut-item">
-                    <span>Delete Item</span>
-                    <code class="shortcut-key">Delete</code>
-                </div>
-                <div class="shortcut-item">
-                    <span>Pin/Unpin Item</span>
-                    <code class="shortcut-key">P</code>
-                </div>
-                <div class="shortcut-item">
-                    <span>Close Window</span>
-                    <code class="shortcut-key">Esc</code>
-                </div>
-            </div>
-        </div>
+    <section class="section shell" id="why-cubby">
+      <div class="section-heading">
+        <p class="eyebrow">A clipboard you can rely on</p>
+        <h2>Everything useful about Win+V.<br>None of the short memory.</h2>
+        <p>Cubby keeps the familiar, keyboard-first flow while making your history easier to trust, search, and manage.</p>
+      </div>
+      <div class="feature-grid">
+        <article class="feature feature-large">
+          <div class="feature-icon" aria-hidden="true">⌕</div>
+          <h3>Search the thought, not the timestamp</h3>
+          <p>Type as soon as Cubby opens. Filter text and images, find a phrase from hours or weeks ago, and paste without reaching for the mouse.</p>
+          <div class="search-demo"><span aria-hidden="true">⌕</span><span class="typed">server migration</span><span class="caret" aria-hidden="true"></span><kbd>Enter</kbd></div>
+        </article>
+        <article class="feature">
+          <div class="feature-icon" aria-hidden="true">∞</div>
+          <h3>History that sticks around</h3>
+          <p>Keep a useful local history instead of losing an important clip because Windows moved on.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon" aria-hidden="true">◆</div>
+          <h3>Pin the keepers</h3>
+          <p>Keep commands, replies, and details close at hand. Clear the noise without clearing your pinned clips.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon" aria-hidden="true">T</div>
+          <h3>Paste it your way</h3>
+          <p>Paste normally or use plain text when formatting would only get in the way.</p>
+        </article>
+      </div>
     </section>
 
-    <footer>
-        <div class="container">
-            <div class="footer-links">
-                <a href="privacy.html">Privacy Policy</a>
-                <a href="terms.html">Terms of Service</a>
-                <a href="support.html">Support</a>
-                <a href="https://github.com/XueshiQiao/PastePaw">GitHub</a>
-                <a href="https://github.com/XueshiQiao/PastePaw/releases">Download</a>
-            </div>
-            <p class="copyright">
-                © 2024-2026 PastePaw. Licensed under GPL-3.0. <br>
-                Built with ❤️ for macOS users.
-            </p>
+    <section class="remote-section">
+      <div class="shell remote-grid">
+        <div class="remote-visual" aria-hidden="true">
+          <div class="session-card host"><span class="session-dot"></span><strong>Your PC</strong><small>Cubby is ready</small></div>
+          <div class="connection-line"><i></i><span>clipboard synced</span><i></i></div>
+          <div class="session-card remote"><span class="session-screen"></span><strong>Remote session</strong><small>Large text ready to paste</small></div>
         </div>
-    </footer>
+        <div class="remote-copy">
+          <p class="eyebrow">Remote work is real work</p>
+          <h2>Built for the sessions Windows forgets.</h2>
+          <p>RDP and remote-control tools can make clipboard history unpredictable. Cubby treats those workflows as a core reliability target, with a remote-session mode designed for tools such as Ninja Remote and large clipboard items.</p>
+          <ul class="check-list">
+            <li><span aria-hidden="true">✓</span> Capture text and screenshots from remote sessions</li>
+            <li><span aria-hidden="true">✓</span> Avoid slow character-by-character typing for large logs</li>
+            <li><span aria-hidden="true">✓</span> Keep a reliable local record when remote clipboard sync churns</li>
+          </ul>
+          <p class="honesty-note">Remote compatibility varies by client and configuration. Cubby documents supported workflows instead of pretending every remote tool behaves the same.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section shell comparison-section">
+      <div class="section-heading compact">
+        <p class="eyebrow">A focused replacement</p>
+        <h2>Win+V, with room to remember.</h2>
+      </div>
+      <div class="comparison" role="table" aria-label="Cubby and Windows Clipboard History comparison">
+        <div class="comparison-row comparison-head" role="row"><span role="columnheader">What matters</span><span role="columnheader">Windows Clipboard History</span><span role="columnheader" class="cubby-col">Cubby</span></div>
+        <div class="comparison-row" role="row"><strong role="rowheader">Long local history</strong><span>Limited</span><span class="cubby-col">Built for it</span></div>
+        <div class="comparison-row" role="row"><strong role="rowheader">Instant search</strong><span>—</span><span class="cubby-col">Included</span></div>
+        <div class="comparison-row" role="row"><strong role="rowheader">Remote-session workflow</strong><span>Inconsistent</span><span class="cubby-col">First-class target</span></div>
+        <div class="comparison-row" role="row"><strong role="rowheader">Pinned-safe clearing</strong><span>—</span><span class="cubby-col">Included</span></div>
+        <div class="comparison-row" role="row"><strong role="rowheader">Open source</strong><span>—</span><span class="cubby-col">GPL-3.0</span></div>
+      </div>
+      <p class="comparison-note">Cubby focuses on clipboard history. Windows still owns emoji, GIF, kaomoji, and symbol picking through <kbd>Win</kbd> + <kbd>.</kbd></p>
+    </section>
+
+    <section class="privacy-section" id="privacy">
+      <div class="shell privacy-card">
+        <div class="privacy-copy">
+          <p class="eyebrow light">Your clipboard is personal</p>
+          <h2>Stored locally.<br>Not turned into a service.</h2>
+          <p>Cubby does not require an account, cloud connection, telemetry service, or AI provider. Your clipboard history stays on your Windows PC.</p>
+          <a href="privacy.html">Read the plain-language privacy policy <span aria-hidden="true">→</span></a>
+        </div>
+        <div class="privacy-points">
+          <div><span aria-hidden="true">01</span><p><strong>No account</strong>Open Cubby and get to work.</p></div>
+          <div><span aria-hidden="true">02</span><p><strong>No telemetry</strong>Your clips are not product analytics.</p></div>
+          <div><span aria-hidden="true">03</span><p><strong>No cloud sync</strong>Nothing leaves the PC by default.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section shell release-section">
+      <div>
+        <p class="eyebrow">Early, useful, and improving</p>
+        <h2>Help shape Cubby’s first release.</h2>
+        <p>Cubby is under active development. The essentials work, but packaging, compatibility, and richer Windows clipboard formats are still being hardened before a broad release.</p>
+      </div>
+      <div class="release-actions">
+        <a class="button button-primary" href="https://github.com/tsouth89/cubby-clipboard/releases">Check available downloads</a>
+        <a class="text-link" href="https://github.com/tsouth89/cubby-clipboard/issues">Report an issue <span aria-hidden="true">→</span></a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="shell footer-grid">
+      <div><a class="brand footer-brand" href="index.html"><span class="brand-mark" aria-hidden="true">C</span><span>Cubby Clipboard</span></a><p>A better place for what you copy.</p></div>
+      <nav aria-label="Footer navigation"><a href="privacy.html">Privacy</a><a href="terms.html">Terms</a><a href="support.html">Support</a><a href="https://github.com/tsouth89/cubby-clipboard">GitHub</a></nav>
+    </div>
+    <div class="shell footer-bottom"><span>© 2026 SouthForge AI</span><span>Free and open source · GPL-3.0</span></div>
+  </footer>
 </body>
 </html>
