@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "format": "prettier --write \"frontend/src/**/*.{ts,tsx,css}\"",
-    "format:check": "prettier --check \"frontend/src/**/*.{ts,tsx,css}\""
+    "format:check": "prettier --check \"frontend/src/**/*.{ts,tsx,css}\"",
+    "release:check": "node scripts/check-release.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",
