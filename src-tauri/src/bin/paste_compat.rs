@@ -119,9 +119,11 @@ fn main() {
                 "iteration {iteration}: target focus was not restored"
             );
             SetFocus(Some(edit)).expect("restore edit focus");
-            thread::sleep(Duration::from_millis(25));
+            thread::sleep(cubby::paste_engine::paste_settle_delay(
+                cubby::paste_engine::PasteStrategy::Standard,
+            ));
             assert_eq!(
-                cubby::paste_engine::send_paste_input(),
+                cubby::paste_engine::send_paste_input(cubby::paste_engine::PasteStrategy::Standard),
                 4,
                 "iteration {iteration}: SendInput did not accept all events"
             );
@@ -135,6 +137,50 @@ fn main() {
             assert_eq!(
                 actual, expected,
                 "iteration {iteration}: pasted text differs"
+            );
+            passed += 1;
+        }
+
+        for iteration in 0..10 {
+            let expected = cases[iteration % cases.len()];
+            SetWindowTextW(edit, w!("")).expect("clear edit");
+            clipboard
+                .set_text(expected.to_string())
+                .expect("set clipboard");
+            let _ = SetForegroundWindow(target);
+            SetFocus(Some(edit)).expect("focus edit");
+            cubby::paste_engine::set_previous_target(
+                target.0 as isize,
+                cubby::paste_engine::PasteStrategy::RemoteSession,
+            );
+            let _ = ShowWindow(cubby, SW_SHOW);
+            let _ = SetForegroundWindow(cubby);
+            pump_messages();
+            let _ = ShowWindow(cubby, SW_HIDE);
+            pump_messages();
+            assert!(
+                cubby::paste_engine::restore_previous_foreground_window(),
+                "remote iteration {iteration}: target focus was not restored"
+            );
+            SetFocus(Some(edit)).expect("restore edit focus");
+            thread::sleep(cubby::paste_engine::paste_settle_delay(
+                cubby::paste_engine::PasteStrategy::RemoteSession,
+            ));
+            assert_eq!(
+                cubby::paste_engine::send_paste_input(
+                    cubby::paste_engine::PasteStrategy::RemoteSession,
+                ),
+                4,
+                "remote iteration {iteration}: SendInput did not accept all events"
+            );
+            for _ in 0..20 {
+                pump_messages();
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(
+                window_text(edit),
+                expected,
+                "remote iteration {iteration}: pasted text differs"
             );
             passed += 1;
         }

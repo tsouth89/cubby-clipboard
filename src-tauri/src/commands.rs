@@ -464,6 +464,11 @@ async fn restore_clip(
                     .await;
 
             if final_res.is_ok() {
+                let remote_paste_mode = window
+                    .state::<Arc<crate::settings_manager::SettingsManager>>()
+                    .get()
+                    .remote_paste_mode;
+                let app_handle = window.app_handle().clone();
                 let content = if clip.clip_type == "image" {
                     "[Image]".to_string()
                 } else {
@@ -475,9 +480,28 @@ async fn restore_clip(
                     crate::animate_window_hide(
                         window,
                         Some(Box::new(move || {
+                            let strategy = crate::paste_engine::previous_paste_strategy();
                             crate::restore_previous_foreground_window();
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                            crate::paste_engine::send_paste_input();
+                            if !crate::paste_engine::should_auto_paste_with_mode(
+                                strategy,
+                                &remote_paste_mode,
+                            ) {
+                                log::info!(
+                                    "PASTE: Ninja clipboard is ready; waiting for physical Ctrl+V"
+                                );
+                                if crate::paste_engine::take_remote_copy_hint() {
+                                    use tauri_plugin_notification::NotificationExt;
+                                    let _ = app_handle
+                                        .notification()
+                                        .builder()
+                                        .title("Cubby")
+                                        .body("Copied — press Ctrl+V")
+                                        .show();
+                                }
+                                return;
+                            }
+                            std::thread::sleep(crate::paste_engine::paste_settle_delay(strategy));
+                            crate::paste_engine::send_paste_input(strategy);
                         })),
                     );
                 } else {

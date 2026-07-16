@@ -535,9 +535,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                       )}
                       <div className="flex items-center justify-between rounded-lg border border-border bg-accent/20 p-3">
                         <div className="pr-4">
-                          <span className="text-sm font-medium">
-                            {t('settings.replaceWinV')}
-                          </span>
+                          <span className="text-sm font-medium">{t('settings.replaceWinV')}</span>
                           <p className="text-xs text-muted-foreground">
                             {t('settings.replaceWinVDesc')}
                           </p>
@@ -551,6 +549,48 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                             className={`h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${settings.replace_win_v ? 'translate-x-5' : 'translate-x-0.5'}`}
                           />
                         </button>
+                      </div>
+                      <div className="rounded-lg border border-border bg-accent/20 p-3">
+                        <div>
+                          <span className="text-sm font-medium">
+                            {t('settings.remotePasteMode')}
+                          </span>
+                          <p className="text-xs text-muted-foreground">
+                            {t('settings.remotePasteModeDesc')}
+                          </p>
+                        </div>
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                          <button
+                            onClick={() => updateSetting('remote_paste_mode', 'copy_then_paste')}
+                            className={`rounded-md border px-3 py-2 text-left text-xs transition-colors ${
+                              settings.remote_paste_mode === 'copy_then_paste'
+                                ? 'border-primary bg-primary/10 text-foreground'
+                                : 'border-border bg-input text-muted-foreground hover:border-primary/60'
+                            }`}
+                          >
+                            <span className="block font-medium">
+                              {t('settings.remotePasteCopy')}
+                            </span>
+                            <span className="mt-1 block">{t('settings.remotePasteCopyDesc')}</span>
+                          </button>
+                          <button
+                            onClick={() =>
+                              updateSetting('remote_paste_mode', 'paste_as_keystrokes')
+                            }
+                            className={`rounded-md border px-3 py-2 text-left text-xs transition-colors ${
+                              settings.remote_paste_mode === 'paste_as_keystrokes'
+                                ? 'border-primary bg-primary/10 text-foreground'
+                                : 'border-border bg-input text-muted-foreground hover:border-primary/60'
+                            }`}
+                          >
+                            <span className="block font-medium">
+                              {t('settings.remotePasteKeystrokes')}
+                            </span>
+                            <span className="mt-1 block">
+                              {t('settings.remotePasteKeystrokesDesc')}
+                            </span>
+                          </button>
+                        </div>
                       </div>
                     </div>
                   </section>

@@ -1,7 +1,9 @@
+use std::net::UdpSocket;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
+use tauri::AppHandle;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -18,6 +20,7 @@ struct HelperState {
 struct Inner {
     state: Mutex<HelperState>,
     watchdog_started: AtomicBool,
+    activation_port: u16,
 }
 
 impl Drop for Inner {
@@ -33,13 +36,37 @@ pub struct WinVReplacementManager {
 }
 
 impl WinVReplacementManager {
-    pub fn new() -> Self {
-        Self {
+    pub fn new(app: AppHandle) -> Result<Self, String> {
+        let socket = UdpSocket::bind(("127.0.0.1", 0))
+            .map_err(|error| format!("Could not create the Cubby shortcut channel: {error}"))?;
+        let activation_port = socket
+            .local_addr()
+            .map_err(|error| format!("Could not inspect the Cubby shortcut channel: {error}"))?
+            .port();
+        std::thread::spawn(move || {
+            let mut buffer = [0_u8; 32];
+            loop {
+                match socket.recv_from(&mut buffer) {
+                    Ok((length, _)) if &buffer[..length] == b"activate" => {
+                        log::debug!("WIN_V: Received direct shortcut activation");
+                        crate::shortcuts::toggle_main_window(&app);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        log::error!("WIN_V: Shortcut activation listener failed: {error}");
+                        return;
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(HelperState::default()),
                 watchdog_started: AtomicBool::new(false),
+                activation_port,
             }),
-        }
+        })
     }
 
     pub fn configure(&self, enabled: bool) -> Result<(), String> {
@@ -56,7 +83,7 @@ impl WinVReplacementManager {
             return Ok(());
         }
 
-        ensure_child_running(&mut state)?;
+        ensure_child_running(&mut state, self.inner.activation_port)?;
         drop(state);
         self.start_watchdog();
         Ok(())
@@ -103,14 +130,14 @@ fn watchdog_loop(inner: Weak<Inner>) {
 
         if exited {
             state.child = None;
-            if let Err(error) = ensure_child_running(&mut state) {
+            if let Err(error) = ensure_child_running(&mut state, inner.activation_port) {
                 log::error!("WIN_V: Helper restart failed: {error}");
             }
         }
     }
 }
 
-fn ensure_child_running(state: &mut HelperState) -> Result<(), String> {
+fn ensure_child_running(state: &mut HelperState, activation_port: u16) -> Result<(), String> {
     if let Some(child) = state.child.as_mut() {
         match child.try_wait() {
             Ok(None) => return Ok(()),
@@ -125,6 +152,8 @@ fn ensure_child_running(state: &mut HelperState) -> Result<(), String> {
         .arg("--win-v-helper")
         .arg("--parent-pid")
         .arg(std::process::id().to_string())
+        .arg("--activation-port")
+        .arg(activation_port.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -144,7 +173,11 @@ fn ensure_child_running(state: &mut HelperState) -> Result<(), String> {
         return Err(format!("Win+V helper exited during startup with {status}"));
     }
 
-    log::info!("WIN_V: Replacement helper started (pid {})", child.id());
+    log::info!(
+        "WIN_V: Replacement helper started (pid {}, direct activation port {})",
+        child.id(),
+        activation_port
+    );
     state.child = Some(child);
     Ok(())
 }

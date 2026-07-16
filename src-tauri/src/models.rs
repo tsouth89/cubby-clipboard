@@ -15,6 +15,7 @@ pub struct AppSettings {
     pub hotkey: String,
     pub replace_win_v: bool,
     pub auto_paste: bool,
+    pub remote_paste_mode: String,
     pub ignore_ghost_clips: bool,
     pub startup_with_windows: bool,
     pub round_corners: bool,
@@ -35,6 +36,7 @@ impl Default for AppSettings {
             hotkey: "Win+Alt+V".to_string(),
             replace_win_v: true,
             auto_paste: false,
+            remote_paste_mode: "copy_then_paste".to_string(),
             ignore_ghost_clips: false,
             startup_with_windows: false,
             round_corners: true,
@@ -129,6 +131,7 @@ mod tests {
 
         assert_eq!(settings.hotkey, "Ctrl+Shift+V");
         assert!(settings.replace_win_v);
+        assert_eq!(settings.remote_paste_mode, "copy_then_paste");
     }
 
     #[test]
@@ -137,5 +140,6 @@ mod tests {
 
         assert_eq!(settings.hotkey, "Win+Alt+V");
         assert!(settings.replace_win_v);
+        assert_eq!(settings.remote_paste_mode, "copy_then_paste");
     }
 }

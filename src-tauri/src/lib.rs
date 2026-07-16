@@ -184,9 +184,10 @@ pub fn run_app() {
                 SettingsManager::new(app.handle(), &db_for_settings).await
             });
             app.manage(Arc::new(settings_manager));
-            app.manage(Arc::new(
-                win_v_replacement::WinVReplacementManager::new(),
-            ));
+            let shortcut_manager =
+                win_v_replacement::WinVReplacementManager::new(app.handle().clone())
+                    .map_err(std::io::Error::other)?;
+            app.manage(Arc::new(shortcut_manager));
 
             log::info!("Database path: {}", db_path_str);
             if let Ok(log_dir) = app.path().app_log_dir() {
