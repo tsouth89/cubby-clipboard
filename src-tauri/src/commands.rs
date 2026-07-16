@@ -7,10 +7,8 @@ use crate::settings_manager::SettingsManager;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
 fn clip_to_list_item(clip: &Clip, image_path: Option<&str>) -> ClipboardItem {
     let content_str = if clip.clip_type == "image" {
@@ -888,39 +886,7 @@ pub async fn register_global_shortcut(
     hotkey: String,
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
-    use tauri_plugin_global_shortcut::ShortcutState;
-
-    let app = window.app_handle();
-    let shortcut = Shortcut::from_str(&hotkey).map_err(|e| format!("Invalid hotkey: {:?}", e))?;
-
-    if let Err(e) = app.global_shortcut().unregister_all() {
-        log::warn!("Failed to unregister existing shortcuts: {:?}", e);
-    }
-
-    let main_window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "Main window not found".to_string())?;
-
-    let win_clone = main_window.clone();
-    if let Err(e) = app
-        .global_shortcut()
-        .on_shortcut(shortcut, move |_app, _shortcut, event| {
-            if event.state() == ShortcutState::Pressed {
-                if win_clone.is_visible().unwrap_or(false)
-                    && win_clone.is_focused().unwrap_or(false)
-                {
-                    crate::animate_window_hide(&win_clone, None);
-                } else {
-                    crate::position_window_at_bottom(&win_clone);
-                }
-            }
-        })
-    {
-        return Err(format!("Failed to register hotkey: {:?}", e));
-    }
-
-    log::info!("Registered global shortcut: {}", hotkey);
-    Ok(())
+    crate::shortcuts::register_standard_shortcut(window.app_handle(), &hotkey)
 }
 
 #[tauri::command]

@@ -8,7 +8,7 @@ import {
   Folder as FolderIcon,
   MoreHorizontal,
 } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useTheme } from '../hooks/useTheme';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
@@ -33,6 +33,8 @@ type Tab = 'general' | 'folders';
 export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPanelProps) {
   const [activeTab, setActiveTab] = useState<Tab>('general');
   const [settings, setSettings] = useState<Settings>(initialSettings);
+  const settingsRef = useRef<Settings>(initialSettings);
+  const settingsSaveQueue = useRef<Promise<void>>(Promise.resolve());
   const [_historySize, setHistorySize] = useState<number>(0);
   const [isRecordingMode, setIsRecordingMode] = useState(false);
   // Folder Management State
@@ -48,21 +50,16 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   const { i18n, t } = useTranslation();
 
   // Generic handler for immediate settings updates
-  const updateSettings = async (updates: Partial<Settings>) => {
-    // Determine the next state before updating React state
-    setSettings((prev) => {
-      const newSettings = { ...prev, ...updates };
-
-      // Schedule async actions - we use newSettings which is local to this scope
-      // This avoids race conditions with 'settings' variable
-      (async () => {
+  const updateSettings = (updates: Partial<Settings>) => {
+    settingsSaveQueue.current = settingsSaveQueue.current
+      .catch(() => undefined)
+      .then(async () => {
+        const newSettings = { ...settingsRef.current, ...updates };
         try {
           await invoke('save_settings', { settings: newSettings });
+          settingsRef.current = newSettings;
+          setSettings(newSettings);
           await emit('settings-changed', newSettings);
-
-          if (updates.hotkey) {
-            await invoke('register_global_shortcut', { hotkey: updates.hotkey });
-          }
           if (
             'round_corners' in updates ||
             'mica_effect' in updates ||
@@ -70,34 +67,32 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
           ) {
             await invoke('refresh_window');
           }
+
+          const keys = Object.keys(updates);
+          if (keys.length === 1) {
+            const key = keys[0] as keyof Settings;
+            const value = updates[key];
+            if (key !== 'theme') {
+              const label = key
+                .split('_')
+                .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+                .join(' ');
+              if (typeof value === 'boolean') {
+                toast.success(`${label} was ${value ? 'enabled' : 'disabled'}`);
+              } else {
+                toast.success(`${label} updated`);
+              }
+            }
+          } else if (keys.length > 1) {
+            toast.success('Settings updated');
+          }
         } catch (error) {
           console.error(`Failed to save settings:`, error);
-          toast.error(`Failed to save settings`);
+          toast.error(String(error));
         }
-      })();
+      });
 
-      // Feedback for changes
-      const keys = Object.keys(updates);
-      if (keys.length === 1) {
-        const key = keys[0] as keyof Settings;
-        const value = updates[key];
-        if (key !== 'theme') {
-          const label = key
-            .split('_')
-            .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-            .join(' ');
-          if (typeof value === 'boolean') {
-            toast.success(`${label} was ${value ? 'enabled' : 'disabled'}`);
-          } else {
-            toast.success(`${label} updated`);
-          }
-        }
-      } else if (keys.length > 1) {
-        toast.success('Settings updated');
-      }
-
-      return newSettings;
-    });
+    return settingsSaveQueue.current;
   };
 
   const updateSetting = (key: keyof Settings, value: any) => {
@@ -555,6 +550,31 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                           </span>
                         </button>
                       )}
+                      <div className="flex items-start justify-between gap-4 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+                        <div>
+                          <span className="text-sm font-medium">{t('settings.replaceWinV')}</span>
+                          <p className="text-xs text-muted-foreground">
+                            {t('settings.replaceWinVDesc')}
+                          </p>
+                          <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                            {t('settings.replaceWinVWarning')}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => updateSetting('replace_win_v', !settings.replace_win_v)}
+                          className={`h-6 w-11 shrink-0 rounded-full transition-colors ${
+                            settings.replace_win_v ? 'bg-primary' : 'bg-accent'
+                          }`}
+                          aria-pressed={settings.replace_win_v}
+                        >
+                          <div
+                            className={`h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${
+                              settings.replace_win_v ? 'translate-x-5' : 'translate-x-0.5'
+                            }`}
+                          />
+                        </button>
+                      </div>
                     </div>
                   </section>
 

@@ -9,7 +9,6 @@ use tauri::{
 };
 #[cfg(not(feature = "app-store"))]
 use tauri_plugin_autostart::MacosLauncher;
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 static IS_ANIMATING: AtomicBool = AtomicBool::new(false);
 static LAST_SHOW_TIME: AtomicI64 = AtomicI64::new(0);
@@ -21,6 +20,7 @@ mod database;
 mod models;
 mod settings_commands;
 mod settings_manager;
+mod shortcuts;
 
 use database::Database;
 use models::get_runtime;
@@ -279,30 +279,31 @@ pub fn run_app() {
                 crate::apply_window_effect(&win, &mica_effect, &current_theme, round_corners);
             }
 
-            // Load saved hotkey from database or use default
             let manager = app_handle.state::<Arc<SettingsManager>>();
-            let saved_hotkey = manager.get().hotkey;
-
-            log::info!("Registering hotkey: {}", saved_hotkey);
-
-            // Parse the hotkey string into a Shortcut
-            use std::str::FromStr;
-            use tauri_plugin_global_shortcut::Shortcut;
-
-            if let Ok(shortcut) = Shortcut::from_str(&saved_hotkey) {
-                let win_clone = win.clone();
-                let _ = app_handle.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
-                    if event.state() == ShortcutState::Pressed {
-                        if win_clone.is_visible().unwrap_or(false) && win_clone.is_focused().unwrap_or(false) {
-                            crate::animate_window_hide(&win_clone, None);
-                        } else {
-                            position_window_at_bottom(&win_clone);
-                        }
+            let shortcut_settings = manager.get();
+            if let Err(error) =
+                shortcuts::register_standard_shortcut(&app_handle, &shortcut_settings.hotkey)
+            {
+                log::error!("SHORTCUT: Startup registration failed: {}", error);
+                let fallback = "Ctrl+Shift+V";
+                if shortcut_settings.hotkey != fallback
+                    && shortcuts::register_standard_shortcut(&app_handle, fallback).is_ok()
+                {
+                    let mut recovered = shortcut_settings.clone();
+                    recovered.hotkey = fallback.to_string();
+                    if let Err(save_error) = manager.save(recovered) {
+                        log::error!(
+                            "SHORTCUT: Failed to persist fallback shortcut: {}",
+                            save_error
+                        );
                     }
-                });
-            } else {
-                log::error!("Failed to parse hotkey: {}", saved_hotkey);
+                    log::warn!("SHORTCUT: Fell back to {}", fallback);
+                }
             }
+            if let Err(error) = shortcuts::start_win_v_hook(app_handle.clone()) {
+                log::error!("SHORTCUT: Win+V hook startup failed: {}", error);
+            }
+            shortcuts::set_replace_win_v(shortcut_settings.replace_win_v);
 
             let handle_for_clip = app_handle.clone();
             let db_for_clip = db_for_clipboard.clone();

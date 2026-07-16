@@ -35,7 +35,12 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
 
     // Preserve ignored_apps from current state (as frontend doesn't send it in this call)
     let current = manager.get();
-    new_settings.ignored_apps = current.ignored_apps;
+    new_settings.ignored_apps = current.ignored_apps.clone();
+
+    if new_settings.hotkey != current.hotkey {
+        crate::shortcuts::register_standard_shortcut(&app, &new_settings.hotkey)?;
+    }
+    crate::shortcuts::set_replace_win_v(new_settings.replace_win_v);
 
     // Window effect
     let theme_str = new_settings.theme.clone();
@@ -89,7 +94,12 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
         new_settings.language,
         new_settings.theme
     );
-    manager.save(new_settings)?;
+    if let Err(error) = manager.save(new_settings) {
+        let _ = crate::shortcuts::register_standard_shortcut(&app, &current.hotkey);
+        crate::shortcuts::set_replace_win_v(current.replace_win_v);
+        let _ = manager.save(current);
+        return Err(error);
+    }
     Ok(())
 }
 

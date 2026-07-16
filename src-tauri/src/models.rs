@@ -13,6 +13,7 @@ pub struct AppSettings {
     pub max_items: i64,
     pub auto_delete_days: i64,
     pub hotkey: String,
+    pub replace_win_v: bool,
     pub auto_paste: bool,
     pub ignore_ghost_clips: bool,
     pub startup_with_windows: bool,
@@ -31,7 +32,8 @@ impl Default for AppSettings {
             language: "en".to_string(),
             max_items: 1000,
             auto_delete_days: 30,
-            hotkey: "Ctrl+Shift+V".to_string(),
+            hotkey: "Win+Shift+V".to_string(),
+            replace_win_v: false,
             auto_paste: false,
             ignore_ghost_clips: false,
             startup_with_windows: false,
@@ -109,4 +111,31 @@ pub struct FolderItem {
     pub color: Option<String>,
     pub is_system: bool,
     pub item_count: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppSettings;
+
+    #[test]
+    fn existing_settings_default_win_v_replacement_to_disabled() {
+        let settings: AppSettings = serde_json::from_str(
+            r#"{
+                "theme": "system",
+                "hotkey": "Ctrl+Shift+V"
+            }"#,
+        )
+        .expect("existing settings should remain readable");
+
+        assert_eq!(settings.hotkey, "Ctrl+Shift+V");
+        assert!(!settings.replace_win_v);
+    }
+
+    #[test]
+    fn new_settings_use_safe_windows_native_shortcut() {
+        let settings = AppSettings::default();
+
+        assert_eq!(settings.hotkey, "Win+Shift+V");
+        assert!(!settings.replace_win_v);
+    }
 }
