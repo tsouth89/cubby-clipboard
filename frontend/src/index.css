@@ -70,6 +70,10 @@
     @apply font-sans text-foreground antialiased;
   }
 
+  kbd {
+    @apply mr-1 inline-flex min-w-5 items-center justify-center rounded border border-white/10 bg-white/[0.055] px-1 py-0.5 font-sans text-[9px] leading-none text-foreground/70 shadow-sm;
+  }
+
   ::-webkit-scrollbar {
     display: none;
   }

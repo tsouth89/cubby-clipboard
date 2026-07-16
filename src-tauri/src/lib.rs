@@ -177,7 +177,7 @@ pub fn run_app() {
 
                         if moved_screens {
                             // User clicked on another screen, move window there immediately
-                            position_window_at_bottom(&win);
+                            position_window_near_cursor(&win);
                             let _ = win.show();
                             let _ = win.set_focus();
                         } else {
@@ -243,14 +243,14 @@ pub fn run_app() {
                         app.exit(0);
                     } else if event.id.as_ref() == "show" {
                         if let Some(win) = app.get_webview_window("main") {
-                            position_window_at_bottom(&win);
+                            position_window_near_cursor(&win);
                         }
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
                     if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
                         if let Some(win) = tray.app_handle().get_webview_window("main") {
-                            position_window_at_bottom(&win);
+                            position_window_near_cursor(&win);
                         }
                     }
                 })
@@ -404,12 +404,11 @@ pub fn run_app() {
         .expect("error while running tauri application");
 }
 
-pub fn position_window_at_bottom(window: &tauri::WebviewWindow) {
+pub fn position_window_near_cursor(window: &tauri::WebviewWindow) {
     animate_window_show(window);
 }
 
 pub fn animate_window_show(window: &tauri::WebviewWindow) {
-    // Atomically check if false and set to true. If already true, return.
     if IS_ANIMATING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -420,67 +419,79 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
     LAST_SHOW_TIME.store(chrono::Local::now().timestamp_millis(), Ordering::SeqCst);
 
     let window = window.clone();
-
-    let (side_margin, bottom_margin, float_above_taskbar) = {
+    let float_above_taskbar = {
         let manager = window.state::<Arc<crate::settings_manager::SettingsManager>>();
-        let s = manager.get();
-        let is_mica = s.mica_effect != "clear";
-        let no_corners = !s.round_corners;
-        let side = if is_mica && no_corners {
-            0.0
-        } else {
-            constants::WINDOW_MARGIN
-        };
-        let bottom = if is_mica && no_corners {
-            0.0
-        } else {
-            constants::WINDOW_MARGIN
-        };
-        (side, bottom, s.float_above_taskbar)
+        manager.get().float_above_taskbar
     };
 
     std::thread::spawn(move || {
         if let Some(monitor) = get_monitor_at_cursor(&window) {
             let scale_factor = monitor.scale_factor();
-            let monitor_pos = monitor.position();
-            let monitor_size = monitor.size();
             let work_area = monitor.work_area();
-
+            let window_width_px = (constants::WINDOW_WIDTH * scale_factor) as u32;
             let window_height_px = (constants::WINDOW_HEIGHT * scale_factor) as u32;
-            let side_margin_px = (side_margin * scale_factor) as i32;
-            let bottom_margin_px = (bottom_margin * scale_factor) as i32;
+            let margin_px = (constants::WINDOW_MARGIN * scale_factor) as i32;
+            let cursor_offset_px = (constants::CURSOR_OFFSET * scale_factor) as i32;
+            let cursor = cursor_position().unwrap_or(windows::Win32::Foundation::POINT {
+                x: work_area.position.x + work_area.size.width as i32 / 2,
+                y: work_area.position.y + work_area.size.height as i32 / 2,
+            });
 
-            // Use full monitor height when floating above taskbar, otherwise work area
-            let reference_bottom = if float_above_taskbar {
-                monitor_pos.y + monitor_size.height as i32
+            let work_left = work_area.position.x + margin_px;
+            let work_top = work_area.position.y + margin_px;
+            let work_right = work_area.position.x + work_area.size.width as i32 - margin_px;
+            let work_bottom = work_area.position.y + work_area.size.height as i32 - margin_px;
+            let max_x = (work_right - window_width_px as i32).max(work_left);
+            let max_y = (work_bottom - window_height_px as i32).max(work_top);
+
+            let right_candidate = cursor.x + cursor_offset_px;
+            let left_candidate = cursor.x - cursor_offset_px - window_width_px as i32;
+            let mut target_x = if right_candidate + window_width_px as i32 <= work_right {
+                right_candidate
             } else {
-                work_area.position.y + work_area.size.height as i32
+                left_candidate
             };
 
+            let below_candidate = cursor.y + cursor_offset_px;
+            let above_candidate = cursor.y - cursor_offset_px - window_height_px as i32;
+            let mut target_y = if below_candidate + window_height_px as i32 <= work_bottom {
+                below_candidate
+            } else {
+                above_candidate
+            };
+
+            target_x = target_x.clamp(work_left, max_x);
+            target_y = target_y.clamp(work_top, max_y);
+
             let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize {
-                width: work_area.size.width - (side_margin_px as u32 * 2),
+                width: window_width_px,
                 height: window_height_px,
             }));
-
-            let target_y = reference_bottom - window_height_px as i32 - bottom_margin_px;
-            let start_y = reference_bottom;
-
             let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                x: work_area.position.x + side_margin_px,
-                y: start_y,
+                x: target_x,
+                y: target_y,
             }));
-
             let _ = window.show();
             let _ = window.set_focus();
 
-            // When floating above taskbar, ensure window stays on top
-            if float_above_taskbar {
-                if let Ok(handle) = window.hwnd() {
-                    use windows::Win32::Foundation::HWND;
-                    use windows::Win32::UI::WindowsAndMessaging::{
-                        SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-                    };
-                    let hwnd = HWND(handle.0 as _);
+            if let Ok(handle) = window.hwnd() {
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                };
+                let hwnd = HWND(handle.0 as _);
+                let border_color: u32 = 0xFFFF_FFFE;
+                unsafe {
+                    let _ = DwmSetWindowAttribute(
+                        hwnd,
+                        DWMWA_BORDER_COLOR,
+                        &border_color as *const _ as *const std::ffi::c_void,
+                        std::mem::size_of::<u32>() as u32,
+                    );
+                }
+
+                if float_above_taskbar {
                     let hwnd_topmost = HWND(-1 as _); // HWND_TOPMOST
                     unsafe {
                         let _ = SetWindowPos(
@@ -495,25 +506,6 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
                     }
                 }
             }
-
-            let steps = 15;
-            let duration = std::time::Duration::from_millis(10);
-            let dy = (target_y - start_y) as f64 / steps as f64;
-
-            for i in 1..=steps {
-                let current_y = start_y as f64 + dy * i as f64;
-                let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                    x: work_area.position.x + side_margin_px,
-                    y: current_y as i32,
-                }));
-                std::thread::sleep(duration);
-            }
-
-            // Ensure final position is exact
-            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                x: work_area.position.x + side_margin_px,
-                y: target_y,
-            }));
         }
         IS_ANIMATING.store(false, Ordering::SeqCst);
     });
@@ -523,7 +515,6 @@ pub fn animate_window_hide(
     window: &tauri::WebviewWindow,
     on_done: Option<Box<dyn FnOnce() + Send>>,
 ) {
-    // Atomically check if false and set to true. If already true, return.
     if IS_ANIMATING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -531,61 +522,10 @@ pub fn animate_window_hide(
         return;
     }
 
-    let (side_margin, bottom_margin, float_above_taskbar) = {
-        let manager = window.state::<Arc<crate::settings_manager::SettingsManager>>();
-        let s = manager.get();
-        let is_mica = s.mica_effect != "clear";
-        let no_corners = !s.round_corners;
-        let side = if is_mica && no_corners {
-            0.0
-        } else {
-            constants::WINDOW_MARGIN
-        };
-        let bottom = if is_mica && no_corners {
-            0.0
-        } else {
-            constants::WINDOW_MARGIN
-        };
-        (side, bottom, s.float_above_taskbar)
-    };
-
     let window = window.clone();
 
     std::thread::spawn(move || {
-        if let Some(monitor) = window.current_monitor().ok().flatten() {
-            let scale_factor = monitor.scale_factor();
-            let monitor_pos = monitor.position();
-            let monitor_size = monitor.size();
-            let work_area = monitor.work_area();
-
-            let window_height_px = (constants::WINDOW_HEIGHT * scale_factor) as u32;
-            let side_margin_px = (side_margin * scale_factor) as i32;
-            let bottom_margin_px = (bottom_margin * scale_factor) as i32;
-
-            let reference_bottom = if float_above_taskbar {
-                monitor_pos.y + monitor_size.height as i32
-            } else {
-                work_area.position.y + work_area.size.height as i32
-            };
-
-            let start_y = reference_bottom - window_height_px as i32 - bottom_margin_px;
-            let target_y = reference_bottom;
-
-            let steps = 15;
-            let duration = std::time::Duration::from_millis(10);
-            let dy = (target_y - start_y) as f64 / steps as f64;
-
-            for i in 1..=steps {
-                let current_y = start_y as f64 + dy * i as f64;
-                let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                    x: work_area.position.x + side_margin_px,
-                    y: current_y as i32,
-                }));
-                std::thread::sleep(duration);
-            }
-
-            let _ = window.hide();
-        }
+        let _ = window.hide();
         IS_ANIMATING.store(false, Ordering::SeqCst);
 
         if let Some(callback) = on_done {
@@ -602,12 +542,16 @@ fn get_data_dir() -> std::path::PathBuf {
     }
 }
 
-pub fn get_monitor_at_cursor(window: &tauri::WebviewWindow) -> Option<tauri::Monitor> {
+fn cursor_position() -> Option<windows::Win32::Foundation::POINT> {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
     let mut point = POINT { x: 0, y: 0 };
+    unsafe { GetCursorPos(&mut point).is_ok().then_some(point) }
+}
+
+pub fn get_monitor_at_cursor(window: &tauri::WebviewWindow) -> Option<tauri::Monitor> {
     let mut found = None;
-    if unsafe { GetCursorPos(&mut point).is_ok() } {
+    if let Some(point) = cursor_position() {
         if let Ok(monitors) = window.available_monitors() {
             for m in monitors {
                 let pos = m.position();

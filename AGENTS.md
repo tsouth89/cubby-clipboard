@@ -7,14 +7,14 @@
 ```
 Cubby/
 ├── src-tauri/src/
-│   ├── lib.rs               # App bootstrap, window animation, tray, hotkey, blur handler
+│   ├── lib.rs               # App bootstrap, cursor positioning, tray, hotkey, blur handler
 │   ├── commands.rs          # Tauri IPC commands (clips, paste, folders, shortcuts)
 │   ├── settings_commands.rs # Settings IPC (get_settings, save_settings, ignored apps)
 │   ├── clipboard.rs         # Clipboard polling loop, content capture
 │   ├── database.rs          # SQLite via sqlx (clips, folders, settings tables)
 │   ├── models.rs            # Shared types + global tokio runtime (get_runtime())
 │   ├── settings_manager.rs  # In-memory settings cache with DB persistence
-│   ├── constants.rs         # WINDOW_HEIGHT (330.0), WINDOW_MARGIN (0.0)
+│   ├── constants.rs         # Flyout dimensions, cursor offset, and monitor margin
 │   └── main.rs              # Entry point
 ├── frontend/src/
 │   ├── App.tsx              # Root component, keyboard shortcuts, IPC calls
@@ -32,23 +32,29 @@ All show/hide goes through `lib.rs`. Two global atomics guard it:
 - `IS_ANIMATING: AtomicBool` — prevents concurrent animations. Both `animate_window_show` and `animate_window_hide` use `compare_exchange(false, true)` at entry and set back to `false` on exit.
 - `LAST_SHOW_TIME: AtomicI64` — timestamp set on show; blur events within 500ms are ignored to prevent immediate re-hide.
 
-`position_window_at_bottom()` is the public entry point — it calls `animate_window_show()`.
+`position_window_near_cursor()` is the public entry point — it calls `animate_window_show()`.
 
 **Hotkey toggle logic** (both in `setup` and in `register_global_shortcut`):
 ```rust
 if win.is_visible().unwrap_or(false) && win.is_focused().unwrap_or(false) {
     animate_window_hide(&win, None);
 } else {
-    position_window_at_bottom(&win);
+    position_window_near_cursor(&win);
 }
 ```
 Both places must have identical toggle logic. Issue #6 was caused by `register_global_shortcut` missing the toggle.
 
-### Window Hide Animation (Z-order trick)
-During `animate_window_hide`, the window starts as `HWND_TOPMOST`, then when it reaches the taskbar's top Y coordinate it drops behind the taskbar (`SetWindowPos` with `taskbar_hwnd` as insert-after), then `window.hide()` at the end. This makes it slide behind the taskbar naturally.
+### Cursor-anchored flyout
+The main window is a fixed-size compact flyout. `animate_window_show` reads the
+physical cursor position, prefers opening below and to the right, flips left or
+up when space is constrained, and clamps the final rectangle to the active
+monitor work area. Do not restore full-monitor shelf sizing.
 
 ### Blur → Auto-hide
-`on_window_event` → `Focused(false)` → skips if: settings window is open, `LAST_SHOW_TIME` debounce < 500ms, `IS_ANIMATING` is true, or window is already hidden. If cursor moved to a different monitor, repositions there instead of hiding.
+`on_window_event` → `Focused(false)` → skips if: settings window is open,
+`LAST_SHOW_TIME` debounce < 500ms, `IS_ANIMATING` is true, or window is already
+hidden. Otherwise it hides immediately. The next invocation repositions near the
+current cursor.
 
 ### Settings
 `SettingsManager` is managed state (`app.manage(Arc::new(settings_manager))`). Access via `window.state::<Arc<SettingsManager>>().get()`. Persisted to DB. Settings changes that affect hotkey require calling `commands::register_global_shortcut` which unregisters the old shortcut and re-registers with the toggle logic.

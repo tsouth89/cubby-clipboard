@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 interface ContextMenuProps {
   x: number;
@@ -14,6 +14,19 @@ interface ContextMenuProps {
 
 export function ContextMenu({ x, y, options, onClose }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ x, y });
+
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    if (!menu) return;
+
+    const margin = 8;
+    const rect = menu.getBoundingClientRect();
+    setPosition({
+      x: Math.max(margin, Math.min(x, window.innerWidth - rect.width - margin)),
+      y: Math.max(margin, Math.min(y, window.innerHeight - rect.height - margin)),
+    });
+  }, [x, y, options.length]);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -36,16 +49,15 @@ export function ContextMenu({ x, y, options, onClose }: ContextMenuProps) {
     };
   }, [onClose]);
 
-  // Adjust position if it flows off screen (basic)
   const style = {
-    top: y,
-    left: x,
+    top: position.y,
+    left: position.x,
   };
 
   return (
     <div
       ref={menuRef}
-      className="animate-in fade-in-0 zoom-in-95 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 fixed z-50 min-w-[12rem] overflow-hidden rounded-md border border-border bg-popover p-1 shadow-md"
+      className="animate-in fade-in-0 zoom-in-95 fixed z-50 max-h-[min(24rem,calc(100vh-1rem))] min-w-[12rem] overflow-y-auto rounded-lg border border-white/[0.1] bg-popover/95 p-1.5 shadow-2xl backdrop-blur-xl"
       style={style}
     >
       <div className="flex flex-col">
@@ -57,7 +69,7 @@ export function ContextMenu({ x, y, options, onClose }: ContextMenuProps) {
               option.onClick();
               onClose();
             }}
-            className={`relative flex cursor-default select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground disabled:pointer-events-none disabled:opacity-50 ${option.danger ? 'text-red-500 focus:text-red-500' : 'text-popover-foreground'} `}
+            className={`relative flex cursor-default select-none items-center rounded-md px-2.5 py-2 text-left text-xs outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground disabled:pointer-events-none disabled:opacity-40 ${option.danger ? 'text-red-400 focus:text-red-400' : 'text-popover-foreground'} `}
           >
             {option.label}
           </button>

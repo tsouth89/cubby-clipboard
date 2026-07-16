@@ -35,7 +35,7 @@ pub fn toggle_main_window(app: &AppHandle) {
         if window.is_visible().unwrap_or(false) {
             crate::animate_window_hide(&window, None);
         } else {
-            crate::position_window_at_bottom(&window);
+            crate::position_window_near_cursor(&window);
         }
     }
 }

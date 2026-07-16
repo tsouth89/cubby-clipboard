@@ -37,7 +37,7 @@ impl Default for AppSettings {
             auto_paste: false,
             ignore_ghost_clips: false,
             startup_with_windows: false,
-            round_corners: false,
+            round_corners: true,
             float_above_taskbar: true,
 
             ignored_apps: HashSet::new(),

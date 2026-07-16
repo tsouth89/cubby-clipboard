@@ -896,7 +896,7 @@ pub async fn refresh_window(app: AppHandle) -> Result<(), String> {
         crate::animate_window_hide(
             &win,
             Some(Box::new(move || {
-                crate::position_window_at_bottom(&win_for_show);
+                crate::position_window_near_cursor(&win_for_show);
             })),
         );
     }
@@ -924,7 +924,7 @@ pub async fn focus_window(app: AppHandle, label: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn show_window(window: tauri::WebviewWindow) -> Result<(), String> {
-    crate::position_window_at_bottom(&window);
+    crate::position_window_near_cursor(&window);
     Ok(())
 }
 
