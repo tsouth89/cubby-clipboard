@@ -467,23 +467,6 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
 
                     <div className="flex items-center justify-between rounded-lg border border-border bg-accent/20 p-3">
                       <div>
-                        <span className="text-sm font-medium">{t('settings.autoPaste')}</span>
-                        <p className="text-xs text-muted-foreground">
-                          {t('settings.autoPasteDesc')}
-                        </p>
-                      </div>
-                      <button
-                        onClick={() => updateSetting('auto_paste', !settings.auto_paste)}
-                        className={`h-6 w-11 rounded-full transition-colors ${settings.auto_paste ? 'bg-primary' : 'bg-accent'}`}
-                      >
-                        <div
-                          className={`h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${settings.auto_paste ? 'translate-x-5' : 'translate-x-0.5'}`}
-                        />
-                      </button>
-                    </div>
-
-                    <div className="flex items-center justify-between rounded-lg border border-border bg-accent/20 p-3">
-                      <div>
                         <span className="text-sm font-medium">
                           {t('settings.ignoreGhostClips')}
                         </span>

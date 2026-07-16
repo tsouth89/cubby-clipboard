@@ -33,6 +33,8 @@
   "contextMenu": {
     "copy": "Kopieren",
     "paste": "Einfügen",
+    "copyPlainText": "Als Nur-Text kopieren",
+    "pastePlainText": "Als Nur-Text einfügen",
     "delete": "Löschen",
     "rename": "Umbenennen",
     "moveToFolder": "In Ordner verschieben",

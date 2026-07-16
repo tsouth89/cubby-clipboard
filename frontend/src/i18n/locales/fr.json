@@ -33,6 +33,8 @@
   "contextMenu": {
     "copy": "Copier",
     "paste": "Coller",
+    "copyPlainText": "Copier en texte brut",
+    "pastePlainText": "Coller en texte brut",
     "delete": "Supprimer",
     "rename": "Renommer",
     "moveToFolder": "Déplacer vers le dossier",

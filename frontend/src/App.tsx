@@ -314,33 +314,36 @@ function App() {
     []
   );
 
-  const handlePaste = async (clipId: string) => {
+  const handlePaste = async (clipId: string, plainText: boolean = false) => {
     try {
       const clip = clips.find((c) => c.id === clipId);
-      if (clip && clip.clip_type === 'image') {
-        try {
-          const blob = await getFullImageBlob(clipId, clip);
-          await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
-        } catch (e) {
-          console.error('Frontend clipboard write failed', e);
-        }
-      }
+      if (!clip) return;
+      if (plainText && clip.clip_type === 'image') return;
 
-      invoke('paste_clip', { id: clipId }).catch(console.error);
-    } catch (error) {
-      console.error('Failed to paste clip:', error);
-    }
-  };
-
-  const handleCopy = async (clipId: string) => {
-    try {
-      const clip = clips.find((c) => c.id === clipId);
       if (clip && clip.clip_type === 'image') {
         const blob = await getFullImageBlob(clipId, clip);
         await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
       }
 
-      await invoke('paste_clip', { id: clipId });
+      await invoke('paste_clip', { id: clipId, plainText });
+    } catch (error) {
+      console.error('Failed to paste clip:', error);
+      toast.error('Failed to paste clip');
+    }
+  };
+
+  const handleCopy = async (clipId: string, plainText: boolean = false) => {
+    try {
+      const clip = clips.find((c) => c.id === clipId);
+      if (!clip) return;
+      if (plainText && clip.clip_type === 'image') return;
+
+      if (clip && clip.clip_type === 'image') {
+        const blob = await getFullImageBlob(clipId, clip);
+        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      }
+
+      await invoke('copy_clip', { id: clipId, plainText });
 
       toast.success(t('common.copied'));
     } catch (error) {
@@ -573,8 +576,18 @@ function App() {
                           onClick: () => handlePaste(contextMenu.itemId),
                         },
                         {
+                          label: t('contextMenu.pastePlainText'),
+                          disabled: clip?.clip_type === 'image',
+                          onClick: () => handlePaste(contextMenu.itemId, true),
+                        },
+                        {
                           label: t('contextMenu.copy'),
                           onClick: () => handleCopy(contextMenu.itemId),
+                        },
+                        {
+                          label: t('contextMenu.copyPlainText'),
+                          disabled: clip?.clip_type === 'image',
+                          onClick: () => handleCopy(contextMenu.itemId, true),
                         },
                         ...(clip?.folder_id
                           ? [

@@ -356,6 +356,7 @@ pub fn run_app() {
             commands::get_clip,
             commands::get_clip_detail,
             commands::paste_clip,
+            commands::copy_clip,
             commands::delete_clip,
             commands::move_to_folder,
             commands::create_folder,

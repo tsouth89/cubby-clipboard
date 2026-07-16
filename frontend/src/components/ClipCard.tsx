@@ -112,8 +112,7 @@ export const ClipCard = memo(function ClipCard({
       data-el="clip-card"
       data-clip-id={clip.id}
       onMouseEnter={onSelect}
-      onClick={onSelect}
-      onDoubleClick={onPaste}
+      onClick={onPaste}
       onContextMenu={(event) => {
         event.preventDefault();
         onContextMenu?.(event);

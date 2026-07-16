@@ -3,7 +3,6 @@ use tauri_plugin_clipboard_x::write_text;
 
 use crate::database::Database;
 use crate::models::{Clip, ClipboardItem, Folder, FolderItem};
-use crate::settings_manager::SettingsManager;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -397,23 +396,27 @@ pub async fn get_clip_detail(
     get_clip(id, db).await
 }
 
-#[tauri::command]
-pub async fn paste_clip(
-    id: String,
-    app: AppHandle,
-    window: tauri::WebviewWindow,
-    db: tauri::State<'_, Arc<Database>>,
+async fn restore_clip(
+    id: &str,
+    plain_text: bool,
+    should_paste: bool,
+    window: &tauri::WebviewWindow,
+    db: &Database,
 ) -> Result<(), String> {
     let pool = &db.pool;
 
     let clip: Option<Clip> = sqlx::query_as(r#"SELECT * FROM clips WHERE uuid = ?"#)
-        .bind(&id)
+        .bind(id)
         .fetch_optional(pool)
         .await
         .map_err(|e| e.to_string())?;
 
     match clip {
         Some(clip) => {
+            if plain_text && clip.clip_type == "image" {
+                return Err("Plain text is not available for image clips".to_string());
+            }
+
             // Synchronize clipboard access across the app
             let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
 
@@ -468,32 +471,42 @@ pub async fn paste_clip(
                 };
                 let _ = window.emit("clipboard-write", &content);
 
-                // Check auto_paste setting
-                let manager = app.state::<Arc<SettingsManager>>();
-                let settings = manager.get();
-                let auto_paste = settings.auto_paste;
-                log::info!("paste_clip: auto_paste={}", auto_paste);
-
-                if auto_paste {
-                    // Auto-Paste Logic
-                    // 1. Hide window immediately to trigger focus switch to previous app
+                if should_paste {
                     crate::animate_window_hide(
-                        &window,
+                        window,
                         Some(Box::new(move || {
-                            // 2. Callback executed AFTER window is hidden
-                            // Small buffer to ensure OS focus switch is complete
                             std::thread::sleep(std::time::Duration::from_millis(200));
                             crate::clipboard::send_paste_input();
                         })),
                     );
                 } else {
-                    crate::animate_window_hide(&window, None);
+                    crate::animate_window_hide(window, None);
                 }
             }
             final_res
         }
         None => Err("Clip not found".to_string()),
     }
+}
+
+#[tauri::command]
+pub async fn paste_clip(
+    id: String,
+    plain_text: bool,
+    window: tauri::WebviewWindow,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<(), String> {
+    restore_clip(&id, plain_text, true, &window, db.inner()).await
+}
+
+#[tauri::command]
+pub async fn copy_clip(
+    id: String,
+    plain_text: bool,
+    window: tauri::WebviewWindow,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<(), String> {
+    restore_clip(&id, plain_text, false, &window, db.inner()).await
 }
 
 #[tauri::command]

@@ -33,6 +33,8 @@
   "contextMenu": {
     "copy": "コピー",
     "paste": "貼り付け",
+    "copyPlainText": "プレーンテキストとしてコピー",
+    "pastePlainText": "プレーンテキストとして貼り付け",
     "delete": "削除",
     "rename": "名前を変更",
     "moveToFolder": "フォルダーに移動",
