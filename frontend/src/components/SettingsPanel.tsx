@@ -60,11 +60,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
           settingsRef.current = newSettings;
           setSettings(newSettings);
           await emit('settings-changed', newSettings);
-          if (
-            'round_corners' in updates ||
-            'mica_effect' in updates ||
-            'float_above_taskbar' in updates
-          ) {
+          if ('float_above_taskbar' in updates) {
             await invoke('refresh_window');
           }
 

@@ -61,6 +61,13 @@ function App() {
   useSystemAccent();
   useLanguage(settings?.language);
   const { t } = useTranslation();
+  const hasRoundedCorners = settings?.round_corners ?? true;
+  const windowSurface =
+    settings?.mica_effect === 'clear'
+      ? 'bg-[#171719]'
+      : settings?.mica_effect === 'mica_alt'
+        ? 'bg-background/[0.28]'
+        : 'bg-background/[0.16]';
 
   const appWindow = getCurrentWindow();
   const selectedFolderRef = useRef(selectedFolder);
@@ -564,13 +571,13 @@ function App() {
     <div data-el="app-root" className="relative h-screen w-full overflow-hidden bg-transparent p-2">
       <div
         data-el="app-window"
-        className={`relative h-full w-full overflow-hidden rounded-2xl border border-white/[0.11] shadow-[0_24px_80px_rgba(0,0,0,0.48),0_6px_24px_rgba(0,0,0,0.32)] ${
-          settings?.mica_effect === 'clear' ? 'bg-[#171719]/[0.985]' : 'bg-background/75'
-        }`}
+        className={`relative h-full w-full overflow-hidden border border-white/[0.11] shadow-[0_24px_80px_rgba(0,0,0,0.48),0_6px_24px_rgba(0,0,0,0.32)] ${hasRoundedCorners ? 'rounded-[10px]' : 'rounded-none'} ${windowSurface}`}
       >
         <div
           data-el="app-frame"
-          className="flex h-full w-full flex-col font-sans text-foreground backdrop-blur-2xl"
+          className={`flex h-full w-full flex-col font-sans text-foreground ${
+            settings?.mica_effect === 'clear' ? '' : 'backdrop-blur-sm'
+          }`}
         >
           {contextMenu && (
             <ContextMenu

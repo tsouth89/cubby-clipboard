@@ -713,9 +713,8 @@ pub fn apply_window_effect(
         }
     }
 
-    // Apply DWM rounded corners on Windows 11.
-    // "clear" always rounds; Mica/Mica-Alt follow the user setting.
-    let use_rounded = effect == "clear" || round_corners;
+    // Keep the native window shape aligned with the frontend frame.
+    let use_rounded = round_corners;
     if let Ok(handle) = window.hwnd() {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::Graphics::Dwm::{
