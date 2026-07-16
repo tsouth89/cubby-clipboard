@@ -326,10 +326,17 @@ function App() {
 
   const handleDelete = async (clipId: string | null) => {
     if (!clipId) return;
+    const deletedIndex = visibleClips.findIndex((clip) => clip.id === clipId);
+    const remainingVisibleClips = visibleClips.filter((clip) => clip.id !== clipId);
+    const nextSelection =
+      deletedIndex < 0
+        ? (remainingVisibleClips[0]?.id ?? null)
+        : (remainingVisibleClips[Math.min(deletedIndex, remainingVisibleClips.length - 1)]?.id ??
+          null);
     try {
       await invoke('delete_clip', { id: clipId, hardDelete: false });
-      setClips(clips.filter((c) => c.id !== clipId));
-      setSelectedClipId(null);
+      setClips((currentClips) => currentClips.filter((clip) => clip.id !== clipId));
+      setSelectedClipId(nextSelection);
       // Refresh counts
       loadFolders();
       refreshTotalCount();
@@ -386,6 +393,29 @@ function App() {
       toast.error(t('notifications.copyFailed'));
     }
   };
+
+  const handleTogglePin = useCallback(
+    async (clipId: string | null) => {
+      if (!clipId) return;
+      try {
+        const isPinned = await invoke<boolean>('toggle_clip_pin', { id: clipId });
+        setClips((currentClips) =>
+          currentClips
+            .map((clip) => (clip.id === clipId ? { ...clip, is_pinned: isPinned } : clip))
+            .sort(
+              (left, right) =>
+                Number(right.is_pinned) - Number(left.is_pinned) ||
+                new Date(right.created_at).getTime() - new Date(left.created_at).getTime()
+            )
+        );
+        toast.success(isPinned ? 'Clip pinned' : 'Clip unpinned');
+      } catch (error) {
+        console.error('Failed to update pin state:', error);
+        toast.error('Failed to update pin state');
+      }
+    },
+    [setClips]
+  );
 
   // Keyboard navigation handlers
   const visibleClips = useMemo(
@@ -462,6 +492,13 @@ function App() {
     }
   }, [selectedClipId, handlePaste]);
 
+  const handlePasteSelectedAsPlainText = useCallback(() => {
+    if (!selectedClipId) return;
+    const selectedClip = visibleClips.find((clip) => clip.id === selectedClipId);
+    if (!selectedClip || selectedClip.clip_type === 'image') return;
+    handlePaste(selectedClipId, true);
+  }, [selectedClipId, visibleClips, handlePaste]);
+
   const handleCopySelected = useCallback(() => {
     if (selectedClipId) {
       handleCopy(selectedClipId);
@@ -469,12 +506,21 @@ function App() {
   }, [selectedClipId, handleCopy]);
 
   useKeyboard({
-    onClose: () => appWindow.hide(),
+    onClose: () => {
+      if (searchQuery) {
+        setSearchQuery('');
+        document.querySelector<HTMLInputElement>('[data-el="search-input"]')?.focus();
+        return;
+      }
+      appWindow.hide();
+    },
     onSearch: () => document.querySelector<HTMLInputElement>('[data-el="search-input"]')?.focus(),
     onDelete: () => handleDelete(selectedClipId),
+    onPin: () => handleTogglePin(selectedClipId),
     onNavigateUp: handleNavigateUp,
     onNavigateDown: handleNavigateDown,
     onPaste: handlePasteSelected,
+    onPastePlainText: handlePasteSelectedAsPlainText,
     onCopy: handleCopySelected,
   });
 
@@ -605,6 +651,10 @@ function App() {
                       const clip = clips.find((item) => item.id === contextMenu.itemId);
                       return [
                         {
+                          label: clip?.is_pinned ? 'Unpin' : 'Pin',
+                          onClick: () => handleTogglePin(contextMenu.itemId),
+                        },
+                        {
                           label: t('contextMenu.paste'),
                           onClick: () => handlePaste(contextMenu.itemId),
                         },
@@ -697,6 +747,7 @@ function App() {
               onSelectClip={setSelectedClipId}
               onPaste={handlePaste}
               onCopy={handleCopy}
+              onTogglePin={handleTogglePin}
               onLoadMore={loadMore}
               onCardContextMenu={(e, clipId) => handleContextMenu(e, 'card', clipId)}
             />
@@ -737,6 +788,13 @@ function App() {
                   ? t('pasteContext.copyAction')
                   : t('contextMenu.paste')}
               </span>
+              {selectedClipId &&
+                visibleClips.find((clip) => clip.id === selectedClipId)?.clip_type !== 'image' && (
+                  <span>
+                    <kbd>Shift</kbd>
+                    <kbd>Enter</kbd> Plain
+                  </span>
+                )}
               <span>
                 <kbd>Esc</kbd> Close
               </span>

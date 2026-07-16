@@ -43,6 +43,7 @@ impl Database {
                 content_hash TEXT NOT NULL,
                 folder_id INTEGER REFERENCES folders(id),
                 is_deleted INTEGER DEFAULT 0,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
                 is_thumbnail INTEGER NOT NULL DEFAULT 0,
                 source_app TEXT,
                 source_icon TEXT,
@@ -107,6 +108,11 @@ impl Database {
             "ALTER TABLE clips ADD COLUMN is_thumbnail INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
+        add_column_if_missing(
+            &self.pool,
+            "ALTER TABLE clips ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
 
         sqlx::query(
             r#"
@@ -148,5 +154,56 @@ async fn add_column_if_missing(pool: &SqlitePool, sql: &str) -> Result<(), sqlx:
                 Err(e)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Database;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn migration_adds_pin_state_to_existing_clip_tables() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory database should open");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE clips (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT NOT NULL UNIQUE,
+                clip_type TEXT NOT NULL,
+                content BLOB NOT NULL,
+                text_preview TEXT,
+                content_hash TEXT NOT NULL,
+                folder_id INTEGER,
+                is_deleted INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_accessed DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy clips table should be created");
+
+        let database = Database { pool };
+        database.migrate().await.expect("migration should succeed");
+
+        let pin_default: i64 = sqlx::query_scalar(
+            r#"
+            SELECT CAST("dflt_value" AS INTEGER)
+            FROM pragma_table_info('clips')
+            WHERE name = 'is_pinned'
+            "#,
+        )
+        .fetch_one(&database.pool)
+        .await
+        .expect("is_pinned column should exist");
+
+        assert_eq!(pin_default, 0);
     }
 }
