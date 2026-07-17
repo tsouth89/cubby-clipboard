@@ -13,7 +13,7 @@ foreach ($target in $releaseTargets) {
         throw "Failed to inspect the Rust dependency tree for $target."
     }
 
-    if ($tree -match '(?m)(?:^|\s)rsa v0\.9\.10(?:\s|$)') {
+    if ($tree -match '(?m)(?:^|\s)rsa v[^\s]+(?:\s|$)') {
         throw "RUSTSEC-2023-0071 is reachable for $target; remove the waiver."
     }
 }
