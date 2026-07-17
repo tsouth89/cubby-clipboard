@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
+use sqlx::{sqlite::SqliteRow, FromRow, Row};
 use std::sync::OnceLock;
 
 use std::collections::HashSet;
@@ -49,7 +49,7 @@ impl Default for AppSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Clip {
     pub id: i64,
     pub uuid: String,
@@ -68,7 +68,29 @@ pub struct Clip {
     pub last_accessed: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+impl<'r> FromRow<'r, SqliteRow> for Clip {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            uuid: row.try_get("uuid")?,
+            clip_type: row.try_get("clip_type")?,
+            content: row.try_get("content")?,
+            text_preview: row.try_get("text_preview")?,
+            content_hash: row.try_get("content_hash")?,
+            folder_id: row.try_get("folder_id")?,
+            is_deleted: row.try_get("is_deleted")?,
+            is_pinned: row.try_get("is_pinned")?,
+            is_thumbnail: row.try_get("is_thumbnail")?,
+            source_app: row.try_get("source_app")?,
+            source_icon: row.try_get("source_icon")?,
+            metadata: row.try_get("metadata")?,
+            created_at: row.try_get("created_at")?,
+            last_accessed: row.try_get("last_accessed")?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Folder {
     pub id: i64,
     pub name: String,
@@ -76,6 +98,19 @@ pub struct Folder {
     pub color: Option<String>,
     pub is_system: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl<'r> FromRow<'r, SqliteRow> for Folder {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            icon: row.try_get("icon")?,
+            color: row.try_get("color")?,
+            is_system: row.try_get("is_system")?,
+            created_at: row.try_get("created_at")?,
+        })
+    }
 }
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
