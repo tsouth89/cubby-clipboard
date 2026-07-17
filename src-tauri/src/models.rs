@@ -85,7 +85,7 @@ impl<'r> FromRow<'r, SqliteRow> for Clip {
             source_app: row.try_get("source_app")?,
             source_icon: row.try_get("source_icon")?,
             metadata: row.try_get("metadata")?,
-            ocr_text: row.try_get("ocr_text").unwrap_or(None),
+            ocr_text: row.try_get("ocr_text")?,
             created_at: row.try_get("created_at")?,
             last_accessed: row.try_get("last_accessed")?,
         })

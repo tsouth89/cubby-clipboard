@@ -38,12 +38,16 @@ pub fn recognize_png(png_bytes: &[u8]) -> Result<String, String> {
     // OCR runs off the capture hot path; poll the single async op to completion.
     // AsyncStatus ABI values: 0 = Started, 1 = Completed, 2 = Canceled, 3 = Error.
     let operation = engine.RecognizeAsync(&bitmap).map_err(|e| e.to_string())?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
         match operation.Status().map_err(|e| e.to_string())?.0 {
             1 => break,
             2 => return Err("Windows OCR was canceled".to_string()),
             3 => return Err("Windows OCR failed".to_string()),
-            _ => std::thread::sleep(std::time::Duration::from_millis(2)),
+            _ if std::time::Instant::now() >= deadline => {
+                return Err("Windows OCR timed out".to_string());
+            }
+            _ => std::thread::sleep(std::time::Duration::from_millis(5)),
         }
     }
     let result = operation.GetResults().map_err(|e| e.to_string())?;
@@ -92,7 +96,12 @@ mod tests {
                 "expected OCR to read the image, got: {text:?}"
             ),
             // No OCR language pack (e.g. on some CI images) -> skip, don't fail.
-            Err(error) => eprintln!("skipping OCR assertion: engine unavailable ({error})"),
+            // Only the missing-language case is an acceptable skip; any other
+            // failure (bitmap, API, poll) must fail the test loudly.
+            Err(error) if error.contains("no OCR language") => {
+                eprintln!("skipping OCR assertion: {error}")
+            }
+            Err(error) => panic!("OCR failed unexpectedly: {error}"),
         }
     }
 }

@@ -686,25 +686,52 @@ async fn process_clipboard_snapshot(
     // and never blocks capture; a missing OCR language just leaves ocr_text unset.
     if inserted_new && clip_type == "image" {
         if let Some(full_bytes) = full_image_content.clone() {
-            let db_for_ocr = db.clone();
-            let clip_for_ocr = emitted_id.clone();
-            std::thread::spawn(move || match crate::ocr::recognize_png(&full_bytes) {
-                Ok(text) if !text.trim().is_empty() => {
-                    let Ok(encrypted) = db_for_ocr.crypto.encrypt_text(text.trim()) else {
-                        return;
-                    };
-                    if let Ok(runtime) = crate::models::get_runtime() {
-                        let _ = runtime.block_on(
-                            sqlx::query("UPDATE clips SET ocr_text = ? WHERE uuid = ?")
-                                .bind(&encrypted)
-                                .bind(&clip_for_ocr)
-                                .execute(&db_for_ocr.pool),
-                        );
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            // Cap concurrent OCR workers so a burst of image copies can't spawn
+            // unbounded threads; excess images simply skip OCR.
+            static OCR_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+            const MAX_OCR_WORKERS: usize = 3;
+            if OCR_IN_FLIGHT.fetch_add(1, Ordering::SeqCst) >= MAX_OCR_WORKERS {
+                OCR_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+            } else {
+                let db_for_ocr = db.clone();
+                let clip_for_ocr = emitted_id.clone();
+                std::thread::spawn(move || {
+                    match crate::ocr::recognize_png(&full_bytes) {
+                        Ok(text) if !text.trim().is_empty() => {
+                            match db_for_ocr.crypto.encrypt_text(text.trim()) {
+                                Ok(encrypted) => match crate::models::get_runtime() {
+                                    Ok(runtime) => {
+                                        if let Err(error) = runtime.block_on(
+                                            sqlx::query(
+                                                "UPDATE clips SET ocr_text = ? WHERE uuid = ?",
+                                            )
+                                            .bind(&encrypted)
+                                            .bind(&clip_for_ocr)
+                                            .execute(&db_for_ocr.pool),
+                                        ) {
+                                            log::warn!(
+                                                "OCR: could not store text for {}: {}",
+                                                clip_for_ocr,
+                                                error
+                                            );
+                                        }
+                                    }
+                                    Err(error) => log::warn!("OCR: runtime unavailable: {}", error),
+                                },
+                                Err(error) => log::warn!(
+                                    "OCR: could not encrypt text for {}: {}",
+                                    clip_for_ocr,
+                                    error
+                                ),
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => log::debug!("OCR: skipped clip {}: {}", clip_for_ocr, error),
                     }
-                }
-                Ok(_) => {}
-                Err(error) => log::debug!("OCR: skipped clip {}: {}", clip_for_ocr, error),
-            });
+                    OCR_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
         }
     }
 
