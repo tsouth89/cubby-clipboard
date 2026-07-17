@@ -15,6 +15,9 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 struct HelperState {
     child: Option<Child>,
     desired: bool,
+    /// The Cubby hotkey handed to the running helper. When this changes the
+    /// helper is restarted so it re-parses the new activation chord.
+    hotkey: Option<String>,
 }
 
 struct Inner {
@@ -69,18 +72,25 @@ impl WinVReplacementManager {
         })
     }
 
-    pub fn configure(&self, enabled: bool) -> Result<(), String> {
+    pub fn configure(&self, enabled: bool, hotkey: Option<String>) -> Result<(), String> {
         let mut state = self
             .inner
             .state
             .lock()
             .map_err(|_| "Win+V helper state is unavailable".to_string())?;
+        let hotkey_changed = state.hotkey != hotkey;
         state.desired = enabled;
+        state.hotkey = hotkey;
 
         if !enabled {
             stop_child(&mut state.child);
             log::info!("WIN_V: Replacement helper stopped");
             return Ok(());
+        }
+
+        // Restart a running helper so it re-parses the new activation hotkey.
+        if hotkey_changed {
+            stop_child(&mut state.child);
         }
 
         ensure_child_running(&mut state, self.inner.activation_port)?;
@@ -157,6 +167,10 @@ fn ensure_child_running(state: &mut HelperState, activation_port: u16) -> Result
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+
+    if let Some(hotkey) = state.hotkey.as_deref() {
+        command.arg("--activation-hotkey").arg(hotkey);
+    }
 
     #[cfg(target_os = "windows")]
     command.creation_flags(CREATE_NO_WINDOW);

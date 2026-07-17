@@ -15,7 +15,7 @@ mod windows_helper {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
         KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, VIRTUAL_KEY, VK_LCONTROL,
-        VK_LMENU, VK_LWIN, VK_RCONTROL, VK_RWIN, VK_V,
+        VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_V,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW,
@@ -26,12 +26,27 @@ mod windows_helper {
 
     const DUMMY_KEY: u16 = 0x00FF;
     const CUBBY_INJECTED_FLAG: usize = 0x4355_4242;
-    const REMOTE_TRIGGER_DOUBLE_TAP_MS: u32 = 400;
 
     static STATE: OnceLock<Mutex<RemapState>> = OnceLock::new();
     static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
     static ACCEPT_TEST_INPUT: AtomicBool = AtomicBool::new(false);
     static ACTIVATION_PORT: AtomicU16 = AtomicU16::new(0);
+    /// The user's configured Cubby hotkey, parsed into a physical chord. When a
+    /// remote client is focused this chord is caught here, below the remote
+    /// client's key forwarding, so the same hotkey that opens Cubby locally also
+    /// opens it inside RDP/Ninja/etc. `None` means no valid hotkey was supplied.
+    static CONFIGURED_CHORD: OnceLock<Option<TriggerChord>> = OnceLock::new();
+
+    /// A hotkey reduced to the physical keys the low-level hook can match:
+    /// its main key plus the exact set of modifiers that must be held.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct TriggerChord {
+        ctrl: bool,
+        alt: bool,
+        shift: bool,
+        win: bool,
+        key_vk: u16,
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Decision {
@@ -44,7 +59,6 @@ mod windows_helper {
         RestoreWinAndPass {
             win_key: u16,
         },
-        ActivateRemoteTrigger,
     }
 
     #[derive(Debug, Default)]
@@ -53,7 +67,6 @@ mod windows_helper {
         active_chord: bool,
         physical_v_down: bool,
         logical_win_released: bool,
-        last_ctrl_up: Option<(u16, u32)>,
     }
 
     impl RemapState {
@@ -63,24 +76,13 @@ mod windows_helper {
             is_down: bool,
             is_up: bool,
             exact_match: bool,
-            timestamp: u32,
+            _timestamp: u32,
         ) -> Decision {
+            // Ctrl is never remapped. The configured-hotkey remote trigger is
+            // matched in `hook_proc` (it needs the live modifier state), so the
+            // state machine only owns the Win+V chord.
             if key == VK_LCONTROL.0 || key == VK_RCONTROL.0 {
-                if is_up {
-                    let is_double_tap = self.last_ctrl_up.is_some_and(|(last_key, last_time)| {
-                        last_key == key
-                            && timestamp.wrapping_sub(last_time) <= REMOTE_TRIGGER_DOUBLE_TAP_MS
-                    });
-                    self.last_ctrl_up = (!is_double_tap).then_some((key, timestamp));
-                    if is_double_tap {
-                        return Decision::ActivateRemoteTrigger;
-                    }
-                }
                 return Decision::Pass;
-            }
-
-            if is_down {
-                self.last_ctrl_up = None;
             }
 
             if key == VK_LWIN.0 || key == VK_RWIN.0 {
@@ -142,6 +144,132 @@ mod windows_helper {
             self.physical_v_down = false;
             self.logical_win_released = release_was_attempted;
         }
+    }
+
+    /// Map a single hotkey token (as produced by the settings UI, i.e.
+    /// `KeyboardEvent.code` names like `KeyV`/`Digit1`/`Backquote`, letters and
+    /// digits already unwrapped, plus loose single-character symbols) to a
+    /// Windows virtual-key code. Returns `None` for tokens we cannot match.
+    fn key_name_to_vk(name: &str) -> Option<u16> {
+        if name.chars().count() == 1 {
+            let c = name.chars().next().unwrap().to_ascii_uppercase();
+            if c.is_ascii_alphanumeric() {
+                return Some(c as u16); // 'A'..='Z' => 0x41.., '0'..='9' => 0x30..
+            }
+            return match c {
+                '`' | '~' => Some(0xC0),
+                '-' | '_' => Some(0xBD),
+                '=' | '+' => Some(0xBB),
+                '[' | '{' => Some(0xDB),
+                ']' | '}' => Some(0xDD),
+                '\\' | '|' => Some(0xDC),
+                ';' | ':' => Some(0xBA),
+                '\'' | '"' => Some(0xDE),
+                ',' | '<' => Some(0xBC),
+                '.' | '>' => Some(0xBE),
+                '/' | '?' => Some(0xBF),
+                ' ' => Some(0x20),
+                _ => None,
+            };
+        }
+
+        let lower = name.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("key") {
+            if rest.len() == 1 && rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                return Some(rest.to_ascii_uppercase().as_bytes()[0] as u16);
+            }
+        }
+        if let Some(rest) = lower.strip_prefix("digit") {
+            if rest.len() == 1 && rest.starts_with(|c: char| c.is_ascii_digit()) {
+                return Some(rest.as_bytes()[0] as u16);
+            }
+        }
+        if let Some(rest) = lower.strip_prefix('f') {
+            if let Ok(n) = rest.parse::<u16>() {
+                if (1..=24).contains(&n) {
+                    return Some(0x70 + (n - 1)); // VK_F1 = 0x70
+                }
+            }
+        }
+        match lower.as_str() {
+            "backquote" | "grave" => Some(0xC0),
+            "minus" | "hyphen" => Some(0xBD),
+            "equal" => Some(0xBB),
+            "bracketleft" => Some(0xDB),
+            "bracketright" => Some(0xDD),
+            "backslash" => Some(0xDC),
+            "semicolon" => Some(0xBA),
+            "quote" | "apostrophe" => Some(0xDE),
+            "comma" => Some(0xBC),
+            "period" | "dot" => Some(0xBE),
+            "slash" => Some(0xBF),
+            "space" | "spacebar" => Some(0x20),
+            "tab" => Some(0x09),
+            "enter" | "return" => Some(0x0D),
+            "backspace" => Some(0x08),
+            "insert" | "ins" => Some(0x2D),
+            "delete" | "del" => Some(0x2E),
+            "home" => Some(0x24),
+            "end" => Some(0x23),
+            "pageup" | "prior" => Some(0x21),
+            "pagedown" | "next" => Some(0x22),
+            "arrowup" | "up" => Some(0x26),
+            "arrowdown" | "down" => Some(0x28),
+            "arrowleft" | "left" => Some(0x25),
+            "arrowright" | "right" => Some(0x27),
+            _ => None,
+        }
+    }
+
+    /// Parse a `+`-separated hotkey string (e.g. `Ctrl+Shift+V`, `Ctrl+Backquote`)
+    /// into a physical chord. Requires exactly one non-modifier key and at least
+    /// one modifier, so a bare key can never become a global remote trigger.
+    fn parse_hotkey(spec: &str) -> Option<TriggerChord> {
+        let mut chord = TriggerChord {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            win: false,
+            key_vk: 0,
+        };
+        let mut has_key = false;
+        for raw in spec.split('+') {
+            let token = raw.trim();
+            if token.is_empty() {
+                continue;
+            }
+            match token.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" | "ctl" => chord.ctrl = true,
+                "alt" | "option" | "opt" => chord.alt = true,
+                "shift" => chord.shift = true,
+                "win" | "windows" | "super" | "meta" | "cmd" | "command" => chord.win = true,
+                _ => {
+                    let vk = key_name_to_vk(token)?;
+                    if has_key {
+                        return None; // more than one main key is not a chord we match
+                    }
+                    chord.key_vk = vk;
+                    has_key = true;
+                }
+            }
+        }
+        let has_modifier = chord.ctrl || chord.alt || chord.shift || chord.win;
+        (has_key && has_modifier).then_some(chord)
+    }
+
+    fn key_is_down(vk: u16) -> bool {
+        (unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000) != 0
+    }
+
+    /// True when the physically-held modifiers exactly match the chord: every
+    /// required modifier down and every other modifier up. The exact match
+    /// prevents, say, `Ctrl+V` from firing when the user presses `Ctrl+Shift+V`.
+    fn modifiers_match(chord: &TriggerChord) -> bool {
+        let ctrl = key_is_down(VK_LCONTROL.0) || key_is_down(VK_RCONTROL.0);
+        let alt = key_is_down(VK_LMENU.0) || key_is_down(VK_RMENU.0);
+        let shift = key_is_down(VK_LSHIFT.0) || key_is_down(VK_RSHIFT.0);
+        let win = key_is_down(VK_LWIN.0) || key_is_down(VK_RWIN.0);
+        ctrl == chord.ctrl && alt == chord.alt && shift == chord.shift && win == chord.win
     }
 
     #[derive(Serialize)]
@@ -373,6 +501,28 @@ mod windows_helper {
         let is_down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
         let is_up = message == WM_KEYUP || message == WM_SYSKEYUP;
         let key = event.vkCode as u16;
+
+        // Configured-hotkey remote trigger: catch the user's own hotkey here,
+        // below the remote client's key forwarding, but only when a supported
+        // remote client is focused (locally the global shortcut already handles
+        // it, so this avoids a double toggle). Suppress the chord so it never
+        // leaks into the remote session.
+        if is_down {
+            if let Some(Some(chord)) = CONFIGURED_CHORD.get() {
+                if key == chord.key_vk
+                    && modifiers_match(chord)
+                    && (ACCEPT_TEST_INPUT.load(Ordering::SeqCst)
+                        || foreground_is_supported_remote())
+                {
+                    match activate_cubby(None, false) {
+                        Ok(()) => emit("configured_hotkey", Some("activated Cubby directly")),
+                        Err(error) => emit("activation_failed", Some(&error)),
+                    }
+                    return LRESULT(1);
+                }
+            }
+        }
+
         let exact_match = if key == VK_V.0 && is_down {
             keyboard_is_exact_win_v()
         } else {
@@ -423,20 +573,6 @@ mod windows_helper {
                     }
                 }
             },
-            Decision::ActivateRemoteTrigger => {
-                if ACCEPT_TEST_INPUT.load(Ordering::SeqCst) || foreground_is_supported_remote() {
-                    match activate_cubby(None, false) {
-                        Ok(()) => emit("remote_trigger", Some("activated Cubby directly")),
-                        Err(error) => emit("activation_failed", Some(&error)),
-                    }
-                } else {
-                    emit(
-                        "remote_trigger_ignored",
-                        Some("foreground app is not a supported remote client"),
-                    );
-                }
-                unsafe { CallNextHookEx(None, code, wparam, lparam) }
-            }
         }
     }
 
@@ -460,6 +596,13 @@ mod windows_helper {
         args.windows(2)
             .find(|pair| pair[0] == "--activation-port")
             .and_then(|pair| pair[1].parse::<u16>().ok())
+    }
+
+    fn parse_activation_hotkey() -> Option<TriggerChord> {
+        let args: Vec<String> = env::args().collect();
+        args.windows(2)
+            .find(|pair| pair[0] == "--activation-hotkey")
+            .and_then(|pair| parse_hotkey(&pair[1]))
     }
 
     fn stop_when_parent_exits(parent_pid: u32) -> Result<(), String> {
@@ -491,6 +634,8 @@ mod windows_helper {
             env::args().any(|arg| arg == "--accept-injected-test-events"),
             Ordering::SeqCst,
         );
+        let configured_chord = parse_activation_hotkey();
+        CONFIGURED_CHORD.get_or_init(|| configured_chord);
         STATE.get_or_init(|| Mutex::new(RemapState::default()));
 
         let thread_id = unsafe { GetCurrentThreadId() };
@@ -516,7 +661,11 @@ mod windows_helper {
             "{}",
             serde_json::to_string(&OutputEvent {
                 event: "ready",
-                detail: Some("Win+V and double Ctrl activate Cubby"),
+                detail: Some(if CONFIGURED_CHORD.get().is_some_and(Option::is_some) {
+                    "Win+V and the configured hotkey activate Cubby"
+                } else {
+                    "Win+V activates Cubby"
+                }),
                 timeout_seconds: parent_pid.is_none().then_some(timeout_seconds),
             })
             .map_err(|error| error.to_string())?
@@ -536,10 +685,10 @@ mod windows_helper {
 
     #[cfg(test)]
     mod tests {
-        use super::{is_supported_remote_process, Decision, RemapState};
-        use windows::Win32::UI::Input::KeyboardAndMouse::{
-            VK_E, VK_LCONTROL, VK_LWIN, VK_RCONTROL, VK_V,
+        use super::{
+            is_supported_remote_process, parse_hotkey, Decision, RemapState, TriggerChord,
         };
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_E, VK_LWIN, VK_V};
 
         #[test]
         fn exact_win_v_chord_is_fully_suppressed() {
@@ -611,42 +760,6 @@ mod windows_helper {
         }
 
         #[test]
-        fn double_tapping_right_ctrl_activates_remote_trigger() {
-            let mut state = RemapState::default();
-            assert_eq!(
-                state.handle(VK_RCONTROL.0, false, true, true, 100),
-                Decision::Pass
-            );
-            assert_eq!(
-                state.handle(VK_RCONTROL.0, false, true, true, 420),
-                Decision::ActivateRemoteTrigger
-            );
-        }
-
-        #[test]
-        fn double_tapping_left_ctrl_activates_remote_trigger() {
-            let mut state = RemapState::default();
-            assert_eq!(
-                state.handle(VK_LCONTROL.0, false, true, true, 100),
-                Decision::Pass
-            );
-            assert_eq!(
-                state.handle(VK_LCONTROL.0, false, true, true, 420),
-                Decision::ActivateRemoteTrigger
-            );
-        }
-
-        #[test]
-        fn alternating_ctrl_keys_do_not_activate() {
-            let mut state = RemapState::default();
-            state.handle(VK_LCONTROL.0, false, true, true, 100);
-            assert_eq!(
-                state.handle(VK_RCONTROL.0, false, true, true, 200),
-                Decision::Pass
-            );
-        }
-
-        #[test]
         fn recognizes_supported_remote_clients() {
             assert!(is_supported_remote_process("ncplayer.exe"));
             assert!(is_supported_remote_process("MSTSC.EXE"));
@@ -655,11 +768,56 @@ mod windows_helper {
         }
 
         #[test]
-        fn slow_right_ctrl_taps_do_not_activate() {
+        fn parses_the_coworker_backquote_hotkey() {
+            // Ditto's default (Ctrl+`) is what the settings UI records as
+            // "Ctrl+Backquote"; a lone "`" token is also accepted.
+            let expected = TriggerChord {
+                ctrl: true,
+                alt: false,
+                shift: false,
+                win: false,
+                key_vk: 0xC0,
+            };
+            assert_eq!(parse_hotkey("Ctrl+Backquote"), Some(expected));
+            assert_eq!(parse_hotkey("Ctrl+`"), Some(expected));
+        }
+
+        #[test]
+        fn parses_letters_digits_and_modifier_aliases() {
+            assert_eq!(parse_hotkey("Ctrl+Shift+V").unwrap().key_vk, VK_V.0);
+            assert_eq!(parse_hotkey("Ctrl+Shift+KeyV").unwrap().key_vk, VK_V.0);
+            assert_eq!(parse_hotkey("Ctrl+Digit1").unwrap().key_vk, 0x31);
+            assert_eq!(parse_hotkey("Alt+F5").unwrap().key_vk, 0x74);
+
+            let win_alt_v = parse_hotkey("Win+Alt+V").unwrap();
+            assert!(win_alt_v.win && win_alt_v.alt && !win_alt_v.ctrl);
+            assert!(parse_hotkey("Windows+V").unwrap().win);
+            assert!(parse_hotkey("Cmd+V").unwrap().win);
+        }
+
+        #[test]
+        fn rejects_hotkeys_that_cannot_be_a_remote_trigger() {
+            assert_eq!(parse_hotkey("V"), None); // bare key, no modifier
+            assert_eq!(parse_hotkey("Ctrl"), None); // modifier only
+            assert_eq!(parse_hotkey("Ctrl+Shift+A+B"), None); // two main keys
+            assert_eq!(parse_hotkey("Ctrl+Nonsense"), None); // unknown key
+            assert_eq!(parse_hotkey(""), None);
+        }
+
+        #[test]
+        fn ctrl_is_always_passed_through() {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LCONTROL, VK_RCONTROL};
             let mut state = RemapState::default();
-            state.handle(VK_RCONTROL.0, false, true, true, 100);
             assert_eq!(
-                state.handle(VK_RCONTROL.0, false, true, true, 501),
+                state.handle(VK_LCONTROL.0, true, false, true, 10),
+                Decision::Pass
+            );
+            assert_eq!(
+                state.handle(VK_LCONTROL.0, false, true, true, 20),
+                Decision::Pass
+            );
+            assert_eq!(
+                state.handle(VK_RCONTROL.0, false, true, true, 30),
                 Decision::Pass
             );
         }

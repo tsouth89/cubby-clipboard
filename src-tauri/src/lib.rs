@@ -325,9 +325,10 @@ pub fn run_app() {
             if !shortcuts_ready {
                 shortcut_settings.replace_win_v = false;
             }
-            if let Err(error) =
-                replacement.configure(shortcuts_ready && shortcut_settings.replace_win_v)
-            {
+            if let Err(error) = replacement.configure(
+                shortcuts_ready && shortcut_settings.replace_win_v,
+                Some(shortcut_settings.hotkey.clone()),
+            ) {
                 log::error!("WIN_V: Startup failed: {}", error);
                 shortcut_settings.replace_win_v = false;
                 shortcuts_ready = shortcuts::register_shortcuts(
