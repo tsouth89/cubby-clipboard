@@ -47,12 +47,17 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
         )?;
     }
 
-    if new_settings.replace_win_v != current.replace_win_v {
+    // Reconfigure the helper whenever the hotkey or the replacement toggle
+    // changes, so the remote-session trigger tracks the current hotkey.
+    if shortcut_settings_changed {
         let replacement = app.state::<Arc<crate::win_v_replacement::WinVReplacementManager>>();
-        if let Err(error) = replacement.configure(new_settings.replace_win_v) {
+        if let Err(error) = replacement.configure(
+            new_settings.replace_win_v,
+            Some(new_settings.hotkey.clone()),
+        ) {
             let _ =
                 crate::shortcuts::register_shortcuts(&app, &current.hotkey, current.replace_win_v);
-            let _ = replacement.configure(current.replace_win_v);
+            let _ = replacement.configure(current.replace_win_v, Some(current.hotkey.clone()));
             return Err(error);
         }
     }
@@ -65,7 +70,7 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
             let _ =
                 crate::shortcuts::register_shortcuts(&app, &current.hotkey, current.replace_win_v);
             let replacement = app.state::<Arc<crate::win_v_replacement::WinVReplacementManager>>();
-            let _ = replacement.configure(current.replace_win_v);
+            let _ = replacement.configure(current.replace_win_v, Some(current.hotkey.clone()));
         }
         return Err(error);
     }
