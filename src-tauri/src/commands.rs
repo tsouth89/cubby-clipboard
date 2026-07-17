@@ -1356,6 +1356,15 @@ pub fn get_system_accent_color() -> Result<serde_json::Value, String> {
     }
 }
 
+#[tauri::command]
+pub async fn import_from_ditto(
+    db_path: String,
+    dry_run: bool,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<crate::ditto_import::DittoImportResult, String> {
+    crate::ditto_import::import_from_ditto(&db, &db_path, dry_run).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
