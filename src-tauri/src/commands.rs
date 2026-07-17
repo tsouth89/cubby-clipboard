@@ -1318,6 +1318,24 @@ pub async fn pick_file(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
+pub async fn pick_ditto_database(app: AppHandle) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let mut dialog = app.dialog().file().add_filter("Ditto database", &["db"]);
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let default_dir = std::path::Path::new(&appdata).join("Ditto");
+        if default_dir.exists() {
+            dialog = dialog.set_directory(default_dir);
+        }
+    }
+
+    match dialog.blocking_pick_file() {
+        Some(path) => Ok(path.to_string()),
+        None => Err("No file selected".to_string()),
+    }
+}
+
+#[tauri::command]
 pub fn get_layout_config() -> serde_json::Value {
     serde_json::json!({
         "window_height": crate::constants::WINDOW_HEIGHT,
