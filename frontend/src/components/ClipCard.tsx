@@ -24,7 +24,7 @@ interface ImageMetadata {
 }
 
 function sourceLabel(value: string | null, type: string) {
-  if (!value) return type === 'image' ? 'Image' : 'Clipboard';
+  if (!value) return type === 'image' ? 'Image' : type === 'files' ? 'Files' : 'Clipboard';
   return value.replace(/\.exe$/i, '');
 }
 

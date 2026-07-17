@@ -574,6 +574,11 @@ pub fn animate_window_hide(
 }
 
 fn get_data_dir() -> std::path::PathBuf {
+    #[cfg(debug_assertions)]
+    if let Some(path) = std::env::var_os("CUBBY_DATA_DIR") {
+        return std::path::PathBuf::from(path);
+    }
+
     let current_dir = std::env::current_dir().unwrap_or(std::path::PathBuf::from("."));
     match dirs::data_dir() {
         Some(path) => path.join("Cubby Clipboard"),

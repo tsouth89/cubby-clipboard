@@ -55,6 +55,7 @@ jobs:
     outputs:
       release_id: ${{ steps.release.outputs.id }}
       tag: ${{ steps.metadata.outputs.tag }}
+      version: ${{ steps.metadata.outputs.version }}
     steps:
       - uses: actions/checkout@v6
 
@@ -89,7 +90,11 @@ jobs:
             echo "tag=$EXPECTED_TAG" >> "$GITHUB_OUTPUT"
             echo "name=Cubby Clipboard $EXPECTED_TAG" >> "$GITHUB_OUTPUT"
             echo "draft=false" >> "$GITHUB_OUTPUT"
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            if [[ "$VERSION" == *-* ]]; then
+              echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -193,4 +198,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
-        run: gh release edit "$RELEASE_TAG" --draft=false --prerelease=false
+        run: gh release edit "$RELEASE_TAG" --draft=false

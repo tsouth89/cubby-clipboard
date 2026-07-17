@@ -13,7 +13,7 @@
 2. Install the x64 package on a clean Windows 11 VM and verify install, launch, autostart, upgrade, and uninstall.
 3. Verify `Win+V` replacement can be enabled and disabled without leaving Windows-key state stuck.
 4. Verify text, whitespace, screenshots, rapid-copy bursts, pinning, bulk clear, and restart persistence.
-5. Verify local paste plus Ninja Remote clipboard-sync paste with a large log.
+5. Verify local paste plus remote-desktop clipboard-sync paste with a large log.
 6. Confirm uninstall removes the app cleanly, and document whether local history remains on disk.
 7. Record SHA-256 hashes for the final installers.
 

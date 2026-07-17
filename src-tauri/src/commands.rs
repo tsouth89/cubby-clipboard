@@ -123,6 +123,19 @@ fn encrypt_existing_optional_text(
         .transpose()
 }
 
+fn is_managed_image_path(image_dir: &std::path::Path, file_path: &str) -> bool {
+    let Ok(managed_dir) = image_dir.canonicalize() else {
+        return false;
+    };
+    let Some(parent) = std::path::Path::new(file_path).parent() else {
+        return false;
+    };
+    parent
+        .canonicalize()
+        .map(|candidate| candidate == managed_dir)
+        .unwrap_or(false)
+}
+
 async fn image_bytes_for_encryption_migration(
     db: &Database,
     clip: &Clip,
@@ -248,7 +261,7 @@ pub async fn migrate_encrypted_storage(db: &Database) -> Result<u64, String> {
         transaction.commit().await.map_err(|e| e.to_string())?;
 
         if let (Some(old_path), Some((new_path, _))) = (old_image_path, &new_image_path) {
-            if old_path != *new_path {
+            if old_path != *new_path && is_managed_image_path(&db.image_dir, &old_path) {
                 crate::clipboard::remove_full_image_file(&old_path);
             }
         }
@@ -1452,6 +1465,61 @@ mod tests {
         image::load_from_memory(&stored.content).expect("decrypted preview should be a PNG");
 
         std::fs::remove_dir_all(&database.image_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn storage_migration_never_deletes_images_outside_its_profile() {
+        let database = test_database().await;
+        std::fs::create_dir_all(&database.image_dir).unwrap();
+        let external_dir = std::env::temp_dir().join(format!(
+            "cubby-external-image-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&external_dir).unwrap();
+        let external_path = external_dir.join("legacy-image.png");
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(4, 3)
+            .write_to(&mut png, image::ImageOutputFormat::Png)
+            .unwrap();
+        let png = png.into_inner();
+        std::fs::write(&external_path, &png).unwrap();
+
+        sqlx::query(
+            r#"
+            INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash)
+            VALUES ('external-image', 'image', x'', '[Image]', 'legacy-image-sha')
+            "#,
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO clip_images (clip_uuid, full_content, file_path, file_size, storage_kind)
+            VALUES ('external-image', x'', ?, ?, 'file')
+            "#,
+        )
+        .bind(external_path.to_string_lossy().to_string())
+        .bind(png.len() as i64)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(migrate_encrypted_storage(&database).await.unwrap(), 1);
+        assert!(external_path.exists());
+        let migrated_path: String = sqlx::query_scalar(
+            "SELECT file_path FROM clip_images WHERE clip_uuid = 'external-image'",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert!(std::path::Path::new(&migrated_path).starts_with(&database.image_dir));
+        assert!(crate::crypto::CryptoManager::is_encrypted(
+            &std::fs::read(migrated_path).unwrap()
+        ));
+
+        std::fs::remove_dir_all(&database.image_dir).unwrap();
+        std::fs::remove_dir_all(external_dir).unwrap();
     }
 
     #[test]

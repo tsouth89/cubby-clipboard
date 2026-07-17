@@ -395,7 +395,8 @@ function App() {
     () =>
       clips.filter((clip) => {
         if (contentFilter === 'images') return clip.clip_type === 'image';
-        if (contentFilter === 'text') return clip.clip_type !== 'image';
+        if (contentFilter === 'text') return clip.clip_type === 'text';
+        if (contentFilter === 'files') return clip.clip_type === 'files';
         return true;
       }),
     [clips, contentFilter]
@@ -424,6 +425,12 @@ function App() {
       return {
         title: t('clipList.noText'),
         description: t('clipList.noTextDesc'),
+      };
+    }
+    if (contentFilter === 'files') {
+      return {
+        title: t('clipList.noFiles'),
+        description: t('clipList.noFilesDesc'),
       };
     }
     return {
