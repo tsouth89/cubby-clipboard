@@ -23,14 +23,14 @@
       <p class="eyebrow">Privacy</p>
       <h1>Your clipboard stays yours.</h1>
       <p>Cubby is built to keep clipboard history useful without turning it into a cloud service.</p>
-      <div class="legal-meta">Last updated July 16, 2026</div>
+      <div class="legal-meta">Last updated July 17, 2026</div>
     </header>
     <article class="legal-content">
       <div class="legal-callout"><p><strong>The short version:</strong> Cubby stores clipboard history locally on your Windows PC. It does not require an account and does not include telemetry, advertising, cloud sync, or network-backed AI features.</p></div>
 
       <h2>What Cubby stores</h2>
-      <p>To provide clipboard history, Cubby records supported content you copy while it is running. That currently includes text and images, along with useful context such as the source application, content type, timestamps, and whether an item is pinned.</p>
-      <p>History is stored in Cubby’s local application-data directory. Images may be stored as local files and history metadata is stored in a local SQLite database.</p>
+      <p>To provide clipboard history, Cubby records supported content you copy while it is running. That currently includes plain text, HTML, RTF, images, and file lists, along with useful context such as the source application, content type, timestamps, and whether an item is pinned.</p>
+      <p>History is stored in Cubby’s local application-data directory. Clipboard payloads are kept in a local SQLite database, and image data is kept in local application files.</p>
 
       <h2>What Cubby does not collect</h2>
       <ul>
@@ -47,7 +47,7 @@
 
       <h2>Sensitive information</h2>
       <p>Clipboard history can contain passwords, access tokens, personal messages, customer information, and other sensitive content. Cubby provides ignored-application controls so selected apps can be excluded from capture, but no exclusion system should be treated as a substitute for careful handling of secrets.</p>
-      <div class="legal-callout"><p><strong>Important early-release limitation:</strong> Cubby’s local clipboard database and stored images are not encrypted yet. Anyone or any software with access to your Windows account and Cubby’s application-data files may be able to read that history.</p></div>
+      <div class="legal-callout"><p><strong>Local encryption:</strong> Cubby encrypts stored clipboard payloads and image data with AES-256-GCM. Its encryption key is protected by Windows for the current user. This protects copied content in Cubby’s application-data files at rest, but it cannot protect content from software running as you while Cubby is able to unlock your history.</p></div>
 
       <h2>Your controls</h2>
       <p>You can delete individual clips, clear unpinned history while preserving pinned clips, or use the confirmed clear-everything action. Uninstalling Cubby may not automatically remove every application-data file; those files can be removed manually if you want to erase all remaining local history.</p>

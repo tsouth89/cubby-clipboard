@@ -27,7 +27,7 @@
     <article class="legal-content">
       <div class="support-grid">
         <a class="support-card" href="https://github.com/tsouth89/cubby-clipboard/issues/new"><strong>Report a problem</strong><span>Share reproducible details on GitHub.</span></a>
-        <a class="support-card" href="https://github.com/tsouth89/cubby-clipboard/releases"><strong>Find a release</strong><span>See available Windows downloads and notes.</span></a>
+        <a class="support-card" data-latest-release href="https://github.com/tsouth89/cubby-clipboard/releases"><strong>Get the latest release</strong><span>Download the newest Windows beta and read its notes.</span></a>
         <a class="support-card" href="https://github.com/tsouth89/cubby-clipboard"><strong>Read the source</strong><span>Inspect Cubby or contribute a change.</span></a>
         <a class="support-card" href="privacy.html"><strong>Understand local storage</strong><span>See what Cubby keeps and where.</span></a>
       </div>
@@ -56,7 +56,7 @@
         </details>
         <details>
           <summary>Where is my history stored?</summary>
-          <p>On your Windows PC, in Cubby’s local application-data directory. The current early build does not encrypt this local history, so review the <a href="privacy.html">privacy page</a> before using Cubby with sensitive data.</p>
+          <p>On your Windows PC, in Cubby’s local application-data directory. Clipboard payloads and stored images are encrypted at rest with a key protected for your Windows user. See the <a href="privacy.html">privacy page</a> for the full security model.</p>
         </details>
         <details>
           <summary>Is Cubby free?</summary>
@@ -72,9 +72,10 @@
       </ul>
 
       <h2>Early-release expectations</h2>
-      <p>Cubby is under active development and is not yet presented as a fully hardened general release. Clipboard compatibility varies between applications, and richer formats beyond text and images are still being expanded. Check the release notes for the current supported behavior.</p>
+      <p>Cubby is beta software and is not yet presented as a fully hardened general release. It supports plain text, HTML, RTF, images, and file lists, though clipboard compatibility can still vary between applications and custom formats. Check the latest release notes for current behavior.</p>
     </article>
   </main>
   <footer class="site-footer"><div class="shell footer-grid"><div><a class="brand footer-brand" href="index.html"><img class="brand-mark" src="brand-mark.svg" alt=""><span>cubby clipboard</span></a><p>A better place for what you copy.</p></div><nav aria-label="Footer navigation"><a href="privacy.html">Privacy</a><a href="terms.html">Terms</a><a href="support.html">Support</a><a href="https://github.com/tsouth89/cubby-clipboard">GitHub</a></nav></div><div class="shell footer-bottom"><span>© 2026 SouthForge AI</span><span>Free and open source · GPL-3.0</span></div></footer>
+  <script src="release-links.js" defer></script>
 </body>
 </html>
