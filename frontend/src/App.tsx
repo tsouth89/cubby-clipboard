@@ -17,29 +17,6 @@ import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
 import { generateDemoClips } from './debug/demoData';
 
-const base64ToBlob = (base64: string, mimeType: string = 'image/png'): Blob => {
-  const byteCharacters = atob(base64);
-  const byteNumbers = new Array(byteCharacters.length);
-  for (let i = 0; i < byteCharacters.length; i++) {
-    byteNumbers[i] = byteCharacters.charCodeAt(i);
-  }
-  const byteArray = new Uint8Array(byteNumbers);
-  return new Blob([byteArray], { type: mimeType });
-};
-
-const getImageMimeType = (metadata: string | null): string => {
-  if (!metadata) return 'image/png';
-  try {
-    const parsed = JSON.parse(metadata) as { format?: string };
-    const format = parsed.format?.toLowerCase();
-    if (format === 'jpeg' || format === 'jpg') return 'image/jpeg';
-    if (format === 'webp') return 'image/webp';
-  } catch {
-    // Ignore metadata parse errors and fall back.
-  }
-  return 'image/png';
-};
-
 function App() {
   const [clips, setClips] = useState<AppClipboardItem[]>([]);
   const [folders, setFolders] = useState<FolderItem[]>([]);
@@ -347,7 +324,9 @@ function App() {
         : (remainingVisibleClips[Math.min(deletedIndex, remainingVisibleClips.length - 1)]?.id ??
           null);
     try {
-      await invoke('delete_clip', { id: clipId, hardDelete: false });
+      // Cubby has no trash/recovery surface. Delete must therefore remove the
+      // persisted payload immediately instead of leaving a hidden soft-delete.
+      await invoke('delete_clip', { id: clipId, hardDelete: true });
       setClips((currentClips) => currentClips.filter((clip) => clip.id !== clipId));
       setSelectedClipId(nextSelection);
       // Refresh counts
@@ -360,52 +339,39 @@ function App() {
     }
   };
 
-  const getFullImageBlob = useCallback(
-    async (clipId: string, fallbackClip: AppClipboardItem): Promise<Blob> => {
-      const detail = await invoke<AppClipboardItem>('get_clip_detail', { id: clipId });
-      const mimeType = getImageMimeType(detail.metadata ?? fallbackClip.metadata);
-      return base64ToBlob(detail.content, mimeType);
+  const handlePaste = useCallback(
+    async (clipId: string, plainText: boolean = false) => {
+      try {
+        const clip = clips.find((c) => c.id === clipId);
+        if (!clip) return;
+        if (plainText && clip.clip_type === 'image') return;
+
+        await invoke('paste_clip', { id: clipId, plainText });
+      } catch (error) {
+        console.error('Failed to paste clip:', error);
+        toast.error('Failed to paste clip');
+      }
     },
-    []
+    [clips]
   );
 
-  const handlePaste = async (clipId: string, plainText: boolean = false) => {
-    try {
-      const clip = clips.find((c) => c.id === clipId);
-      if (!clip) return;
-      if (plainText && clip.clip_type === 'image') return;
+  const handleCopy = useCallback(
+    async (clipId: string, plainText: boolean = false) => {
+      try {
+        const clip = clips.find((c) => c.id === clipId);
+        if (!clip) return;
+        if (plainText && clip.clip_type === 'image') return;
 
-      if (clip && clip.clip_type === 'image') {
-        const blob = await getFullImageBlob(clipId, clip);
-        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+        await invoke('copy_clip', { id: clipId, plainText });
+
+        toast.success(t('common.copied'));
+      } catch (error) {
+        console.error('Failed to copy clip:', error);
+        toast.error(t('notifications.copyFailed'));
       }
-
-      await invoke('paste_clip', { id: clipId, plainText });
-    } catch (error) {
-      console.error('Failed to paste clip:', error);
-      toast.error('Failed to paste clip');
-    }
-  };
-
-  const handleCopy = async (clipId: string, plainText: boolean = false) => {
-    try {
-      const clip = clips.find((c) => c.id === clipId);
-      if (!clip) return;
-      if (plainText && clip.clip_type === 'image') return;
-
-      if (clip && clip.clip_type === 'image') {
-        const blob = await getFullImageBlob(clipId, clip);
-        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
-      }
-
-      await invoke('copy_clip', { id: clipId, plainText });
-
-      toast.success(t('common.copied'));
-    } catch (error) {
-      console.error('Failed to copy clip:', error);
-      toast.error(t('notifications.copyFailed'));
-    }
-  };
+    },
+    [clips, t]
+  );
 
   const handleTogglePin = useCallback(
     async (clipId: string | null) => {
@@ -435,7 +401,9 @@ function App() {
     () =>
       clips.filter((clip) => {
         if (contentFilter === 'images') return clip.clip_type === 'image';
-        if (contentFilter === 'text') return clip.clip_type !== 'image';
+        if (contentFilter === 'text') return clip.clip_type === 'text';
+        if (contentFilter === 'files')
+          return clip.clip_type === 'file' || clip.clip_type === 'files';
         return true;
       }),
     [clips, contentFilter]
@@ -464,6 +432,12 @@ function App() {
       return {
         title: t('clipList.noText'),
         description: t('clipList.noTextDesc'),
+      };
+    }
+    if (contentFilter === 'files') {
+      return {
+        title: t('clipList.noFiles'),
+        description: t('clipList.noFilesDesc'),
       };
     }
     return {

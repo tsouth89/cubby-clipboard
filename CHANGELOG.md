@@ -1,17 +1,19 @@
 # Changelog
 
-All notable Cubby Clipboard changes are documented here. PastePaw entries below v0.1.0 are retained as upstream history and attribution.
+All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
-## v0.1.0
+## v0.1.0-beta.1
 
 ### Added
 - Native Windows clipboard capture with contention retries and burst handling
 - Cursor-anchored Windows 11 flyout with system accent, Mica/Acrylic effects, and automatic dismissal
 - Optional native `Win+V` replacement without requiring PowerToys or another remapping tool
 - Keyboard-first search, navigation, paste, plain-text paste, deletion, and persistent pinning
-- Reliable local and Ninja Remote workflows, including a large-text clipboard-sync mode
-- Text and image history with source application context, previews, folders, and contextual empty/error states
+- Reliable local and remote-desktop workflows, including a large-text clipboard-sync mode
+- Text, image, and file history with source application context, previews, content filters, folders, and contextual empty/error states
 - Native-style clear-unpinned and explicit clear-everything actions
+- Preservation of HTML, rich text, file lists, and other core Windows clipboard formats when replaying history
+- Local history encryption using Windows-protected keys, authenticated encryption, and keyed content hashes
 
 ### Privacy and release notes
 - Clipboard history remains local and Cubby includes no telemetry or cloud AI integrations
@@ -23,9 +25,11 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - 跟随鼠标位置的 Windows 11 弹出窗口，支持系统强调色、Mica/Acrylic 与自动关闭
 - 可选的原生 `Win+V` 替代方案，无需 PowerToys 或其他按键映射工具
 - 键盘优先的搜索、导航、粘贴、纯文本粘贴、删除与持久固定
-- 本地及 Ninja Remote 可靠工作流，包括适合大段文本的剪贴板同步模式
-- 文本与图片历史、来源应用信息、预览、文件夹及清晰的空状态和错误状态
+- 本地及远程桌面可靠工作流，包括适合大段文本的剪贴板同步模式
+- 文本、图片与文件历史、来源应用信息、预览、内容筛选、文件夹及清晰的空状态和错误状态
 - 类原生的“清除未固定项目”与明确的“清除全部”操作
+- 重放历史记录时保留 HTML、富文本、文件列表及其他核心 Windows 剪贴板格式
+- 使用 Windows 保护密钥、认证加密与带密钥内容哈希对本地历史记录进行加密
 
 ### 隐私与发布说明
 - 剪贴板历史仅保存在本地，Cubby 不包含遥测或云端 AI 集成

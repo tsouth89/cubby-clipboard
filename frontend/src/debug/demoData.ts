@@ -113,8 +113,8 @@ export function generateDemoClips(): ClipboardItem[] {
     {
       id: 'demo-10',
       clip_type: 'text',
-      content: `git tag v0.1.0\ngit push origin refs/heads/main\ngit push origin refs/tags/v0.1.0`,
-      preview: 'git tag v0.1.0\ngit push origin refs/heads/main',
+      content: `git tag v0.1.0-beta.1\ngit push origin refs/heads/main\ngit push origin refs/tags/v0.1.0-beta.1`,
+      preview: 'git tag v0.1.0-beta.1\ngit push origin refs/heads/main',
       folder_id: null,
       created_at: ago(35),
       source_app: 'WindowsTerminal.exe',
@@ -126,8 +126,8 @@ export function generateDemoClips(): ClipboardItem[] {
       id: 'demo-12',
       clip_type: 'text',
       content:
-        'Hi team,\n\nPlease find the latest Cubby v0.1.0 build attached. It includes the cursor-positioned flyout, reliable history search, remote-session workflows, and the new tray icon.\n\nThanks',
-      preview: 'Hi team, Please find the latest Cubby v0.1.0 build...',
+        'Hi team,\n\nPlease find the latest Cubby v0.1.0-beta.1 build attached. It includes the cursor-positioned flyout, reliable history search, remote-session workflows, and the new tray icon.\n\nThanks',
+      preview: 'Hi team, Please find the latest Cubby v0.1.0-beta.1 build...',
       folder_id: null,
       created_at: ago(50),
       source_app: 'OUTLOOK.EXE',

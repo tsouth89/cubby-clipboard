@@ -1,6 +1,6 @@
 {
   "name": "cubby-clipboard",
-  "version": "0.1.0",
+  "version": "0.1.0-beta.1",
   "description": "A native-feeling clipboard history replacement for Windows 11",
   "license": "GPL-3.0",
   "type": "module",
@@ -14,10 +14,9 @@
     "release:check": "node scripts/check-release.mjs"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.10.1",
-    "@tauri-apps/plugin-clipboard-manager": "^2.0.0",
-    "@tauri-apps/plugin-log": "^2.8.0",
-    "@tauri-apps/plugin-opener": "^2.0.0",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-log": "^2.9.0",
+    "@tauri-apps/plugin-opener": "^2.5.4",
     "clsx": "^2.0.0",
     "date-fns": "^2.30.0",
     "framer-motion": "^12.38.0",
@@ -33,7 +32,7 @@
     "use-shortcut-recorder": "^2.2.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.0.0",
+    "@tauri-apps/cli": "^2.11.4",
     "@types/react": "^18.2.43",
     "@types/react-dom": "^18.2.17",
     "@types/react-window": "^2.0.0",

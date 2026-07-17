@@ -1,7 +1,6 @@
 import { ClipboardItem } from '../types';
 import { clsx } from 'clsx';
 import { memo, useMemo } from 'react';
-import { convertFileSrc } from '@tauri-apps/api/core';
 import { Copy, File, Image as ImageIcon, MoreHorizontal, Pin } from 'lucide-react';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { PREVIEW_CHAR_LIMIT } from '../constants';
@@ -21,10 +20,12 @@ interface ImageMetadata {
   width?: number;
   height?: number;
   size_bytes?: number;
+  formats?: string[];
 }
 
 function sourceLabel(value: string | null, type: string) {
-  if (!value) return type === 'image' ? 'Image' : 'Clipboard';
+  if (!value)
+    return type === 'image' ? 'Image' : type === 'file' || type === 'files' ? 'Files' : 'Clipboard';
   return value.replace(/\.exe$/i, '');
 }
 
@@ -45,6 +46,7 @@ function formatBytes(bytes?: number) {
 }
 
 function contentKind(content: string, clipType: string) {
+  if (clipType === 'file' || clipType === 'files') return 'Files';
   const trimmed = content.trim();
   if (clipType === 'url' || /^https?:\/\/\S+$/i.test(trimmed)) return 'URL';
   if (/^[A-Za-z]:[\\/]|^\\\\[^\\]+\\/.test(trimmed)) return 'Path';
@@ -85,9 +87,6 @@ export const ClipCard = memo(function ClipCard({
     ) {
       return value;
     }
-    if (value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value)) {
-      return convertFileSrc(value);
-    }
     return `data:image/png;base64,${value}`;
   }, [clip.clip_type, clip.content]);
 
@@ -102,8 +101,10 @@ export const ClipCard = memo(function ClipCard({
     .replace(/\r\n/g, '\n')
     .replace(/\n[ \t]*\n+/g, '\n')
     .trim();
-  const kind = contentKind(preview, clip.clip_type);
   const imageMetadata = useMemo(() => parseImageMetadata(clip.metadata), [clip.metadata]);
+  const kind = imageMetadata.formats?.some((format) => format === 'html' || format === 'rtf')
+    ? 'Rich text'
+    : contentKind(preview, clip.clip_type);
   const imageDetails = [
     imageMetadata.width && imageMetadata.height
       ? `${imageMetadata.width}×${imageMetadata.height}`

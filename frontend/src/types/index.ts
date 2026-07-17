@@ -43,7 +43,7 @@ export interface PasteContext {
   remote_paste_mode: 'copy_then_paste' | 'paste_as_keystrokes';
 }
 
-export type ClipType = 'text' | 'image' | 'html' | 'rtf' | 'file' | 'url';
+export type ClipType = 'text' | 'image' | 'html' | 'rtf' | 'file' | 'files' | 'url';
 
 export const CLIP_TYPE_LABELS: Record<ClipType, string> = {
   text: 'Text',
@@ -51,6 +51,7 @@ export const CLIP_TYPE_LABELS: Record<ClipType, string> = {
   html: 'HTML',
   rtf: 'Rich Text',
   file: 'File',
+  files: 'Files',
   url: 'URL',
 };
 
@@ -60,5 +61,6 @@ export const CLIP_TYPE_ICONS: Record<ClipType, string> = {
   html: 'Code',
   rtf: 'Type',
   file: 'File',
+  files: 'File',
   url: 'Link',
 };

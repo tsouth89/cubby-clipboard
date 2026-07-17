@@ -17,6 +17,7 @@ static SHOW_GENERATION: AtomicU64 = AtomicU64::new(0);
 mod clipboard;
 mod commands;
 mod constants;
+mod crypto;
 mod database;
 mod models;
 pub mod paste_engine;
@@ -38,10 +39,21 @@ pub fn run_app() {
     let rt = get_runtime().expect("Failed to get global tokio runtime");
     let _guard = rt.enter();
 
-    let db = rt.block_on(async { Database::new(&db_path_str).await });
+    let db = rt
+        .block_on(async { Database::new(&db_path_str).await })
+        .unwrap_or_else(|error| panic!("Cubby storage initialization failed: {error}"));
 
     rt.block_on(async {
-        db.migrate().await.ok();
+        db.migrate().await.expect("Cubby database migration failed");
+        let migrated = commands::migrate_encrypted_storage(&db)
+            .await
+            .unwrap_or_else(|error| panic!("Cubby encrypted storage migration failed: {error}"));
+        if migrated > 0 {
+            log::info!("STORAGE: Encrypted {} existing clipboard items", migrated);
+        }
+        commands::migrate_clip_format_model(&db)
+            .await
+            .unwrap_or_else(|error| panic!("Cubby clipboard-format migration failed: {error}"));
     });
 
     let db_arc = Arc::new(db);
@@ -56,7 +68,11 @@ pub fn run_app() {
                 message
             ))
         })
-        .level(log::LevelFilter::Debug)
+        .level(if cfg!(debug_assertions) {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Info
+        })
         .level_for("sqlx", log::LevelFilter::Warn);
 
     #[cfg(debug_assertions)]
@@ -89,19 +105,12 @@ pub fn run_app() {
     builder
         .plugin(log_builder.build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            log::info!("Second instance detected. Sending notification and exiting.");
-            use tauri_plugin_notification::NotificationExt;
-            if let Err(e) = app.notification()
-                .builder()
-                .title("Cubby")
-                .body("Cubby is already running")
-                .show() {
-                log::error!("Failed to send notification: {:?}", e);
+            log::info!("Second instance detected; showing the existing Cubby window");
+            if let Some(window) = app.get_webview_window("main") {
+                position_window_near_cursor(&window);
             }
         }))
-        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_clipboard_x::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .manage(db_arc.clone())
@@ -189,10 +198,6 @@ pub fn run_app() {
                     .map_err(std::io::Error::other)?;
             app.manage(Arc::new(shortcut_manager));
 
-            log::info!("Database path: {}", db_path_str);
-            if let Ok(log_dir) = app.path().app_log_dir() {
-                log::info!("Log directory: {:?}", log_dir);
-            }
             let handle = app.handle().clone();
             let db_for_clipboard = db_arc.clone();
 
@@ -342,11 +347,24 @@ pub fn run_app() {
             let db_for_clip = db_for_clipboard.clone();
             clipboard::init(&handle_for_clip, db_for_clip);
 
-            // Start background image migration
+            // Start background retention maintenance after encrypted storage is ready.
             let db_for_migration = db_for_clipboard.clone();
+            let retention_settings = manager.get();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = commands::migrate_images_to_files(&db_for_migration.pool).await {
-                    log::error!("Background image migration failed: {}", e);
+                match commands::enforce_retention_in_pool(
+                    &db_for_migration.pool,
+                    retention_settings.max_items,
+                    retention_settings.auto_delete_days,
+                )
+                .await
+                {
+                    Ok((deleted, image_paths)) => {
+                        commands::remove_clip_image_files(&db_for_migration.image_dir, image_paths);
+                        if deleted > 0 {
+                            log::info!("STARTUP: Retention removed {} expired or overflow items", deleted);
+                        }
+                    }
+                    Err(error) => log::error!("STARTUP: Retention maintenance failed: {}", error),
                 }
             });
 
@@ -555,6 +573,11 @@ pub fn animate_window_hide(
 }
 
 fn get_data_dir() -> std::path::PathBuf {
+    #[cfg(debug_assertions)]
+    if let Some(path) = std::env::var_os("CUBBY_DATA_DIR") {
+        return std::path::PathBuf::from(path);
+    }
+
     let current_dir = std::env::current_dir().unwrap_or(std::path::PathBuf::from("."));
     match dirs::data_dir() {
         Some(path) => path.join("Cubby Clipboard"),

@@ -120,7 +120,13 @@ struct ClipboardSnapshot {
     sequence: u32,
     source_app_identity: Option<SourceAppIdentity>,
     content: CapturedContent,
+    formats: Vec<CapturedFormat>,
     materialize_ms: u128,
+}
+
+pub(crate) struct CapturedFormat {
+    pub(crate) name: &'static str,
+    pub(crate) content: Vec<u8>,
 }
 
 #[cfg(target_os = "windows")]
@@ -143,11 +149,12 @@ fn run_native_listener(snapshot_tx: tokio::sync::mpsc::UnboundedSender<Clipboard
                     unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
                 let source_app_identity = get_clipboard_owner_identity();
 
-                if let Some(content) = materialize_clipboard_content() {
+                if let Some((content, formats)) = materialize_clipboard_content() {
                     let snapshot = ClipboardSnapshot {
                         sequence,
                         source_app_identity,
                         content,
+                        formats,
                         materialize_ms: started.elapsed().as_millis(),
                     };
 
@@ -177,27 +184,68 @@ fn run_native_listener(snapshot_tx: tokio::sync::mpsc::UnboundedSender<Clipboard
 #[cfg(not(target_os = "windows"))]
 fn run_native_listener(_snapshot_tx: tokio::sync::mpsc::UnboundedSender<ClipboardSnapshot>) {}
 
-fn materialize_clipboard_content() -> Option<CapturedContent> {
+fn materialize_clipboard_content() -> Option<(CapturedContent, Vec<CapturedFormat>)> {
     const ATTEMPTS: u32 = 10;
 
     for attempt in 0..ATTEMPTS {
-        if let Ok(image) = read_clipboard_image_fast() {
-            return Some(CapturedContent::Image {
-                png_bytes: image.png_bytes,
-                width: image.width,
-                height: image.height,
-                hash: image.raw_hash,
-                decode_ms: image.decode_ms,
-                source_type: image.source_type,
-            });
+        if let Ok(ctx) = ClipboardContext::new() {
+            if let Ok(files) = ctx.get_files() {
+                if !files.is_empty() {
+                    let serialized = serde_json::to_vec(&files).ok()?;
+                    let preview = files.join("\n").chars().take(200).collect::<String>();
+                    let hash = calculate_hash(&serialized);
+                    return Some((
+                        CapturedContent::Text {
+                            content: files.join("\n").into_bytes(),
+                            preview,
+                            hash,
+                        },
+                        vec![CapturedFormat {
+                            name: "files",
+                            content: serialized,
+                        }],
+                    ));
+                }
+            }
         }
 
         if let Ok(ctx) = ClipboardContext::new() {
             if let Ok(text) = ctx.get_text() {
                 if let Some(content) = capture_text(text) {
-                    return Some(content);
+                    let mut formats = Vec::new();
+                    if let Ok(html) = ctx.get_html() {
+                        if !html.is_empty() {
+                            formats.push(CapturedFormat {
+                                name: "html",
+                                content: html.into_bytes(),
+                            });
+                        }
+                    }
+                    if let Ok(rtf) = ctx.get_rich_text() {
+                        if !rtf.is_empty() {
+                            formats.push(CapturedFormat {
+                                name: "rtf",
+                                content: rtf.into_bytes(),
+                            });
+                        }
+                    }
+                    return Some((content, formats));
                 }
             }
+        }
+
+        if let Ok(image) = read_clipboard_image_fast() {
+            return Some((
+                CapturedContent::Image {
+                    png_bytes: image.png_bytes,
+                    width: image.width,
+                    height: image.height,
+                    hash: image.raw_hash,
+                    decode_ms: image.decode_ms,
+                    source_type: image.source_type,
+                },
+                Vec::new(),
+            ));
         }
 
         if attempt + 1 < ATTEMPTS {
@@ -272,13 +320,32 @@ async fn process_clipboard_snapshot(
     let materialize_ms = snapshot.materialize_ms;
     let sequence = snapshot.sequence;
     let source_app_info = resolve_source_app_info(snapshot.source_app_identity);
-    let (clip_type, clip_content, clip_preview, clip_hash, full_image_content, metadata) =
+    let captured_formats = snapshot.formats;
+    let has_files = captured_formats.iter().any(|format| format.name == "files");
+    let (clip_type, clip_content, clip_preview, _primary_hash, full_image_content, metadata) =
         match snapshot.content {
             CapturedContent::Text {
                 content,
                 preview,
                 hash,
-            } => ("text", content, preview, hash, None, None),
+            } => (
+                if has_files { "files" } else { "text" },
+                content,
+                preview,
+                hash,
+                None,
+                if has_files {
+                    Some(
+                        serde_json::json!({ "file_count": captured_formats.first().and_then(|format| serde_json::from_slice::<Vec<String>>(&format.content).ok()).map(|files| files.len()).unwrap_or(0) })
+                            .to_string(),
+                    )
+                } else {
+                    let format_names: Vec<&str> =
+                        captured_formats.iter().map(|format| format.name).collect();
+                    (!format_names.is_empty())
+                        .then(|| serde_json::json!({ "formats": format_names }).to_string())
+                },
+            ),
             CapturedContent::Image {
                 png_bytes,
                 width,
@@ -288,6 +355,7 @@ async fn process_clipboard_snapshot(
                 source_type,
             } => {
                 let size_bytes = png_bytes.len();
+                let preview_bytes = create_image_preview(&png_bytes).unwrap_or_default();
                 log::debug!(
                     "CLIPBOARD: Materialized image sequence={} {}x{} source_type={} png_bytes={} decode_ms={}",
                     sequence,
@@ -299,7 +367,7 @@ async fn process_clipboard_snapshot(
                 );
                 (
                     "image",
-                    Vec::new(),
+                    preview_bytes,
                     "[Image]".to_string(),
                     hash,
                     Some(png_bytes),
@@ -315,27 +383,34 @@ async fn process_clipboard_snapshot(
                 )
             }
         };
+    let mut hash_material = Vec::new();
+    hash_material.extend_from_slice(clip_type.as_bytes());
+    hash_material.push(0);
+    hash_material.extend_from_slice(full_image_content.as_deref().unwrap_or(&clip_content));
+    for format in &captured_formats {
+        hash_material.push(0);
+        hash_material.extend_from_slice(format.name.as_bytes());
+        hash_material.push(0);
+        hash_material.extend_from_slice(&format.content);
+    }
+    let clip_hash = calculate_hash(&hash_material);
 
     // Check ignore self-paste
     {
         let mut lock = IGNORE_HASH.lock();
         if let Some(ignore_hash) = lock.take() {
             if ignore_hash == clip_hash {
-                log::info!(
-                    "CLIPBOARD: Detected self-paste for hash {}, proceeding to update timestamp",
-                    ignore_hash
-                );
+                log::info!("CLIPBOARD: Detected self-paste; proceeding to update timestamp");
             }
         }
     }
 
     // Source app info was captured at event time (before debounce) to avoid race conditions
     let (source_app, source_icon, exe_name, full_path, is_explicit_owner) = source_app_info;
-    log::info!(
-        "CLIPBOARD: Source app: {:?}, exe_name: {:?}, full_path: {:?}, explicit: {}",
-        source_app,
-        exe_name,
-        full_path,
+    log::debug!(
+        "CLIPBOARD: Source attribution available={} executable available={} explicit={}",
+        source_app.is_some(),
+        exe_name.is_some(),
         is_explicit_owner
     );
 
@@ -361,10 +436,7 @@ async fn process_clipboard_snapshot(
 
     if let Some(ref path) = full_path {
         if is_ignored(path) {
-            log::info!(
-                "CLIPBOARD: Ignoring content from ignored app (path match): {}",
-                path
-            );
+            log::info!("CLIPBOARD: Ignoring content from configured application (path match)");
             return;
         }
     }
@@ -372,8 +444,7 @@ async fn process_clipboard_snapshot(
     if let Some(ref exe) = exe_name {
         if is_ignored(exe) {
             log::info!(
-                "CLIPBOARD: Ignoring content from ignored app (exe match): {}",
-                exe
+                "CLIPBOARD: Ignoring content from configured application (executable match)"
             );
             return;
         }
@@ -392,18 +463,54 @@ async fn process_clipboard_snapshot(
 
     // DB Logic
     let pool = &db.pool;
+    let storage_hash = db.crypto.keyed_hash(&hash_material);
+    let encrypted_content = match db.crypto.encrypt(&clip_content) {
+        Ok(content) => content,
+        Err(error) => {
+            log::error!("CLIPBOARD: Failed to encrypt captured content: {}", error);
+            return;
+        }
+    };
+    let encrypted_preview = match db.crypto.encrypt_text(&clip_preview) {
+        Ok(preview) => preview,
+        Err(error) => {
+            log::error!("CLIPBOARD: Failed to encrypt captured preview: {}", error);
+            return;
+        }
+    };
+    let encrypted_source_app = match db.crypto.encrypt_optional_text(source_app.as_deref()) {
+        Ok(value) => value,
+        Err(error) => {
+            log::error!("CLIPBOARD: Failed to encrypt source attribution: {}", error);
+            return;
+        }
+    };
+    let encrypted_source_icon = match db.crypto.encrypt_optional_text(source_icon.as_deref()) {
+        Ok(value) => value,
+        Err(error) => {
+            log::error!("CLIPBOARD: Failed to encrypt source icon: {}", error);
+            return;
+        }
+    };
+    let encrypted_metadata = match db.crypto.encrypt_optional_text(metadata.as_deref()) {
+        Ok(value) => value,
+        Err(error) => {
+            log::error!("CLIPBOARD: Failed to encrypt content metadata: {}", error);
+            return;
+        }
+    };
 
     let db_lookup_started = std::time::Instant::now();
     let existing_uuid: Option<String> =
         sqlx::query_scalar::<_, String>(r#"SELECT uuid FROM clips WHERE content_hash = ?"#)
-            .bind(&clip_hash)
+            .bind(&storage_hash)
             .fetch_optional(pool)
             .await
             .unwrap_or(None);
     let db_lookup_ms = db_lookup_started.elapsed().as_millis();
 
     let db_write_started = std::time::Instant::now();
-    let emitted_id = if let Some(existing_id) = existing_uuid {
+    let (emitted_id, inserted_new) = if let Some(existing_id) = existing_uuid {
         was_existing = true;
         if clip_type == "image" {
             if let Err(error) = sqlx::query(
@@ -420,11 +527,11 @@ async fn process_clipboard_snapshot(
                 WHERE uuid = ?
                 "#,
             )
-            .bind(&source_app)
-            .bind(&source_icon)
-            .bind(&clip_content)
-            .bind(&clip_preview)
-            .bind(metadata.clone())
+            .bind(&encrypted_source_app)
+            .bind(&encrypted_source_icon)
+            .bind(&encrypted_content)
+            .bind(&encrypted_preview)
+            .bind(encrypted_metadata.clone())
             .bind(&existing_id)
             .execute(pool)
             .await
@@ -438,7 +545,12 @@ async fn process_clipboard_snapshot(
             }
 
             if let Some(full_bytes) = &full_image_content {
-                match persist_full_image_file(&existing_id, full_bytes) {
+                match persist_full_image_file(
+                    &db.crypto,
+                    &db.image_dir,
+                    &existing_id,
+                    full_bytes,
+                ) {
                     Ok(file_path) => {
                         if let Err(error) = sqlx::query(
                             r#"
@@ -471,8 +583,8 @@ async fn process_clipboard_snapshot(
             }
         } else {
             if let Err(error) = sqlx::query(r#"UPDATE clips SET created_at = CURRENT_TIMESTAMP, is_deleted = 0, source_app = ?, source_icon = ? WHERE uuid = ?"#)
-                .bind(&source_app)
-                .bind(&source_icon)
+                .bind(&encrypted_source_app)
+                .bind(&encrypted_source_icon)
                 .bind(&existing_id)
                 .execute(pool)
                 .await
@@ -485,7 +597,7 @@ async fn process_clipboard_snapshot(
                 return;
             }
         }
-        existing_id
+        (existing_id, false)
     } else {
         let clip_uuid = Uuid::new_v4().to_string();
 
@@ -497,13 +609,13 @@ async fn process_clipboard_snapshot(
         )
         .bind(&clip_uuid)
         .bind(clip_type)
-        .bind(&clip_content)
-        .bind(&clip_preview)
-        .bind(&clip_hash)
+        .bind(&encrypted_content)
+        .bind(&encrypted_preview)
+        .bind(&storage_hash)
         .bind(false)
-        .bind(&source_app)
-        .bind(&source_icon)
-        .bind(metadata)
+        .bind(&encrypted_source_app)
+        .bind(&encrypted_source_icon)
+        .bind(encrypted_metadata)
         .execute(pool)
         .await
         {
@@ -518,7 +630,12 @@ async fn process_clipboard_snapshot(
 
         if clip_type == "image" {
             if let Some(full_bytes) = &full_image_content {
-                match persist_full_image_file(&clip_uuid, full_bytes) {
+                match persist_full_image_file(
+                    &db.crypto,
+                    &db.image_dir,
+                    &clip_uuid,
+                    full_bytes,
+                ) {
                     Ok(file_path) => {
                         if let Err(error) = sqlx::query(
                             r#"
@@ -560,11 +677,59 @@ async fn process_clipboard_snapshot(
                 }
             }
         }
-        clip_uuid
+        (clip_uuid, true)
     };
     let db_write_ms = db_write_started.elapsed().as_millis();
 
+    if let Err(error) = replace_clip_formats(pool, &db.crypto, &emitted_id, &captured_formats).await
+    {
+        log::error!("CLIPBOARD: Failed to persist auxiliary formats: {}", error);
+        if inserted_new {
+            let image_path: Option<String> =
+                sqlx::query_scalar("SELECT file_path FROM clip_images WHERE clip_uuid = ?")
+                    .bind(&emitted_id)
+                    .fetch_optional(pool)
+                    .await
+                    .unwrap_or(None);
+            match sqlx::query("DELETE FROM clips WHERE uuid = ?")
+                .bind(&emitted_id)
+                .execute(pool)
+                .await
+            {
+                Ok(_) => crate::commands::remove_clip_image_files(
+                    &db.image_dir,
+                    image_path.into_iter().collect(),
+                ),
+                Err(cleanup_error) => log::error!(
+                    "CLIPBOARD: Failed to roll back incomplete clip {}: {}",
+                    emitted_id,
+                    cleanup_error
+                ),
+            }
+        }
+        return;
+    }
+
     *LAST_STABLE_HASH.lock() = Some(clip_hash.clone());
+
+    match crate::commands::enforce_retention_in_pool(
+        pool,
+        settings.max_items,
+        settings.auto_delete_days,
+    )
+    .await
+    {
+        Ok((deleted, image_paths)) => {
+            crate::commands::remove_clip_image_files(&db.image_dir, image_paths);
+            if deleted > 0 {
+                log::info!(
+                    "CLIPBOARD: Retention removed {} expired or overflow items",
+                    deleted
+                );
+            }
+        }
+        Err(error) => log::error!("CLIPBOARD: Retention maintenance failed: {}", error),
+    }
 
     let emit_started = std::time::Instant::now();
     let _ = app.emit(
@@ -594,38 +759,73 @@ async fn process_clipboard_snapshot(
         started.elapsed().as_millis()
     );
 }
-fn calculate_hash(content: &[u8]) -> String {
+pub(crate) fn calculate_hash(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
     let result = hasher.finalize();
     format!("{:x}", result)
 }
 
-fn get_image_store_dir() -> std::path::PathBuf {
-    let current_dir = std::env::current_dir().unwrap_or(std::path::PathBuf::from("."));
-    let app_data_dir = match dirs::data_dir() {
-        Some(path) => path.join("Cubby Clipboard"),
-        None => current_dir.join("Cubby Clipboard"),
-    };
-    app_data_dir.join("images")
+pub(crate) async fn replace_clip_formats(
+    pool: &sqlx::SqlitePool,
+    crypto: &crate::crypto::CryptoManager,
+    clip_uuid: &str,
+    formats: &[CapturedFormat],
+) -> Result<(), String> {
+    let mut transaction = pool.begin().await.map_err(|e| e.to_string())?;
+    sqlx::query("DELETE FROM clip_formats WHERE clip_uuid = ?")
+        .bind(clip_uuid)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| e.to_string())?;
+    for format in formats {
+        sqlx::query("INSERT INTO clip_formats (clip_uuid, format, content) VALUES (?, ?, ?)")
+            .bind(clip_uuid)
+            .bind(format.name)
+            .bind(crypto.encrypt(&format.content)?)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    transaction.commit().await.map_err(|e| e.to_string())?;
+    Ok(())
 }
 
-pub fn persist_full_image_file(clip_uuid: &str, png_bytes: &[u8]) -> Result<String, String> {
-    let dir = get_image_store_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let file_path = dir.join(format!("{}.png", clip_uuid));
-    std::fs::write(&file_path, png_bytes).map_err(|e| e.to_string())?;
+pub fn create_image_preview(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let image = image::load_from_memory(png_bytes).map_err(|e| e.to_string())?;
+    let preview = image.thumbnail(320, 220);
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    preview
+        .write_to(&mut bytes, image::ImageOutputFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(bytes.into_inner())
+}
+
+pub fn persist_full_image_file(
+    crypto: &crate::crypto::CryptoManager,
+    image_dir: &std::path::Path,
+    clip_uuid: &str,
+    png_bytes: &[u8],
+) -> Result<String, String> {
+    std::fs::create_dir_all(image_dir).map_err(|e| e.to_string())?;
+    let file_path = image_dir.join(format!("{}.cubby", clip_uuid));
+    let encrypted = crypto.encrypt(png_bytes)?;
+    std::fs::write(&file_path, encrypted).map_err(|e| e.to_string())?;
     Ok(file_path.to_string_lossy().to_string())
 }
 
-pub fn read_full_image_file(file_path: &str) -> Result<Vec<u8>, String> {
-    std::fs::read(file_path).map_err(|e| e.to_string())
+pub fn read_full_image_file(
+    crypto: &crate::crypto::CryptoManager,
+    file_path: &str,
+) -> Result<Vec<u8>, String> {
+    let encrypted = std::fs::read(file_path).map_err(|e| e.to_string())?;
+    crypto.decrypt(&encrypted)
 }
 
 pub fn remove_full_image_file(file_path: &str) {
     if let Err(e) = std::fs::remove_file(file_path) {
         if e.kind() != std::io::ErrorKind::NotFound {
-            log::warn!("Failed to delete image file {}: {}", file_path, e);
+            log::warn!("Failed to delete a stored clipboard image: {}", e);
         }
     }
 }
