@@ -1,6 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect x="2" y="2" width="60" height="60" rx="15" fill="#102844"/>
-  <g transform="translate(9.3 10.8) scale(.66)">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Cubby application icon</title>
+  <rect x="16" y="16" width="480" height="480" rx="116" fill="#102844"/>
+  <g transform="translate(75 86) scale(5.3)">
     <path fill="#fff" d="M11 0h42c6.1 0 11 4.9 11 11s-4.9 11-11 11H34c-6.6 0-12 5.4-12 12v19c0 6.1-4.9 11-11 11S0 59.1 0 53V11C0 4.9 4.9 0 11 0Z"/>
     <path fill="#43c2bf" d="M39 64c-5.5 0-10-4.5-10-10v-2c0-5.5 4.5-10 10-10h3c2.8 0 5-2.2 5-5v-2c0-5.5 4.5-10 10-10h1c5.5 0 10 4.5 10 10v19c0 5.5-4.5 10-10 10Z"/>
   </g>
