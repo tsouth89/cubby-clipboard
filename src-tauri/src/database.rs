@@ -154,6 +154,9 @@ impl Database {
             "ALTER TABLE clips ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
+        // Encrypted OCR text extracted from screenshot/image clips, so images are
+        // findable by their words. NULL until (or unless) OCR runs for a clip.
+        add_column_if_missing(&self.pool, "ALTER TABLE clips ADD COLUMN ocr_text TEXT").await?;
 
         sqlx::query(
             r#"

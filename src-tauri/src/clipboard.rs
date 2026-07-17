@@ -681,6 +681,33 @@ async fn process_clipboard_snapshot(
     };
     let db_write_ms = db_write_started.elapsed().as_millis();
 
+    // Background OCR: pull text out of screenshot/image clips so they become
+    // searchable by their words. Runs on its own thread, off the capture path,
+    // and never blocks capture; a missing OCR language just leaves ocr_text unset.
+    if inserted_new && clip_type == "image" {
+        if let Some(full_bytes) = full_image_content.clone() {
+            let db_for_ocr = db.clone();
+            let clip_for_ocr = emitted_id.clone();
+            std::thread::spawn(move || match crate::ocr::recognize_png(&full_bytes) {
+                Ok(text) if !text.trim().is_empty() => {
+                    let Ok(encrypted) = db_for_ocr.crypto.encrypt_text(text.trim()) else {
+                        return;
+                    };
+                    if let Ok(runtime) = crate::models::get_runtime() {
+                        let _ = runtime.block_on(
+                            sqlx::query("UPDATE clips SET ocr_text = ? WHERE uuid = ?")
+                                .bind(&encrypted)
+                                .bind(&clip_for_ocr)
+                                .execute(&db_for_ocr.pool),
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => log::debug!("OCR: skipped clip {}: {}", clip_for_ocr, error),
+            });
+        }
+    }
+
     if let Err(error) = replace_clip_formats(pool, &db.crypto, &emitted_id, &captured_formats).await
     {
         log::error!("CLIPBOARD: Failed to persist auxiliary formats: {}", error);

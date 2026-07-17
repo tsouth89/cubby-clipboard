@@ -36,6 +36,8 @@ fn decrypt_clip_fields(db: &Database, clip: &mut Clip) -> Result<(), String> {
     db.crypto.decrypt_optional_text(&mut clip.source_app)?;
     db.crypto.decrypt_optional_text(&mut clip.source_icon)?;
     db.crypto.decrypt_optional_text(&mut clip.metadata)?;
+    // OCR text is auxiliary; never let a bad value block loading the clip.
+    let _ = db.crypto.decrypt_optional_text(&mut clip.ocr_text);
     Ok(())
 }
 
@@ -948,7 +950,11 @@ pub async fn search_clips(
             let is_match = String::from_utf8_lossy(&clip.content)
                 .to_lowercase()
                 .contains(&normalized_query)
-                || clip.text_preview.to_lowercase().contains(&normalized_query);
+                || clip.text_preview.to_lowercase().contains(&normalized_query)
+                || clip
+                    .ocr_text
+                    .as_deref()
+                    .is_some_and(|text| text.to_lowercase().contains(&normalized_query));
             if !is_match {
                 continue;
             }
@@ -1606,6 +1612,7 @@ mod tests {
             source_app: None,
             source_icon: None,
             metadata: None,
+            ocr_text: None,
             created_at: chrono::Utc::now(),
             last_accessed: chrono::Utc::now(),
         };

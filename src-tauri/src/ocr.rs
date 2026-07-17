@@ -2,9 +2,7 @@
 //! (`Windows.Media.Ocr`). Runs fully on-device: no network, no cloud, no extra
 //! dependency beyond Windows itself.
 //!
-//! Wired into image capture in a follow-up; kept standalone here so the WinRT
-//! path can be validated on its own.
-#![allow(dead_code)]
+//! Called from image capture; also exercised by a self-contained test.
 
 /// Recognize text from PNG-encoded image bytes with the user's installed OCR
 /// languages. Returns the recognized text (possibly empty), or an error when no
