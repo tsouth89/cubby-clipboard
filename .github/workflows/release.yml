@@ -105,7 +105,7 @@ jobs:
         run: |
           VERSION="${{ steps.metadata.outputs.version }}"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            BODY="Unsigned test build for v${VERSION} from commit ${{ github.sha }}. Use for release-candidate testing only."
+            BODY="Test build for v${VERSION} from commit ${{ github.sha }}, signed with Azure Trusted Signing. For release-candidate testing only."
           else
             BODY=$(awk -v heading="## v${VERSION}" '
               $0 == heading { capture=1; next }
@@ -138,8 +138,10 @@ jobs:
     name: Build ${{ matrix.arch }} installer
     needs: create-release
     runs-on: windows-latest
+    environment: release
     permissions:
       contents: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -175,16 +177,51 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Build and upload NSIS installer
+      - name: Build NSIS installer
         uses: tauri-apps/tauri-action@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: .
-          releaseId: ${{ needs.create-release.outputs.release_id }}
-          uploadUpdaterJson: false
-          releaseAssetNamePattern: '[name]_[version]_[arch][setup].[ext]'
           args: --target ${{ matrix.target }} --bundles nsis
+
+      - name: Locate the built installer
+        id: installer
+        shell: pwsh
+        run: |
+          $file = Get-ChildItem "src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          if (-not $file) {
+            Write-Error "No NSIS installer was produced"
+            exit 1
+          }
+          # The signing action requires a rooted (absolute) path; $file.FullName is a Windows-rooted path.
+          "path=$($file.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($file.Name -replace ' ', '.')" >> $env:GITHUB_OUTPUT
+
+      - name: Sign in to Azure with GitHub OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign the installer with Trusted Signing
+        uses: Azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          files: ${{ steps.installer.outputs.path }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Upload the signed installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+        run: |
+          Copy-Item "${{ steps.installer.outputs.path }}" "${{ steps.installer.outputs.name }}"
+          gh release upload "$env:TAG" "${{ steps.installer.outputs.name }}" --clobber
 
   publish-release:
     name: Publish validated release
