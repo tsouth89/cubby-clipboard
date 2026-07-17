@@ -347,7 +347,9 @@ function App() {
         : (remainingVisibleClips[Math.min(deletedIndex, remainingVisibleClips.length - 1)]?.id ??
           null);
     try {
-      await invoke('delete_clip', { id: clipId, hardDelete: false });
+      // Cubby has no trash/recovery surface. Delete must therefore remove the
+      // persisted payload immediately instead of leaving a hidden soft-delete.
+      await invoke('delete_clip', { id: clipId, hardDelete: true });
       setClips((currentClips) => currentClips.filter((clip) => clip.id !== clipId));
       setSelectedClipId(nextSelection);
       // Refresh counts

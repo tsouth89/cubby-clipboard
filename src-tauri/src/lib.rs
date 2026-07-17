@@ -56,7 +56,11 @@ pub fn run_app() {
                 message
             ))
         })
-        .level(log::LevelFilter::Debug)
+        .level(if cfg!(debug_assertions) {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Info
+        })
         .level_for("sqlx", log::LevelFilter::Warn);
 
     #[cfg(debug_assertions)]
@@ -89,17 +93,12 @@ pub fn run_app() {
     builder
         .plugin(log_builder.build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            log::info!("Second instance detected. Sending notification and exiting.");
-            use tauri_plugin_notification::NotificationExt;
-            if let Err(e) = app.notification()
-                .builder()
-                .title("Cubby")
-                .body("Cubby is already running")
-                .show() {
-                log::error!("Failed to send notification: {:?}", e);
+            log::info!("Second instance detected; showing the existing Cubby window");
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
             }
         }))
-        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_x::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -189,10 +188,6 @@ pub fn run_app() {
                     .map_err(std::io::Error::other)?;
             app.manage(Arc::new(shortcut_manager));
 
-            log::info!("Database path: {}", db_path_str);
-            if let Ok(log_dir) = app.path().app_log_dir() {
-                log::info!("Log directory: {:?}", log_dir);
-            }
             let handle = app.handle().clone();
             let db_for_clipboard = db_arc.clone();
 
@@ -344,9 +339,25 @@ pub fn run_app() {
 
             // Start background image migration
             let db_for_migration = db_for_clipboard.clone();
+            let retention_settings = manager.get();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = commands::migrate_images_to_files(&db_for_migration.pool).await {
                     log::error!("Background image migration failed: {}", e);
+                }
+                match commands::enforce_retention_in_pool(
+                    &db_for_migration.pool,
+                    retention_settings.max_items,
+                    retention_settings.auto_delete_days,
+                )
+                .await
+                {
+                    Ok((deleted, image_paths)) => {
+                        commands::remove_clip_image_files(image_paths);
+                        if deleted > 0 {
+                            log::info!("STARTUP: Retention removed {} expired or overflow items", deleted);
+                        }
+                    }
+                    Err(error) => log::error!("STARTUP: Retention maintenance failed: {}", error),
                 }
             });
 

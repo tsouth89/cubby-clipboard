@@ -321,21 +321,17 @@ async fn process_clipboard_snapshot(
         let mut lock = IGNORE_HASH.lock();
         if let Some(ignore_hash) = lock.take() {
             if ignore_hash == clip_hash {
-                log::info!(
-                    "CLIPBOARD: Detected self-paste for hash {}, proceeding to update timestamp",
-                    ignore_hash
-                );
+                log::info!("CLIPBOARD: Detected self-paste; proceeding to update timestamp");
             }
         }
     }
 
     // Source app info was captured at event time (before debounce) to avoid race conditions
     let (source_app, source_icon, exe_name, full_path, is_explicit_owner) = source_app_info;
-    log::info!(
-        "CLIPBOARD: Source app: {:?}, exe_name: {:?}, full_path: {:?}, explicit: {}",
-        source_app,
-        exe_name,
-        full_path,
+    log::debug!(
+        "CLIPBOARD: Source attribution available={} executable available={} explicit={}",
+        source_app.is_some(),
+        exe_name.is_some(),
         is_explicit_owner
     );
 
@@ -361,10 +357,7 @@ async fn process_clipboard_snapshot(
 
     if let Some(ref path) = full_path {
         if is_ignored(path) {
-            log::info!(
-                "CLIPBOARD: Ignoring content from ignored app (path match): {}",
-                path
-            );
+            log::info!("CLIPBOARD: Ignoring content from configured application (path match)");
             return;
         }
     }
@@ -372,8 +365,7 @@ async fn process_clipboard_snapshot(
     if let Some(ref exe) = exe_name {
         if is_ignored(exe) {
             log::info!(
-                "CLIPBOARD: Ignoring content from ignored app (exe match): {}",
-                exe
+                "CLIPBOARD: Ignoring content from configured application (executable match)"
             );
             return;
         }
@@ -566,6 +558,25 @@ async fn process_clipboard_snapshot(
 
     *LAST_STABLE_HASH.lock() = Some(clip_hash.clone());
 
+    match crate::commands::enforce_retention_in_pool(
+        pool,
+        settings.max_items,
+        settings.auto_delete_days,
+    )
+    .await
+    {
+        Ok((deleted, image_paths)) => {
+            crate::commands::remove_clip_image_files(image_paths);
+            if deleted > 0 {
+                log::info!(
+                    "CLIPBOARD: Retention removed {} expired or overflow items",
+                    deleted
+                );
+            }
+        }
+        Err(error) => log::error!("CLIPBOARD: Retention maintenance failed: {}", error),
+    }
+
     let emit_started = std::time::Instant::now();
     let _ = app.emit(
         "clipboard-change",
@@ -625,7 +636,7 @@ pub fn read_full_image_file(file_path: &str) -> Result<Vec<u8>, String> {
 pub fn remove_full_image_file(file_path: &str) {
     if let Err(e) = std::fs::remove_file(file_path) {
         if e.kind() != std::io::ErrorKind::NotFound {
-            log::warn!("Failed to delete image file {}: {}", file_path, e);
+            log::warn!("Failed to delete a stored clipboard image: {}", e);
         }
     }
 }

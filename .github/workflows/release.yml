@@ -38,6 +38,10 @@ jobs:
       - run: pnpm run format:check
       - run: pnpm run release:check
       - run: pnpm run build
+      - run: pnpm audit --prod
+      - run: cargo install cargo-audit --locked
+      - shell: pwsh
+        run: ./scripts/audit-rust.ps1
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

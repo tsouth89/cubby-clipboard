@@ -932,7 +932,84 @@ async fn clear_clips_in_pool(
     ))
 }
 
-fn remove_clip_image_files(image_paths: Vec<String>) {
+pub(crate) async fn enforce_retention_in_pool(
+    pool: &SqlitePool,
+    max_items: i64,
+    auto_delete_days: i64,
+) -> Result<(u64, Vec<String>), String> {
+    let candidate_query = r#"
+        SELECT uuid FROM clips
+        WHERE is_pinned = 0 AND (
+            is_deleted = 1
+            OR (? > 0 AND created_at < datetime('now', '-' || ? || ' days'))
+            OR (? > 0 AND uuid IN (
+                SELECT uuid FROM clips
+                WHERE is_deleted = 0 AND is_pinned = 0
+                ORDER BY created_at DESC
+                LIMIT -1 OFFSET ?
+            ))
+        )
+    "#;
+
+    let candidates: Vec<String> = sqlx::query_scalar(candidate_query)
+        .bind(auto_delete_days)
+        .bind(auto_delete_days)
+        .bind(max_items)
+        .bind(max_items.max(0))
+        .fetch_all(pool)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if candidates.is_empty() {
+        return Ok((0, Vec::new()));
+    }
+
+    let placeholders = std::iter::repeat_n("?", candidates.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let select_paths =
+        format!("SELECT file_path FROM clip_images WHERE clip_uuid IN ({placeholders})");
+    let delete_images = format!("DELETE FROM clip_images WHERE clip_uuid IN ({placeholders})");
+    let delete_clips = format!("DELETE FROM clips WHERE uuid IN ({placeholders})");
+
+    let mut transaction = pool.begin().await.map_err(|error| error.to_string())?;
+    let mut path_query = sqlx::query_scalar::<_, Option<String>>(&select_paths);
+    for id in &candidates {
+        path_query = path_query.bind(id);
+    }
+    let image_paths = path_query
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let mut image_delete = sqlx::query(&delete_images);
+    for id in &candidates {
+        image_delete = image_delete.bind(id);
+    }
+    image_delete
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let mut clip_delete = sqlx::query(&delete_clips);
+    for id in &candidates {
+        clip_delete = clip_delete.bind(id);
+    }
+    let deleted = clip_delete
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| error.to_string())?
+        .rows_affected();
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    Ok((deleted, image_paths.into_iter().flatten().collect()))
+}
+
+pub(crate) fn remove_clip_image_files(image_paths: Vec<String>) {
     for path in image_paths {
         crate::clipboard::remove_full_image_file(&path);
     }
@@ -1079,7 +1156,7 @@ pub fn get_system_accent_color() -> Result<serde_json::Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{clear_clips_in_pool, toggle_clip_pin_in_pool};
+    use super::{clear_clips_in_pool, enforce_retention_in_pool, toggle_clip_pin_in_pool};
     use crate::database::Database;
     use sqlx::sqlite::SqlitePoolOptions;
 
@@ -1183,5 +1260,44 @@ mod tests {
             .await
             .expect("clip count should load");
         assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn retention_preserves_pins_and_removes_expired_and_overflow_items() {
+        let database = test_database().await;
+        for (uuid, pinned, age_days) in [
+            ("pinned", 1, 90),
+            ("expired", 0, 60),
+            ("recent-1", 0, 3),
+            ("recent-2", 0, 2),
+            ("recent-3", 0, 1),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO clips
+                    (uuid, clip_type, content, text_preview, content_hash, is_pinned, created_at)
+                VALUES (?, 'text', x'31', ?, ?, ?, datetime('now', '-' || ? || ' days'))
+                "#,
+            )
+            .bind(uuid)
+            .bind(uuid)
+            .bind(format!("hash-{uuid}"))
+            .bind(pinned)
+            .bind(age_days)
+            .execute(&database.pool)
+            .await
+            .expect("fixture should insert");
+        }
+
+        let (deleted, _) = enforce_retention_in_pool(&database.pool, 2, 30)
+            .await
+            .expect("retention should succeed");
+        assert_eq!(deleted, 2);
+
+        let remaining: Vec<String> = sqlx::query_scalar("SELECT uuid FROM clips ORDER BY uuid")
+            .fetch_all(&database.pool)
+            .await
+            .expect("remaining clips should load");
+        assert_eq!(remaining, vec!["pinned", "recent-2", "recent-3"]);
     }
 }

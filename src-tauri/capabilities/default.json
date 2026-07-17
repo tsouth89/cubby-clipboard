@@ -2,7 +2,8 @@
   "identifier": "default",
   "description": "Default capabilities for the main window",
   "windows": [
-    "*"
+    "main",
+    "settings"
   ],
   "permissions": [
     "core:default",
@@ -12,13 +13,8 @@
     "core:window:allow-hide",
     "core:window:allow-start-dragging",
     "core:app:default",
-    "core:path:default",
     "core:webview:allow-create-webview-window",
-    "global-shortcut:default",
-    "clipboard-x:default",
     "log:default",
-    "opener:default",
-    "notification:default",
     {
       "identifier": "opener:allow-open-url",
       "allow": [
