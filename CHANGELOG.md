@@ -2,6 +2,26 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
+## v0.1.0-beta.2
+
+### Added
+- The configured Cubby hotkey now opens the flyout inside supported remote sessions (Ninja Remote, Windows Remote Desktop, and other recognized clients) when the remote client's own keyboard forwarding is turned off, using the same low-level path as the `Win+V` replacement
+
+### Changed
+- Replaced the double-Ctrl remote-session gesture with the configured hotkey, which also avoids triggering Windows' "show pointer location on Ctrl" behavior
+
+### Known limitations
+- When a remote client such as Ninja Remote has keyboard forwarding enabled it captures the keyboard before Cubby can, so no hotkey opens Cubby in that mode; open Cubby from the tray icon instead
+
+### 新增
+- 当受支持的远程会话（Ninja Remote、Windows 远程桌面及其他已识别的客户端）关闭其键盘转发时，您配置的快捷键现在可在会话内打开 Cubby，使用与 `Win+V` 替代方案相同的底层机制
+
+### 变更
+- 以配置的快捷键取代了原有的双击 Ctrl 远程手势，同时避免触发 Windows 的“按 Ctrl 键时显示指针位置”行为
+
+### 已知限制
+- 当远程客户端（如 Ninja Remote）启用键盘转发时，它会先于 Cubby 捕获键盘，因此在该模式下没有任何快捷键能打开 Cubby；请改用托盘图标
+
 ## v0.1.0-beta.1
 
 ### Added
