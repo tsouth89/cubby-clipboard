@@ -6,7 +6,9 @@ $releaseTargets = @(
 )
 
 foreach ($target in $releaseTargets) {
-    $tree = cargo tree --manifest-path src-tauri/Cargo.toml --target $target 2>&1 | Out-String
+    # Cargo writes download/progress messages to stderr. Keep those out of the
+    # parsed tree so an inert lockfile download cannot look like a reachable node.
+    $tree = cargo tree --manifest-path src-tauri/Cargo.toml --locked --target $target | Out-String
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to inspect the Rust dependency tree for $target."
     }
