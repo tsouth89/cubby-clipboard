@@ -185,14 +185,16 @@ jobs:
 
       - name: Locate the built installer
         id: installer
-        shell: bash
+        shell: pwsh
         run: |
-          file=$(ls "src-tauri/target/${{ matrix.target }}/release/bundle/nsis/"*-setup.exe | head -1)
-          if [ -z "$file" ]; then
-            echo "No NSIS installer was produced"; exit 1
-          fi
-          echo "path=$file" >> "$GITHUB_OUTPUT"
-          echo "name=$(basename "$file" | tr ' ' '.')" >> "$GITHUB_OUTPUT"
+          $file = Get-ChildItem "src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          if (-not $file) {
+            Write-Error "No NSIS installer was produced"
+            exit 1
+          }
+          # The signing action requires a rooted (absolute) path; $file.FullName is a Windows-rooted path.
+          "path=$($file.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($file.Name -replace ' ', '.')" >> $env:GITHUB_OUTPUT
 
       - name: Sign in to Azure with GitHub OIDC
         uses: azure/login@v3
@@ -213,13 +215,13 @@ jobs:
           timestamp-digest: SHA256
 
       - name: Upload the signed installer
-        shell: bash
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.create-release.outputs.tag }}
         run: |
-          cp "${{ steps.installer.outputs.path }}" "${{ steps.installer.outputs.name }}"
-          gh release upload "$TAG" "${{ steps.installer.outputs.name }}" --clobber
+          Copy-Item "${{ steps.installer.outputs.path }}" "${{ steps.installer.outputs.name }}"
+          gh release upload "$env:TAG" "${{ steps.installer.outputs.name }}" --clobber
 
   publish-release:
     name: Publish validated release
