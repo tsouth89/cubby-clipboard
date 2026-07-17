@@ -20,6 +20,7 @@ mod constants;
 mod crypto;
 mod database;
 mod models;
+mod ocr;
 pub mod paste_engine;
 mod settings_commands;
 mod settings_manager;
