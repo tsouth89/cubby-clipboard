@@ -105,7 +105,7 @@ jobs:
         run: |
           VERSION="${{ steps.metadata.outputs.version }}"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            BODY="Unsigned test build for v${VERSION} from commit ${{ github.sha }}. Use for release-candidate testing only."
+            BODY="Test build for v${VERSION} from commit ${{ github.sha }}, signed with Azure Trusted Signing. For release-candidate testing only."
           else
             BODY=$(awk -v heading="## v${VERSION}" '
               $0 == heading { capture=1; next }
