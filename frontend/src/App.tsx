@@ -339,33 +339,39 @@ function App() {
     }
   };
 
-  const handlePaste = async (clipId: string, plainText: boolean = false) => {
-    try {
-      const clip = clips.find((c) => c.id === clipId);
-      if (!clip) return;
-      if (plainText && clip.clip_type === 'image') return;
+  const handlePaste = useCallback(
+    async (clipId: string, plainText: boolean = false) => {
+      try {
+        const clip = clips.find((c) => c.id === clipId);
+        if (!clip) return;
+        if (plainText && clip.clip_type === 'image') return;
 
-      await invoke('paste_clip', { id: clipId, plainText });
-    } catch (error) {
-      console.error('Failed to paste clip:', error);
-      toast.error('Failed to paste clip');
-    }
-  };
+        await invoke('paste_clip', { id: clipId, plainText });
+      } catch (error) {
+        console.error('Failed to paste clip:', error);
+        toast.error('Failed to paste clip');
+      }
+    },
+    [clips]
+  );
 
-  const handleCopy = async (clipId: string, plainText: boolean = false) => {
-    try {
-      const clip = clips.find((c) => c.id === clipId);
-      if (!clip) return;
-      if (plainText && clip.clip_type === 'image') return;
+  const handleCopy = useCallback(
+    async (clipId: string, plainText: boolean = false) => {
+      try {
+        const clip = clips.find((c) => c.id === clipId);
+        if (!clip) return;
+        if (plainText && clip.clip_type === 'image') return;
 
-      await invoke('copy_clip', { id: clipId, plainText });
+        await invoke('copy_clip', { id: clipId, plainText });
 
-      toast.success(t('common.copied'));
-    } catch (error) {
-      console.error('Failed to copy clip:', error);
-      toast.error(t('notifications.copyFailed'));
-    }
-  };
+        toast.success(t('common.copied'));
+      } catch (error) {
+        console.error('Failed to copy clip:', error);
+        toast.error(t('notifications.copyFailed'));
+      }
+    },
+    [clips, t]
+  );
 
   const handleTogglePin = useCallback(
     async (clipId: string | null) => {
@@ -396,7 +402,8 @@ function App() {
       clips.filter((clip) => {
         if (contentFilter === 'images') return clip.clip_type === 'image';
         if (contentFilter === 'text') return clip.clip_type === 'text';
-        if (contentFilter === 'files') return clip.clip_type === 'files';
+        if (contentFilter === 'files')
+          return clip.clip_type === 'file' || clip.clip_type === 'files';
         return true;
       }),
     [clips, contentFilter]

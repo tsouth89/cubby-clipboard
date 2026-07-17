@@ -10,6 +10,15 @@ const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 const TEXT_PREFIX: &str = "CUB1:";
 
+fn load_protected_key(key_path: &Path) -> Result<[u8; KEY_LEN], String> {
+    let protected = std::fs::read(key_path)
+        .map_err(|e| format!("failed to read protected storage key: {e}"))?;
+    let plaintext = unprotect_for_current_user(&protected)?;
+    plaintext
+        .try_into()
+        .map_err(|_| "protected storage key has an invalid length".to_string())
+}
+
 #[derive(Clone)]
 pub struct CryptoManager {
     key: [u8; KEY_LEN],
@@ -19,12 +28,7 @@ impl CryptoManager {
     pub fn load_or_create(db_path: &Path, allow_create: bool) -> Result<Self, String> {
         let key_path = db_path.with_file_name("storage.key");
         let key = if key_path.exists() {
-            let protected = std::fs::read(&key_path)
-                .map_err(|e| format!("failed to read protected storage key: {e}"))?;
-            let plaintext = unprotect_for_current_user(&protected)?;
-            plaintext
-                .try_into()
-                .map_err(|_| "protected storage key has an invalid length".to_string())?
+            load_protected_key(&key_path)?
         } else {
             if !allow_create {
                 return Err(
@@ -40,12 +44,27 @@ impl CryptoManager {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("failed to create storage directory: {e}"))?;
             }
-            let temporary_path = key_path.with_extension("key.tmp");
+            let temporary_path = key_path.with_file_name(format!(
+                "storage.key.{}.{}.tmp",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
             std::fs::write(&temporary_path, protected)
                 .map_err(|e| format!("failed to persist protected storage key: {e}"))?;
-            std::fs::rename(&temporary_path, &key_path)
-                .map_err(|e| format!("failed to install protected storage key: {e}"))?;
-            key
+            match std::fs::hard_link(&temporary_path, &key_path) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&temporary_path);
+                    key
+                }
+                Err(_) if key_path.exists() => {
+                    let _ = std::fs::remove_file(&temporary_path);
+                    load_protected_key(&key_path)?
+                }
+                Err(error) => {
+                    let _ = std::fs::remove_file(&temporary_path);
+                    return Err(format!("failed to install protected storage key: {error}"));
+                }
+            }
         };
 
         Ok(Self { key })
@@ -58,8 +77,8 @@ impl CryptoManager {
         Self { key }
     }
 
-    pub fn is_encrypted(value: &[u8]) -> bool {
-        value.starts_with(ENVELOPE_MAGIC)
+    pub fn is_encrypted(&self, value: &[u8]) -> bool {
+        self.decrypt(value).is_ok()
     }
 
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
@@ -79,7 +98,7 @@ impl CryptoManager {
     }
 
     pub fn decrypt(&self, envelope: &[u8]) -> Result<Vec<u8>, String> {
-        if !Self::is_encrypted(envelope) {
+        if !envelope.starts_with(ENVELOPE_MAGIC) {
             return Err("clipboard payload is not encrypted".to_string());
         }
         if envelope.len() < ENVELOPE_MAGIC.len() + NONCE_LEN + 16 {
@@ -126,8 +145,8 @@ impl CryptoManager {
             .map_err(|_| "decrypted clipboard text is not UTF-8".to_string())
     }
 
-    pub fn is_encrypted_text(value: &str) -> bool {
-        value.starts_with(TEXT_PREFIX)
+    pub fn is_encrypted_text(&self, value: &str) -> bool {
+        self.decrypt_text(value).is_ok()
     }
 
     pub fn encrypt_optional_text(&self, value: Option<&str>) -> Result<Option<String>, String> {
@@ -218,7 +237,7 @@ mod tests {
     fn encrypted_payloads_round_trip_and_detect_tampering() {
         let crypto = CryptoManager::ephemeral();
         let encrypted = crypto.encrypt(b"private clipboard text").unwrap();
-        assert!(CryptoManager::is_encrypted(&encrypted));
+        assert!(crypto.is_encrypted(&encrypted));
         assert_eq!(
             crypto.decrypt(&encrypted).unwrap(),
             b"private clipboard text"
@@ -227,6 +246,13 @@ mod tests {
         let mut tampered = encrypted;
         *tampered.last_mut().unwrap() ^= 1;
         assert!(crypto.decrypt(&tampered).is_err());
+    }
+
+    #[test]
+    fn plaintext_encryption_marker_collisions_remain_plaintext() {
+        let crypto = CryptoManager::ephemeral();
+        assert!(!crypto.is_encrypted(b"CUB1 ordinary clipboard text that is long enough"));
+        assert!(!crypto.is_encrypted_text("CUB1:not-an-encrypted-envelope"));
     }
 
     #[test]
@@ -253,6 +279,42 @@ mod tests {
             first.keyed_hash(b"clipboard payload"),
             second.keyed_hash(b"clipboard payload")
         );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn concurrent_key_creation_converges_on_one_installed_key() {
+        let directory =
+            std::env::temp_dir().join(format!("cubby-key-race-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database_path = directory.join("cubby.db");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let database_path = database_path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    CryptoManager::load_or_create(&database_path, true)
+                        .unwrap()
+                        .keyed_hash(b"same clipboard payload")
+                })
+            })
+            .collect();
+        let hashes: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+
+        assert!(hashes.iter().all(|hash| hash == &hashes[0]));
+        assert!(directory.join("storage.key").exists());
+        assert!(std::fs::read_dir(&directory).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")));
         std::fs::remove_dir_all(directory).unwrap();
     }
 

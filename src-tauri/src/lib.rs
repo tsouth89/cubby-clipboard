@@ -107,8 +107,7 @@ pub fn run_app() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             log::info!("Second instance detected; showing the existing Cubby window");
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
+                position_window_near_cursor(&window);
             }
         }))
         .plugin(tauri_plugin_dialog::init())
@@ -360,7 +359,7 @@ pub fn run_app() {
                 .await
                 {
                     Ok((deleted, image_paths)) => {
-                        commands::remove_clip_image_files(image_paths);
+                        commands::remove_clip_image_files(&db_for_migration.image_dir, image_paths);
                         if deleted > 0 {
                             log::info!("STARTUP: Retention removed {} expired or overflow items", deleted);
                         }

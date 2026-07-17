@@ -510,7 +510,7 @@ async fn process_clipboard_snapshot(
     let db_lookup_ms = db_lookup_started.elapsed().as_millis();
 
     let db_write_started = std::time::Instant::now();
-    let emitted_id = if let Some(existing_id) = existing_uuid {
+    let (emitted_id, inserted_new) = if let Some(existing_id) = existing_uuid {
         was_existing = true;
         if clip_type == "image" {
             if let Err(error) = sqlx::query(
@@ -597,7 +597,7 @@ async fn process_clipboard_snapshot(
                 return;
             }
         }
-        existing_id
+        (existing_id, false)
     } else {
         let clip_uuid = Uuid::new_v4().to_string();
 
@@ -677,13 +677,36 @@ async fn process_clipboard_snapshot(
                 }
             }
         }
-        clip_uuid
+        (clip_uuid, true)
     };
     let db_write_ms = db_write_started.elapsed().as_millis();
 
     if let Err(error) = replace_clip_formats(pool, &db.crypto, &emitted_id, &captured_formats).await
     {
         log::error!("CLIPBOARD: Failed to persist auxiliary formats: {}", error);
+        if inserted_new {
+            let image_path: Option<String> =
+                sqlx::query_scalar("SELECT file_path FROM clip_images WHERE clip_uuid = ?")
+                    .bind(&emitted_id)
+                    .fetch_optional(pool)
+                    .await
+                    .unwrap_or(None);
+            match sqlx::query("DELETE FROM clips WHERE uuid = ?")
+                .bind(&emitted_id)
+                .execute(pool)
+                .await
+            {
+                Ok(_) => crate::commands::remove_clip_image_files(
+                    &db.image_dir,
+                    image_path.into_iter().collect(),
+                ),
+                Err(cleanup_error) => log::error!(
+                    "CLIPBOARD: Failed to roll back incomplete clip {}: {}",
+                    emitted_id,
+                    cleanup_error
+                ),
+            }
+        }
         return;
     }
 
@@ -697,7 +720,7 @@ async fn process_clipboard_snapshot(
     .await
     {
         Ok((deleted, image_paths)) => {
-            crate::commands::remove_clip_image_files(image_paths);
+            crate::commands::remove_clip_image_files(&db.image_dir, image_paths);
             if deleted > 0 {
                 log::info!(
                     "CLIPBOARD: Retention removed {} expired or overflow items",

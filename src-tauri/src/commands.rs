@@ -60,24 +60,10 @@ fn clip_to_detail_item(clip: &Clip, full_image_content: Option<&[u8]>) -> Clipbo
     }
 }
 
-async fn delete_clip_image_file_by_uuid(pool: &SqlitePool, clip_uuid: &str) -> Result<(), String> {
-    let file_path: Option<String> =
-        sqlx::query_scalar(r#"SELECT file_path FROM clip_images WHERE clip_uuid = ?"#)
-            .bind(clip_uuid)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-    if let Some(path) = file_path {
-        if !path.is_empty() {
-            crate::clipboard::remove_full_image_file(&path);
-        }
-    }
-
-    Ok(())
-}
-
-async fn cleanup_orphan_clip_image_files(pool: &SqlitePool) -> Result<(), String> {
+async fn cleanup_orphan_clip_image_files(
+    pool: &SqlitePool,
+    image_dir: &std::path::Path,
+) -> Result<(), String> {
     let orphan_paths: Vec<Option<String>> = sqlx::query_scalar(
         r#"
         SELECT file_path
@@ -89,16 +75,12 @@ async fn cleanup_orphan_clip_image_files(pool: &SqlitePool) -> Result<(), String
     .await
     .map_err(|e| e.to_string())?;
 
-    for path in orphan_paths.into_iter().flatten() {
-        if !path.is_empty() {
-            crate::clipboard::remove_full_image_file(&path);
-        }
-    }
-
     sqlx::query(r#"DELETE FROM clip_images WHERE clip_uuid NOT IN (SELECT uuid FROM clips)"#)
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
+
+    remove_clip_image_files(image_dir, orphan_paths.into_iter().flatten().collect());
 
     Ok(())
 }
@@ -107,7 +89,7 @@ fn encrypt_existing_text(
     crypto: &crate::crypto::CryptoManager,
     value: &str,
 ) -> Result<String, String> {
-    if crate::crypto::CryptoManager::is_encrypted_text(value) {
+    if crypto.is_encrypted_text(value) {
         Ok(value.to_string())
     } else {
         crypto.encrypt_text(value)
@@ -150,7 +132,7 @@ async fn image_bytes_for_encryption_migration(
     if let Some((file_path, full_content)) = row {
         if let Some(path) = file_path.as_deref().filter(|path| !path.is_empty()) {
             if let Ok(stored) = std::fs::read(path) {
-                let plaintext = if crate::crypto::CryptoManager::is_encrypted(&stored) {
+                let plaintext = if db.crypto.is_encrypted(&stored) {
                     db.crypto.decrypt(&stored)?
                 } else {
                     stored
@@ -159,7 +141,7 @@ async fn image_bytes_for_encryption_migration(
             }
         }
         if !full_content.is_empty() {
-            let plaintext = if crate::crypto::CryptoManager::is_encrypted(&full_content) {
+            let plaintext = if db.crypto.is_encrypted(&full_content) {
                 db.crypto.decrypt(&full_content)?
             } else {
                 full_content
@@ -168,7 +150,7 @@ async fn image_bytes_for_encryption_migration(
         }
     }
 
-    if !clip.content.is_empty() && !crate::crypto::CryptoManager::is_encrypted(&clip.content) {
+    if !clip.content.is_empty() && !db.crypto.is_encrypted(&clip.content) {
         return Ok((clip.content.clone(), None));
     }
     Err(format!("image payload is missing for clip {}", clip.uuid))
@@ -202,7 +184,7 @@ pub async fn migrate_encrypted_storage(db: &Database) -> Result<u64, String> {
             )?;
             (preview, Some((new_path, full_image)), old_path)
         } else {
-            let plaintext = if crate::crypto::CryptoManager::is_encrypted(&clip.content) {
+            let plaintext = if db.crypto.is_encrypted(&clip.content) {
                 db.crypto.decrypt(&clip.content)?
             } else {
                 clip.content.clone()
@@ -360,7 +342,7 @@ async fn load_full_image_content(db: &Database, clip: &mut Clip) -> Result<Vec<u
 
     if let Some(content) = full_content {
         if !content.is_empty() {
-            return if crate::crypto::CryptoManager::is_encrypted(&content) {
+            return if db.crypto.is_encrypted(&content) {
                 db.crypto.decrypt(&content)
             } else {
                 Ok(content)
@@ -370,7 +352,7 @@ async fn load_full_image_content(db: &Database, clip: &mut Clip) -> Result<Vec<u
 
     // 3. Legacy content in clips table
     if !clip.content.is_empty() {
-        return if crate::crypto::CryptoManager::is_encrypted(&clip.content) {
+        return if db.crypto.is_encrypted(&clip.content) {
             db.crypto.decrypt(&clip.content)
         } else {
             Ok(clip.content.clone())
@@ -575,6 +557,32 @@ pub async fn get_clip_detail(
     get_clip(id, db).await
 }
 
+fn restore_hash_material(
+    clip: &Clip,
+    full_image: Option<&[u8]>,
+    formats: &[(String, Vec<u8>)],
+    plain_text: bool,
+) -> Vec<u8> {
+    let mut material = Vec::new();
+    if plain_text {
+        material.extend_from_slice(b"text");
+        material.push(0);
+        material.extend_from_slice(&clip.content);
+        return material;
+    }
+
+    material.extend_from_slice(clip.clip_type.as_bytes());
+    material.push(0);
+    material.extend_from_slice(full_image.unwrap_or(&clip.content));
+    for (format, content) in formats {
+        material.push(0);
+        material.extend_from_slice(format.as_bytes());
+        material.push(0);
+        material.extend_from_slice(content);
+    }
+    material
+}
+
 async fn restore_clip(
     id: &str,
     plain_text: bool,
@@ -606,16 +614,8 @@ async fn restore_clip(
             } else {
                 None
             };
-            let mut hash_material = Vec::new();
-            hash_material.extend_from_slice(clip.clip_type.as_bytes());
-            hash_material.push(0);
-            hash_material.extend_from_slice(full_image.as_deref().unwrap_or(&clip.content));
-            for (format, content) in &formats {
-                hash_material.push(0);
-                hash_material.extend_from_slice(format.as_bytes());
-                hash_material.push(0);
-                hash_material.extend_from_slice(content);
-            }
+            let hash_material =
+                restore_hash_material(&clip, full_image.as_deref(), &formats, plain_text);
             let content_hash = crate::clipboard::calculate_hash(&hash_material);
             let uuid = clip.uuid.clone();
 
@@ -704,19 +704,21 @@ pub async fn delete_clip(
     let pool = &db.pool;
 
     if hard_delete {
-        delete_clip_image_file_by_uuid(pool, &id).await?;
-
-        sqlx::query(r#"DELETE FROM clip_images WHERE clip_uuid = ?"#)
-            .bind(&id)
-            .execute(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
+        let mut transaction = pool.begin().await.map_err(|e| e.to_string())?;
+        let file_path: Option<String> =
+            sqlx::query_scalar(r#"SELECT file_path FROM clip_images WHERE clip_uuid = ?"#)
+                .bind(&id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(|e| e.to_string())?;
         sqlx::query(r#"DELETE FROM clips WHERE uuid = ?"#)
             .bind(&id)
-            .execute(pool)
+            .execute(&mut *transaction)
             .await
             .map_err(|e| e.to_string())?;
+        transaction.commit().await.map_err(|e| e.to_string())?;
+
+        remove_clip_image_files(&db.image_dir, file_path.into_iter().collect());
     } else {
         sqlx::query(r#"UPDATE clips SET is_deleted = 1 WHERE uuid = ?"#)
             .bind(&id)
@@ -884,50 +886,87 @@ pub async fn search_clips(
     let pool = &db.pool;
     let started = Instant::now();
 
-    let sql_started = Instant::now();
-    let mut clips: Vec<Clip> = match filter_id.as_deref() {
-        Some(id) => {
-            let folder_id_num = id.parse::<i64>().ok();
-            if let Some(numeric_id) = folder_id_num {
-                sqlx::query_as(
-                    r#"
-                    SELECT * FROM clips WHERE is_deleted = 0 AND folder_id = ?
+    let normalized_query = query.to_lowercase();
+    let requested_offset = offset.max(0) as usize;
+    let requested_limit = limit.max(0) as usize;
+    if requested_limit == 0 {
+        return Ok(Vec::new());
+    }
+    let folder_id = match filter_id.as_deref() {
+        Some(id) => match id.parse::<i64>() {
+            Ok(id) => Some(id),
+            Err(_) => return Ok(Vec::new()),
+        },
+        None => None,
+    };
+    let batch_size = requested_limit.saturating_mul(4).clamp(100, 500) as i64;
+    let mut database_offset = 0_i64;
+    let mut matched = 0_usize;
+    let mut sql_ms = 0_u128;
+    let mut clips = Vec::with_capacity(requested_limit);
+
+    'batches: loop {
+        let sql_started = Instant::now();
+        let mut batch: Vec<Clip> = if let Some(folder_id) = folder_id {
+            sqlx::query_as(
+                r#"
+                    SELECT * FROM clips
+                    WHERE is_deleted = 0 AND folder_id = ?
                     ORDER BY is_pinned DESC, created_at DESC
+                    LIMIT ? OFFSET ?
                 "#,
-                )
-                .bind(numeric_id)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| e.to_string())?
-            } else {
-                Vec::new()
+            )
+            .bind(folder_id)
+            .bind(batch_size)
+            .bind(database_offset)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?
+        } else {
+            sqlx::query_as(
+                r#"
+                    SELECT * FROM clips
+                    WHERE is_deleted = 0
+                    ORDER BY is_pinned DESC, created_at DESC
+                    LIMIT ? OFFSET ?
+                "#,
+            )
+            .bind(batch_size)
+            .bind(database_offset)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?
+        };
+        sql_ms += sql_started.elapsed().as_millis();
+        let batch_len = batch.len();
+        if batch_len == 0 {
+            break;
+        }
+
+        for mut clip in batch.drain(..) {
+            decrypt_clip_fields(&db, &mut clip)?;
+            let is_match = String::from_utf8_lossy(&clip.content)
+                .to_lowercase()
+                .contains(&normalized_query)
+                || clip.text_preview.to_lowercase().contains(&normalized_query);
+            if !is_match {
+                continue;
+            }
+            if matched < requested_offset {
+                matched += 1;
+                continue;
+            }
+            clips.push(clip);
+            if clips.len() == requested_limit {
+                break 'batches;
             }
         }
-        None => sqlx::query_as(
-            r#"
-                SELECT * FROM clips WHERE is_deleted = 0
-                ORDER BY is_pinned DESC, created_at DESC
-            "#,
-        )
-        .fetch_all(pool)
-        .await
-        .map_err(|e| e.to_string())?,
-    };
-    let sql_ms = sql_started.elapsed().as_millis();
-    for clip in &mut clips {
-        decrypt_clip_fields(&db, clip)?;
-    }
 
-    let normalized_query = query.to_lowercase();
-    let offset = offset.max(0) as usize;
-    let limit = limit.max(0) as usize;
-    clips.retain(|clip| {
-        String::from_utf8_lossy(&clip.content)
-            .to_lowercase()
-            .contains(&normalized_query)
-            || clip.text_preview.to_lowercase().contains(&normalized_query)
-    });
-    let clips: Vec<Clip> = clips.into_iter().skip(offset).take(limit).collect();
+        database_offset += batch_len as i64;
+        if batch_len < batch_size as usize {
+            break;
+        }
+    }
 
     let image_rows = clips
         .iter()
@@ -947,8 +986,8 @@ pub async fn search_clips(
         image_rows,
         raw_bytes,
         filter_id,
-        offset,
-        limit
+        requested_offset,
+        requested_limit
     );
 
     Ok(items)
@@ -1038,7 +1077,7 @@ pub async fn clear_clipboard_history(db: tauri::State<'_, Arc<Database>>) -> Res
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
-    cleanup_orphan_clip_image_files(pool).await?;
+    cleanup_orphan_clip_image_files(pool, &db.image_dir).await?;
     Ok(())
 }
 
@@ -1168,23 +1207,27 @@ pub(crate) async fn enforce_retention_in_pool(
     Ok((deleted, image_paths.into_iter().flatten().collect()))
 }
 
-pub(crate) fn remove_clip_image_files(image_paths: Vec<String>) {
+pub(crate) fn remove_clip_image_files(image_dir: &std::path::Path, image_paths: Vec<String>) {
     for path in image_paths {
-        crate::clipboard::remove_full_image_file(&path);
+        if !path.is_empty() && is_managed_image_path(image_dir, &path) {
+            crate::clipboard::remove_full_image_file(&path);
+        } else if !path.is_empty() {
+            log::warn!("Skipped deleting an unmanaged clipboard image path");
+        }
     }
 }
 
 #[tauri::command]
 pub async fn clear_unpinned_clips(db: tauri::State<'_, Arc<Database>>) -> Result<u64, String> {
     let (deleted, image_paths) = clear_clips_in_pool(&db.pool, true).await?;
-    remove_clip_image_files(image_paths);
+    remove_clip_image_files(&db.image_dir, image_paths);
     Ok(deleted)
 }
 
 #[tauri::command]
 pub async fn clear_all_clips(db: tauri::State<'_, Arc<Database>>) -> Result<(), String> {
     let (_, image_paths) = clear_clips_in_pool(&db.pool, false).await?;
-    remove_clip_image_files(image_paths);
+    remove_clip_image_files(&db.image_dir, image_paths);
     Ok(())
 }
 
@@ -1206,7 +1249,7 @@ pub async fn remove_duplicate_clips(db: tauri::State<'_, Arc<Database>>) -> Resu
     .await
     .map_err(|e| e.to_string())?;
 
-    cleanup_orphan_clip_image_files(pool).await?;
+    cleanup_orphan_clip_image_files(pool, &db.image_dir).await?;
 
     Ok(result.rows_affected() as i64)
 }
@@ -1317,11 +1360,10 @@ pub fn get_system_accent_color() -> Result<serde_json::Value, String> {
 mod tests {
     use super::{
         clear_clips_in_pool, clipboard_contents_for_restore, enforce_retention_in_pool,
-        migrate_clip_format_model, migrate_encrypted_storage, toggle_clip_pin_in_pool,
-        ClipboardContent,
+        migrate_clip_format_model, migrate_encrypted_storage, remove_clip_image_files,
+        restore_hash_material, toggle_clip_pin_in_pool, ClipboardContent,
     };
     use crate::clipboard::CapturedFormat;
-    use crate::crypto::CryptoManager;
     use crate::database::Database;
     use crate::models::Clip;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -1394,11 +1436,11 @@ mod tests {
             .fetch_one(&database.pool)
             .await
             .expect("migrated clip should load");
-        assert!(CryptoManager::is_encrypted(&stored.content));
-        assert!(CryptoManager::is_encrypted_text(&stored.text_preview));
-        assert!(CryptoManager::is_encrypted_text(
-            stored.source_app.as_deref().unwrap()
-        ));
+        assert!(database.crypto.is_encrypted(&stored.content));
+        assert!(database.crypto.is_encrypted_text(&stored.text_preview));
+        assert!(database
+            .crypto
+            .is_encrypted_text(stored.source_app.as_deref().unwrap()));
         assert_ne!(stored.content_hash, "legacy-sha");
 
         super::decrypt_clip_fields(&database, &mut stored).unwrap();
@@ -1453,12 +1495,12 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(CryptoManager::is_encrypted(&stored.content));
+        assert!(database.crypto.is_encrypted(&stored.content));
         assert_eq!(storage_kind, "encrypted_file");
         assert!(new_path.ends_with("legacy-image.cubby"));
         assert!(!old_path.exists());
         let encrypted_file = std::fs::read(&new_path).unwrap();
-        assert!(CryptoManager::is_encrypted(&encrypted_file));
+        assert!(database.crypto.is_encrypted(&encrypted_file));
         assert_eq!(database.crypto.decrypt(&encrypted_file).unwrap(), png);
         super::decrypt_clip_fields(&database, &mut stored).unwrap();
         assert!(!stored.content.is_empty());
@@ -1514,12 +1556,38 @@ mod tests {
         .await
         .unwrap();
         assert!(std::path::Path::new(&migrated_path).starts_with(&database.image_dir));
-        assert!(crate::crypto::CryptoManager::is_encrypted(
-            &std::fs::read(migrated_path).unwrap()
-        ));
+        assert!(database
+            .crypto
+            .is_encrypted(&std::fs::read(migrated_path).unwrap()));
 
         std::fs::remove_dir_all(&database.image_dir).unwrap();
         std::fs::remove_dir_all(external_dir).unwrap();
+    }
+
+    #[test]
+    fn retention_file_cleanup_stays_inside_the_managed_image_directory() {
+        let root =
+            std::env::temp_dir().join(format!("cubby-cleanup-test-{}", uuid::Uuid::new_v4()));
+        let image_dir = root.join("images");
+        let external_dir = root.join("external");
+        std::fs::create_dir_all(&image_dir).unwrap();
+        std::fs::create_dir_all(&external_dir).unwrap();
+        let managed = image_dir.join("managed.cubby");
+        let external = external_dir.join("keep.cubby");
+        std::fs::write(&managed, b"managed").unwrap();
+        std::fs::write(&external, b"external").unwrap();
+
+        remove_clip_image_files(
+            &image_dir,
+            vec![
+                managed.to_string_lossy().to_string(),
+                external.to_string_lossy().to_string(),
+            ],
+        );
+
+        assert!(!managed.exists());
+        assert!(external.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1554,6 +1622,14 @@ mod tests {
         let plain = clipboard_contents_for_restore(&clip, None, &formats, true).unwrap();
         assert_eq!(plain.len(), 1);
         assert!(matches!(&plain[0], ClipboardContent::Text(text) if text == "Hello"));
+        assert_eq!(
+            restore_hash_material(&clip, None, &formats, true),
+            b"text\0Hello"
+        );
+        assert_ne!(
+            restore_hash_material(&clip, None, &formats, false),
+            restore_hash_material(&clip, None, &formats, true)
+        );
 
         let files = vec![(
             "files".to_string(),
@@ -1593,7 +1669,7 @@ mod tests {
                 .fetch_one(&database.pool)
                 .await
                 .unwrap();
-        assert!(CryptoManager::is_encrypted(&encrypted_format));
+        assert!(database.crypto.is_encrypted(&encrypted_format));
 
         assert_eq!(migrate_clip_format_model(&database).await.unwrap(), 1);
         assert_eq!(migrate_clip_format_model(&database).await.unwrap(), 0);
