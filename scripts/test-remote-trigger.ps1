@@ -65,6 +65,11 @@ function Send-Chord {
     Start-Sleep -Milliseconds 35
     [CubbyRemoteTriggerTestInput]::keybd_event($backquote, 0, 0, $testMarker)
     Start-Sleep -Milliseconds 35
+    # Simulate key auto-repeat while held: extra keydowns must debounce to a single activation
+    [CubbyRemoteTriggerTestInput]::keybd_event($backquote, 0, 0, $testMarker)
+    Start-Sleep -Milliseconds 35
+    [CubbyRemoteTriggerTestInput]::keybd_event($backquote, 0, 0, $testMarker)
+    Start-Sleep -Milliseconds 35
     [CubbyRemoteTriggerTestInput]::keybd_event($backquote, 0, $keyUp, $testMarker)
     Start-Sleep -Milliseconds 35
     [CubbyRemoteTriggerTestInput]::keybd_event($leftCtrl, 0, $keyUp, $testMarker)

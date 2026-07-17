@@ -36,6 +36,10 @@ mod windows_helper {
     /// client's key forwarding, so the same hotkey that opens Cubby locally also
     /// opens it inside RDP/Ninja/etc. `None` means no valid hotkey was supplied.
     static CONFIGURED_CHORD: OnceLock<Option<TriggerChord>> = OnceLock::new();
+    /// Tracks whether the configured hotkey's main key is currently held after a
+    /// remote activation, so key auto-repeat does not re-toggle Cubby and the
+    /// matching key-up is consumed instead of leaking into the remote session.
+    static CONFIGURED_KEY_DOWN: AtomicBool = AtomicBool::new(false);
 
     /// A hotkey reduced to the physical keys the low-level hook can match:
     /// its main key plus the exact set of modifiers that must be held.
@@ -507,19 +511,28 @@ mod windows_helper {
         // remote client is focused (locally the global shortcut already handles
         // it, so this avoids a double toggle). Suppress the chord so it never
         // leaks into the remote session.
-        if is_down {
-            if let Some(Some(chord)) = CONFIGURED_CHORD.get() {
-                if key == chord.key_vk
-                    && modifiers_match(chord)
-                    && (ACCEPT_TEST_INPUT.load(Ordering::SeqCst)
-                        || foreground_is_supported_remote())
-                {
-                    match activate_cubby(None, false) {
-                        Ok(()) => emit("configured_hotkey", Some("activated Cubby directly")),
-                        Err(error) => emit("activation_failed", Some(&error)),
-                    }
+        if let Some(Some(chord)) = CONFIGURED_CHORD.get() {
+            // Consume the main key's release after an activation so it neither
+            // re-triggers nor leaks into the remote session.
+            if is_up && key == chord.key_vk && CONFIGURED_KEY_DOWN.swap(false, Ordering::SeqCst) {
+                return LRESULT(1);
+            }
+            if is_down
+                && key == chord.key_vk
+                && modifiers_match(chord)
+                && (ACCEPT_TEST_INPUT.load(Ordering::SeqCst) || foreground_is_supported_remote())
+            {
+                // Key auto-repeat fires repeated keydowns while the key is held;
+                // activate only on the first and suppress the rest so the toggle
+                // does not immediately hide Cubby again.
+                if CONFIGURED_KEY_DOWN.swap(true, Ordering::SeqCst) {
                     return LRESULT(1);
                 }
+                match activate_cubby(None, false) {
+                    Ok(()) => emit("configured_hotkey", Some("activated Cubby directly")),
+                    Err(error) => emit("activation_failed", Some(&error)),
+                }
+                return LRESULT(1);
             }
         }
 
