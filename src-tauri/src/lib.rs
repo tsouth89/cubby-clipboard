@@ -21,6 +21,7 @@ mod crypto;
 mod database;
 mod ditto_import;
 mod models;
+mod ocr;
 pub mod paste_engine;
 mod settings_commands;
 mod settings_manager;
