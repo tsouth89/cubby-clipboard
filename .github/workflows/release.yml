@@ -34,12 +34,23 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      # Cache the cargo registry + src-tauri/target across runs so the cargo test
+      # and clippy compiles below are incremental instead of cold every run.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Install a prebuilt cargo-audit binary instead of compiling it from source
+      # (cargo install cargo-audit) on every run.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
       - run: pnpm install --frozen-lockfile
       - run: pnpm run format:check
       - run: pnpm run release:check
       - run: pnpm run build
       - run: pnpm audit --prod
-      - run: cargo install cargo-audit --locked
       - shell: pwsh
         run: ./scripts/audit-rust.ps1
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
@@ -48,7 +59,9 @@ jobs:
 
   create-release:
     name: Create GitHub release
-    needs: validate
+    # Intentionally does NOT depend on validate: the release object is only ever a
+    # draft here, so it can be created in parallel with validation. publish-release
+    # gates on validate, so an unvalidated build never becomes public.
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -167,13 +180,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: actions/cache@v5
+      # Per-target cargo cache (keyed by matrix.target so x64 and arm64 don't
+      # clobber each other) to keep the installer compiles incremental.
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
 
       - run: pnpm install --frozen-lockfile
 
@@ -226,7 +238,8 @@ jobs:
   publish-release:
     name: Publish validated release
     if: github.event_name != 'workflow_dispatch'
-    needs: [create-release, build-installers]
+    # Gate publishing on validate too, since create-release/build no longer do.
+    needs: [validate, create-release, build-installers]
     runs-on: ubuntu-latest
     permissions:
       contents: write
