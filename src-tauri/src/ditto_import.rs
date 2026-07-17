@@ -109,8 +109,21 @@ pub async fn import_from_ditto(
     ditto_db_path: &str,
     dry_run: bool,
 ) -> Result<DittoImportResult, String> {
+    // Import from a private snapshot so a running/locked Ditto can't be read
+    // mid-write. The guard removes the copy on every return path.
+    struct TempDb(std::path::PathBuf);
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let temp_path = std::env::temp_dir().join(format!("cubby-ditto-{}.db", Uuid::new_v4()));
+    std::fs::copy(ditto_db_path, &temp_path)
+        .map_err(|e| format!("Could not read the Ditto database: {e}"))?;
+    let _temp_guard = TempDb(temp_path.clone());
+
     let options = SqliteConnectOptions::new()
-        .filename(ditto_db_path)
+        .filename(&temp_path)
         .read_only(true)
         .immutable(true);
     let ditto = SqlitePool::connect_with(options)
@@ -128,6 +141,9 @@ pub async fn import_from_ditto(
         dry_run,
         ..Default::default()
     };
+    // Content hashes already planned this run, so intra-Ditto duplicates are
+    // counted consistently in both dry-run previews and the real import.
+    let mut planned: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for row in clips {
         result.total += 1;
@@ -186,8 +202,8 @@ pub async fn import_from_ditto(
                 .bind(&content_hash)
                 .fetch_optional(&db.pool)
                 .await
-                .unwrap_or(None);
-        if already.is_some() {
+                .map_err(|e| format!("Could not check for an existing clip: {e}"))?;
+        if already.is_some() || !planned.insert(content_hash.clone()) {
             result.duplicates += 1;
             continue;
         }
@@ -411,6 +427,13 @@ mod tests {
 
             ditto.close().await;
         }
+
+        // A fresh dry run counts intra-Ditto duplicates (clip 6 == clip 1) once.
+        let initial_dry = import_from_ditto(&db, ditto_path.to_str().unwrap(), true)
+            .await
+            .expect("dry run");
+        assert_eq!(initial_dry.imported, 3, "clip 6 is a dup of clip 1");
+        assert_eq!(initial_dry.duplicates, 1);
 
         let result = import_from_ditto(&db, ditto_path.to_str().unwrap(), false)
             .await

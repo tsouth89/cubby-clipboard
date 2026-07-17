@@ -225,7 +225,16 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
             dbPath,
             dryRun: false,
           });
-          toast.success(t('settings.dittoImportSuccess', { count: result.imported }));
+          if (result.errors.length > 0) {
+            toast.warning(
+              t('settings.dittoImportPartial', {
+                count: result.imported,
+                failed: result.errors.length,
+              })
+            );
+          } else {
+            toast.success(t('settings.dittoImportSuccess', { count: result.imported }));
+          }
         } catch (e) {
           toast.error(t('settings.dittoImportError', { error: String(e) }));
         } finally {
@@ -826,9 +835,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         disabled={dittoBusy}
                         className="btn btn-secondary shrink-0 text-xs"
                       >
-                        {dittoBusy
-                          ? t('settings.dittoImporting')
-                          : t('settings.dittoImportButton')}
+                        {dittoBusy ? t('settings.dittoImporting') : t('settings.dittoImportButton')}
                       </button>
                     </div>
                   </section>

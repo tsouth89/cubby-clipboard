@@ -120,6 +120,7 @@
     "dittoImportTitle": "Import from Ditto",
     "dittoImportConfirm": "Import {{count}} clips from Ditto? Items already in Cubby are skipped.",
     "dittoImportSuccess": "Imported {{count}} clips from Ditto",
+    "dittoImportPartial": "Imported {{count}} clips from Ditto; {{failed}} could not be imported",
     "dittoImportError": "Ditto import failed: {{error}}",
     "dittoNothingToImport": "No importable clips were found in that Ditto database.",
     "dittoAllDuplicates": "Everything in that Ditto database is already in Cubby.",
