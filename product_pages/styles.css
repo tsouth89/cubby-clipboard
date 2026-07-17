@@ -32,8 +32,8 @@ a { color: inherit; }
 
 .site-header { position: relative; z-index: 10; border-bottom: 1px solid rgba(28, 39, 42, .09); }
 .nav-wrap { min-height: 76px; display: flex; align-items: center; justify-content: space-between; }
-.brand { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); font-size: 18px; font-weight: 700; text-decoration: none; letter-spacing: -.02em; }
-.brand-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px 10px 10px 5px; background: var(--blue); color: #fff; font-weight: 750; box-shadow: inset 0 0 0 1px rgba(255,255,255,.24); }
+.brand { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif; font-size: 18px; font-weight: 650; text-decoration: none; letter-spacing: -.025em; }
+.brand-mark { display: block; width: 34px; height: 32px; object-fit: contain; }
 .nav-links { display: flex; align-items: center; gap: 28px; }
 .nav-links a { color: #445054; font-size: 14px; font-weight: 600; text-decoration: none; }
 .nav-links a:hover { color: var(--blue-dark); }

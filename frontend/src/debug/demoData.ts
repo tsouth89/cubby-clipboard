@@ -34,9 +34,9 @@ export function generateDemoClips(): ClipboardItem[] {
       id: 'demo-1',
       clip_type: 'text',
       content:
-        'PastePaw is a beautiful clipboard history manager for Windows, built with Rust + Tauri + React + TypeScript.',
+        'Cubby is a fast, private clipboard history replacement built specifically for Windows 11.',
       preview:
-        'PastePaw is a beautiful clipboard history manager for Windows, built with Rust + Tauri + React + TypeScript.',
+        'Cubby is a fast, private clipboard history replacement built specifically for Windows 11.',
       folder_id: null,
       created_at: ago(1),
       source_app: 'chrome.exe',
@@ -46,7 +46,7 @@ export function generateDemoClips(): ClipboardItem[] {
     {
       id: 'demo-2',
       clip_type: 'image',
-      content: generateImage('PastePaw — Dark Theme', '#1e1b4b', '#4c1d95'),
+      content: generateImage('Cubby — Dark Theme', '#102844', '#147ee8'),
       preview: '',
       folder_id: null,
       created_at: ago(3),
@@ -57,7 +57,7 @@ export function generateDemoClips(): ClipboardItem[] {
     {
       id: 'demo-3',
       clip_type: 'image',
-      content: generateImage('PastePaw — Light Theme', '#dbeafe', '#6366f1'),
+      content: generateImage('Cubby — Light Theme', '#dceef9', '#32aeb1'),
       preview: '',
       folder_id: null,
       created_at: ago(5),
@@ -79,8 +79,8 @@ export function generateDemoClips(): ClipboardItem[] {
     {
       id: 'demo-5',
       clip_type: 'text',
-      content: `Win+Alt+V     Toggle window\nCtrl+F        Focus search\nEscape        Close / clear search\nEnter         Paste selected\nDelete        Delete selected\nP             Pin / Unpin`,
-      preview: 'Win+Alt+V  Toggle window\nCtrl+F  Focus search...',
+      content: `Win+V         Toggle Cubby\nCtrl+F        Focus search\nEscape        Close / clear search\nEnter         Paste selected\nDelete        Delete selected\nP             Pin / Unpin`,
+      preview: 'Win+V  Toggle Cubby\nCtrl+F  Focus search...',
       folder_id: null,
       created_at: ago(12),
       source_app: 'Code.exe',
@@ -102,7 +102,7 @@ export function generateDemoClips(): ClipboardItem[] {
       id: 'demo-9',
       clip_type: 'text',
       content:
-        'All clipboard data is stored locally in a SQLite database on your machine. PastePaw never uploads your data to any server.',
+        'All clipboard data is stored locally in a SQLite database on your machine. Cubby does not upload your history to a server.',
       preview: 'All clipboard data is stored locally in a SQLite database on your machine...',
       folder_id: null,
       created_at: ago(30),
@@ -113,8 +113,8 @@ export function generateDemoClips(): ClipboardItem[] {
     {
       id: 'demo-10',
       clip_type: 'text',
-      content: `git tag v1.3.3\ngit push origin refs/heads/main\ngit push origin refs/tags/v1.3.3`,
-      preview: 'git tag v1.3.3\ngit push origin refs/heads/main',
+      content: `git tag v0.1.0\ngit push origin refs/heads/main\ngit push origin refs/tags/v0.1.0`,
+      preview: 'git tag v0.1.0\ngit push origin refs/heads/main',
       folder_id: null,
       created_at: ago(35),
       source_app: 'WindowsTerminal.exe',
@@ -126,8 +126,8 @@ export function generateDemoClips(): ClipboardItem[] {
       id: 'demo-12',
       clip_type: 'text',
       content:
-        'Hi team,\n\nPlease find the latest build of PastePaw v1.3.3 attached. Key changes include refined UI layout, tighter card spacing, and a new dark-mode tray icon.\n\nBest,\nXueshi',
-      preview: 'Hi team, Please find the latest build of PastePaw v1.3.3...',
+        'Hi team,\n\nPlease find the latest Cubby v0.1.0 build attached. It includes the cursor-positioned flyout, reliable history search, remote-session workflows, and the new tray icon.\n\nThanks',
+      preview: 'Hi team, Please find the latest Cubby v0.1.0 build...',
       folder_id: null,
       created_at: ago(50),
       source_app: 'OUTLOOK.EXE',
@@ -138,8 +138,8 @@ export function generateDemoClips(): ClipboardItem[] {
       id: 'demo-13',
       clip_type: 'text',
       content:
-        'PastePaw 是一款为 Windows 打造的精美剪贴板历史管理工具，基于 Rust + Tauri + React + TypeScript 构建。所有数据仅存储在本地，绝不上传。',
-      preview: 'PastePaw 是一款为 Windows 打造的精美剪贴板历史管理工具...',
+        'Cubby 是一款专为 Windows 11 打造的快速、私密剪贴板历史工具。所有历史记录都存储在本地。',
+      preview: 'Cubby 是一款专为 Windows 11 打造的快速、私密剪贴板历史工具...',
       folder_id: null,
       created_at: ago(60),
       source_app: 'WeChat.exe',
@@ -172,8 +172,8 @@ export function generateDemoClips(): ClipboardItem[] {
     {
       id: 'demo-14',
       clip_type: 'text',
-      content: `## PastePaw\n\nA **beautiful** clipboard history manager for Windows.\n\n- Built with Rust + Tauri\n- 100% local storage\n- AI powered actions\n\n> "The best clipboard manager for Windows" `,
-      preview: '## PastePaw — A beautiful clipboard history manager...',
+      content: `## Cubby\n\nA **reliable** clipboard history replacement for Windows 11.\n\n- Persistent, searchable history\n- Local storage with no account\n- Native Win+V workflow\n- Remote-session support`,
+      preview: '## Cubby — A reliable clipboard history replacement...',
       folder_id: null,
       created_at: ago(75),
       source_app: 'Obsidian.exe',
