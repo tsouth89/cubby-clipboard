@@ -1,13 +1,13 @@
-use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_clipboard_x::write_text;
-
 use crate::database::Database;
 use crate::models::{Clip, ClipboardItem, Folder, FolderItem};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use clipboard_rs::common::RustImage;
+use clipboard_rs::{Clipboard, ClipboardContent, ClipboardContext, RustImageData};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
+use tauri::{AppHandle, Emitter, Manager};
 
 fn clip_to_list_item(clip: &Clip) -> ClipboardItem {
     let content_str = if clip.clip_type == "image" {
@@ -264,6 +264,54 @@ pub async fn migrate_encrypted_storage(db: &Database) -> Result<u64, String> {
     Ok(migrated)
 }
 
+pub async fn migrate_clip_format_model(db: &Database) -> Result<u64, String> {
+    let version: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'clip_format_model_version'")
+            .fetch_optional(&db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    if version.as_deref() == Some("1") {
+        return Ok(0);
+    }
+
+    let mut clips: Vec<Clip> = sqlx::query_as("SELECT * FROM clips ORDER BY id")
+        .fetch_all(&db.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    for clip in &mut clips {
+        decrypt_clip_fields(db, clip)?;
+        let formats = load_clip_formats(db, &clip.uuid).await?;
+        let full_image = if clip.clip_type == "image" {
+            Some(load_full_image_content(db, clip).await?)
+        } else {
+            None
+        };
+        let mut hash_material = Vec::new();
+        hash_material.extend_from_slice(clip.clip_type.as_bytes());
+        hash_material.push(0);
+        hash_material.extend_from_slice(full_image.as_deref().unwrap_or(&clip.content));
+        for (format, content) in formats {
+            hash_material.push(0);
+            hash_material.extend_from_slice(format.as_bytes());
+            hash_material.push(0);
+            hash_material.extend_from_slice(&content);
+        }
+        sqlx::query("UPDATE clips SET content_hash = ? WHERE uuid = ?")
+            .bind(db.crypto.keyed_hash(&hash_material))
+            .bind(&clip.uuid)
+            .execute(&db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    sqlx::query(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('clip_format_model_version', '1')",
+    )
+    .execute(&db.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(clips.len() as u64)
+}
+
 async fn load_full_image_content(db: &Database, clip: &mut Clip) -> Result<Vec<u8>, String> {
     let pool = &db.pool;
     if clip.clip_type != "image" {
@@ -317,6 +365,58 @@ async fn load_full_image_content(db: &Database, clip: &mut Clip) -> Result<Vec<u
     }
 
     Err("Image content missing".to_string())
+}
+
+async fn load_clip_formats(
+    db: &Database,
+    clip_uuid: &str,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        "SELECT format, content FROM clip_formats WHERE clip_uuid = ? ORDER BY format",
+    )
+    .bind(clip_uuid)
+    .fetch_all(&db.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    rows.into_iter()
+        .map(|(format, encrypted)| Ok((format, db.crypto.decrypt(&encrypted)?)))
+        .collect()
+}
+
+fn clipboard_contents_for_restore(
+    clip: &Clip,
+    full_image: Option<&[u8]>,
+    formats: &[(String, Vec<u8>)],
+    plain_text: bool,
+) -> Result<Vec<ClipboardContent>, String> {
+    let plain_content = String::from_utf8_lossy(&clip.content).to_string();
+    let mut contents = if let Some(image) = full_image {
+        vec![ClipboardContent::Image(
+            RustImageData::from_bytes(image).map_err(|e| e.to_string())?,
+        )]
+    } else {
+        vec![ClipboardContent::Text(plain_content)]
+    };
+    if !plain_text {
+        for (format, content) in formats {
+            match format.as_str() {
+                "html" => contents.push(ClipboardContent::Html(
+                    String::from_utf8(content.clone())
+                        .map_err(|_| "stored HTML is not UTF-8".to_string())?,
+                )),
+                "rtf" => contents.push(ClipboardContent::Rtf(
+                    String::from_utf8(content.clone())
+                        .map_err(|_| "stored RTF is not UTF-8".to_string())?,
+                )),
+                "files" => contents.push(ClipboardContent::Files(
+                    serde_json::from_slice(content)
+                        .map_err(|_| "stored file list is invalid".to_string())?,
+                )),
+                _ => {}
+            }
+        }
+    }
+    Ok(contents)
 }
 
 #[tauri::command]
@@ -487,46 +587,32 @@ async fn restore_clip(
             // Synchronize clipboard access across the app
             let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
 
-            let content_hash = if clip.clip_type == "image" {
-                let full_image = load_full_image_content(db, &mut clip).await?;
-                crate::clipboard::calculate_hash(&full_image)
+            let formats = load_clip_formats(db, &clip.uuid).await?;
+            let full_image = if clip.clip_type == "image" {
+                Some(load_full_image_content(db, &mut clip).await?)
             } else {
-                crate::clipboard::calculate_hash(&clip.content)
+                None
             };
+            let mut hash_material = Vec::new();
+            hash_material.extend_from_slice(clip.clip_type.as_bytes());
+            hash_material.push(0);
+            hash_material.extend_from_slice(full_image.as_deref().unwrap_or(&clip.content));
+            for (format, content) in &formats {
+                hash_material.push(0);
+                hash_material.extend_from_slice(format.as_bytes());
+                hash_material.push(0);
+                hash_material.extend_from_slice(content);
+            }
+            let content_hash = crate::clipboard::calculate_hash(&hash_material);
             let uuid = clip.uuid.clone();
 
-            let mut final_res = Ok(());
+            let clipboard_contents =
+                clipboard_contents_for_restore(&clip, full_image.as_deref(), &formats, plain_text)?;
 
-            if clip.clip_type == "image" {
-                crate::clipboard::set_ignore_hash(content_hash.clone());
-                // Frontend writes image via navigator.clipboard API.
-            } else {
-                let content_str = String::from_utf8_lossy(&clip.content).to_string();
-                crate::clipboard::set_ignore_hash(content_hash.clone());
-                //crate::clipboard::set_last_stable_hash(content_hash.clone());
-
-                let mut last_err = String::new();
-                for i in 0..5 {
-                    match write_text(content_str.clone()).await {
-                        Ok(_) => {
-                            last_err.clear();
-                            break;
-                        }
-                        Err(e) => {
-                            last_err = e.to_string();
-                            log::warn!(
-                                "Clipboard write (text) attempt {} failed: {}. Retrying...",
-                                i + 1,
-                                last_err
-                            );
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        }
-                    }
-                }
-                if !last_err.is_empty() {
-                    final_res = Err(format!("Failed to set clipboard text: {}", last_err));
-                }
-            }
+            crate::clipboard::set_ignore_hash(content_hash);
+            let final_res = ClipboardContext::new()
+                .and_then(|context| context.set(clipboard_contents))
+                .map_err(|error| format!("Failed to restore clipboard formats: {error}"));
 
             // Manually perform the LRU bump (update created_at)
             let _ =
@@ -1217,9 +1303,11 @@ pub fn get_system_accent_color() -> Result<serde_json::Value, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_clips_in_pool, enforce_retention_in_pool, migrate_encrypted_storage,
-        toggle_clip_pin_in_pool,
+        clear_clips_in_pool, clipboard_contents_for_restore, enforce_retention_in_pool,
+        migrate_clip_format_model, migrate_encrypted_storage, toggle_clip_pin_in_pool,
+        ClipboardContent,
     };
+    use crate::clipboard::CapturedFormat;
     use crate::crypto::CryptoManager;
     use crate::database::Database;
     use crate::models::Clip;
@@ -1232,6 +1320,10 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .expect("in-memory database should open");
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .expect("foreign keys should be enabled in tests");
         let database = Database {
             pool,
             crypto: Arc::new(crate::crypto::CryptoManager::ephemeral()),
@@ -1362,6 +1454,91 @@ mod tests {
         std::fs::remove_dir_all(&database.image_dir).unwrap();
     }
 
+    #[test]
+    fn restore_model_preserves_rich_formats_and_plain_text_override() {
+        let clip = Clip {
+            id: 1,
+            uuid: "rich".to_string(),
+            clip_type: "text".to_string(),
+            content: b"Hello".to_vec(),
+            text_preview: "Hello".to_string(),
+            content_hash: "hash".to_string(),
+            folder_id: None,
+            is_deleted: false,
+            is_pinned: false,
+            is_thumbnail: false,
+            source_app: None,
+            source_icon: None,
+            metadata: None,
+            created_at: chrono::Utc::now(),
+            last_accessed: chrono::Utc::now(),
+        };
+        let formats = vec![
+            ("html".to_string(), b"<b>Hello</b>".to_vec()),
+            ("rtf".to_string(), br"{\rtf1\b Hello}".to_vec()),
+        ];
+
+        let rich = clipboard_contents_for_restore(&clip, None, &formats, false).unwrap();
+        assert!(matches!(&rich[0], ClipboardContent::Text(text) if text == "Hello"));
+        assert!(matches!(&rich[1], ClipboardContent::Html(html) if html == "<b>Hello</b>"));
+        assert!(matches!(&rich[2], ClipboardContent::Rtf(rtf) if rtf.contains("Hello")));
+
+        let plain = clipboard_contents_for_restore(&clip, None, &formats, true).unwrap();
+        assert_eq!(plain.len(), 1);
+        assert!(matches!(&plain[0], ClipboardContent::Text(text) if text == "Hello"));
+
+        let files = vec![(
+            "files".to_string(),
+            serde_json::to_vec(&vec![r"C:\one.txt", r"C:\two.txt"]).unwrap(),
+        )];
+        let file_contents = clipboard_contents_for_restore(&clip, None, &files, false).unwrap();
+        assert!(matches!(&file_contents[1], ClipboardContent::Files(paths) if paths.len() == 2));
+    }
+
+    #[tokio::test]
+    async fn format_model_migration_rekeys_existing_encrypted_clips_once() {
+        let database = test_database().await;
+        sqlx::query(
+            r#"
+            INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash)
+            VALUES ('rich', 'text', ?, ?, 'old-hash')
+            "#,
+        )
+        .bind(database.crypto.encrypt(b"Hello").unwrap())
+        .bind(database.crypto.encrypt_text("Hello").unwrap())
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        crate::clipboard::replace_clip_formats(
+            &database.pool,
+            &database.crypto,
+            "rich",
+            &[CapturedFormat {
+                name: "html",
+                content: b"<b>Hello</b>".to_vec(),
+            }],
+        )
+        .await
+        .unwrap();
+        let encrypted_format: Vec<u8> =
+            sqlx::query_scalar("SELECT content FROM clip_formats WHERE clip_uuid = 'rich'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert!(CryptoManager::is_encrypted(&encrypted_format));
+
+        assert_eq!(migrate_clip_format_model(&database).await.unwrap(), 1);
+        assert_eq!(migrate_clip_format_model(&database).await.unwrap(), 0);
+        let hash: String = sqlx::query_scalar("SELECT content_hash FROM clips WHERE uuid = 'rich'")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        let expected = database
+            .crypto
+            .keyed_hash(b"text\0Hello\0html\0<b>Hello</b>");
+        assert_eq!(hash, expected);
+    }
+
     #[tokio::test]
     async fn bulk_clear_preserves_only_active_pinned_clips() {
         let database = test_database().await;
@@ -1397,6 +1574,14 @@ mod tests {
             .execute(&database.pool)
             .await
             .expect("image metadata should be inserted");
+
+            sqlx::query(
+                "INSERT INTO clip_formats (clip_uuid, format, content) VALUES (?, 'html', x'31')",
+            )
+            .bind(uuid)
+            .execute(&database.pool)
+            .await
+            .expect("format metadata should be inserted");
         }
         let (deleted, image_paths) = clear_clips_in_pool(&database.pool, true)
             .await
@@ -1414,8 +1599,14 @@ mod tests {
                 .fetch_all(&database.pool)
                 .await
                 .expect("remaining image metadata should load");
+        let remaining_formats: Vec<String> =
+            sqlx::query_scalar("SELECT clip_uuid FROM clip_formats ORDER BY clip_uuid")
+                .fetch_all(&database.pool)
+                .await
+                .expect("remaining format metadata should load");
         assert_eq!(remaining_clips, vec!["pinned"]);
         assert_eq!(remaining_images, vec!["pinned"]);
+        assert_eq!(remaining_formats, vec!["pinned"]);
 
         let (deleted, _) = clear_clips_in_pool(&database.pool, false)
             .await

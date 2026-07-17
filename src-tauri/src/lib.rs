@@ -51,6 +51,9 @@ pub fn run_app() {
         if migrated > 0 {
             log::info!("STORAGE: Encrypted {} existing clipboard items", migrated);
         }
+        commands::migrate_clip_format_model(&db)
+            .await
+            .unwrap_or_else(|error| panic!("Cubby clipboard-format migration failed: {error}"));
     });
 
     let db_arc = Arc::new(db);
@@ -109,7 +112,6 @@ pub fn run_app() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_clipboard_x::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .manage(db_arc.clone())

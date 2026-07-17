@@ -63,6 +63,10 @@ if (cargoText.includes('tauri-plugin-notification')) {
   throw new Error('The unused notification plugin must not return to the release dependency graph');
 }
 
+if (cargoText.includes('tauri-plugin-clipboard-x')) {
+  throw new Error('Clipboard restore must remain in the Rust core without the broad Tauri clipboard plugin');
+}
+
 if (JSON.parse(packageText).dependencies?.['@tauri-apps/plugin-clipboard-manager']) {
   throw new Error('The unused JavaScript clipboard-manager plugin must not return');
 }
@@ -91,6 +95,21 @@ for (const encryptedStorageGate of [
   const sources = `${cryptoSource}\n${databaseSource}\n${commandSource}\n${clipboardSource}`;
   if (!sources.includes(encryptedStorageGate)) {
     throw new Error(`Encrypted-storage release gate is missing: ${encryptedStorageGate}`);
+  }
+}
+
+for (const clipboardFormatGate of [
+  'clip_formats',
+  'get_html()',
+  'get_rich_text()',
+  'get_files()',
+  'ClipboardContent::Html',
+  'ClipboardContent::Rtf',
+  'ClipboardContent::Files',
+]) {
+  const sources = `${databaseSource}\n${commandSource}\n${clipboardSource}`;
+  if (!sources.includes(clipboardFormatGate)) {
+    throw new Error(`Multi-format clipboard release gate is missing: ${clipboardFormatGate}`);
   }
 }
 

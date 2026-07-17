@@ -19,7 +19,8 @@ impl Database {
             .join("images");
         let options = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(db_path)
-            .create_if_missing(true);
+            .create_if_missing(true)
+            .foreign_keys(true);
 
         let pool = SqlitePool::connect_with(options)
             .await
@@ -174,6 +175,20 @@ impl Database {
         sqlx::query(
             r#"
             CREATE INDEX IF NOT EXISTS idx_clip_images_storage ON clip_images(storage_kind);
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS clip_formats (
+                clip_uuid TEXT NOT NULL,
+                format TEXT NOT NULL,
+                content BLOB NOT NULL,
+                PRIMARY KEY (clip_uuid, format),
+                FOREIGN KEY (clip_uuid) REFERENCES clips(uuid) ON DELETE CASCADE
+            )
             "#,
         )
         .execute(&self.pool)

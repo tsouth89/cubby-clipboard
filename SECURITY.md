@@ -19,3 +19,5 @@ Cubby release candidates must pass the JavaScript production dependency audit, t
 Cubby encrypts clipboard payloads, previews, source attribution, metadata, and image files with AES-256-GCM. Dedupe values use a keyed HMAC rather than a plain content hash. The random storage key is protected for the current Windows user with DPAPI and is never stored in plaintext.
 
 Existing plaintext history is migrated before the clipboard listener starts. Cubby fails closed if the key cannot be unlocked or migration cannot complete, preventing new history from being mixed into an unreadable or partially encrypted store.
+
+Core Windows clipboard representations are retained together: Unicode text, HTML, RTF, file-drop lists, and images. Auxiliary formats are encrypted in the same authenticated store. Cubby intentionally does not persist arbitrary private application formats because some contain process-specific handles or unsafe opaque data that cannot be replayed reliably.

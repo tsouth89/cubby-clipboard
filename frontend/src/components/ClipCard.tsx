@@ -20,6 +20,7 @@ interface ImageMetadata {
   width?: number;
   height?: number;
   size_bytes?: number;
+  formats?: string[];
 }
 
 function sourceLabel(value: string | null, type: string) {
@@ -44,6 +45,7 @@ function formatBytes(bytes?: number) {
 }
 
 function contentKind(content: string, clipType: string) {
+  if (clipType === 'files') return 'Files';
   const trimmed = content.trim();
   if (clipType === 'url' || /^https?:\/\/\S+$/i.test(trimmed)) return 'URL';
   if (/^[A-Za-z]:[\\/]|^\\\\[^\\]+\\/.test(trimmed)) return 'Path';
@@ -98,8 +100,10 @@ export const ClipCard = memo(function ClipCard({
     .replace(/\r\n/g, '\n')
     .replace(/\n[ \t]*\n+/g, '\n')
     .trim();
-  const kind = contentKind(preview, clip.clip_type);
   const imageMetadata = useMemo(() => parseImageMetadata(clip.metadata), [clip.metadata]);
+  const kind = imageMetadata.formats?.some((format) => format === 'html' || format === 'rtf')
+    ? 'Rich text'
+    : contentKind(preview, clip.clip_type);
   const imageDetails = [
     imageMetadata.width && imageMetadata.height
       ? `${imageMetadata.width}×${imageMetadata.height}`

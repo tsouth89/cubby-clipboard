@@ -37,7 +37,6 @@ tauri-plugin-single-instance = "2"
 log = "0.4.29"
 window-vibrancy = { git = "https://github.com/XueshiQiao/window-vibrancy.git" }
 dark-light = "2.0.0"
-tauri-plugin-clipboard-x = "2.0.1"
 tauri-plugin-dialog = "2"
 clipboard-rs = "0.2"
 clipboard-win = "5.4.1"
