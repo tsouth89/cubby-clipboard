@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-fn clip_to_list_item(clip: &Clip, image_path: Option<&str>) -> ClipboardItem {
+fn clip_to_list_item(clip: &Clip) -> ClipboardItem {
     let content_str = if clip.clip_type == "image" {
-        image_path.unwrap_or_default().to_string()
+        BASE64.encode(&clip.content)
     } else {
         String::from_utf8_lossy(&clip.content).to_string()
     };
@@ -28,6 +28,15 @@ fn clip_to_list_item(clip: &Clip, image_path: Option<&str>) -> ClipboardItem {
         source_icon: clip.source_icon.clone(),
         metadata: clip.metadata.clone(),
     }
+}
+
+fn decrypt_clip_fields(db: &Database, clip: &mut Clip) -> Result<(), String> {
+    clip.content = db.crypto.decrypt(&clip.content)?;
+    clip.text_preview = db.crypto.decrypt_text(&clip.text_preview)?;
+    db.crypto.decrypt_optional_text(&mut clip.source_app)?;
+    db.crypto.decrypt_optional_text(&mut clip.source_icon)?;
+    db.crypto.decrypt_optional_text(&mut clip.metadata)?;
+    Ok(())
 }
 
 fn clip_to_detail_item(clip: &Clip, full_image_content: Option<&[u8]>) -> ClipboardItem {
@@ -94,81 +103,169 @@ async fn cleanup_orphan_clip_image_files(pool: &SqlitePool) -> Result<(), String
     Ok(())
 }
 
-pub async fn migrate_images_to_files(pool: &SqlitePool) -> Result<(), String> {
-    log::info!("Starting background image migration...");
+fn encrypt_existing_text(
+    crypto: &crate::crypto::CryptoManager,
+    value: &str,
+) -> Result<String, String> {
+    if crate::crypto::CryptoManager::is_encrypted_text(value) {
+        Ok(value.to_string())
+    } else {
+        crypto.encrypt_text(value)
+    }
+}
 
-    // 1. Migrate legacy clips (content in 'clips' table)
-    let legacy_clips: Vec<Clip> =
-        sqlx::query_as(r#"SELECT * FROM clips WHERE clip_type = 'image' AND length(content) > 0"#)
-            .fetch_all(pool)
+fn encrypt_existing_optional_text(
+    crypto: &crate::crypto::CryptoManager,
+    value: Option<&str>,
+) -> Result<Option<String>, String> {
+    value
+        .map(|value| encrypt_existing_text(crypto, value))
+        .transpose()
+}
+
+async fn image_bytes_for_encryption_migration(
+    db: &Database,
+    clip: &Clip,
+) -> Result<(Vec<u8>, Option<String>), String> {
+    let row: Option<(Option<String>, Vec<u8>)> =
+        sqlx::query_as("SELECT file_path, full_content FROM clip_images WHERE clip_uuid = ?")
+            .bind(&clip.uuid)
+            .fetch_optional(&db.pool)
             .await
             .map_err(|e| e.to_string())?;
 
-    for clip in legacy_clips {
-        log::info!("Migrating legacy clip {}...", clip.uuid);
-        let full_bytes = clip.content.clone();
-        match crate::clipboard::persist_full_image_file(&clip.uuid, &full_bytes) {
-            Ok(file_path) => {
-                let _ = sqlx::query(
-                    r#"
-                    INSERT OR REPLACE INTO clip_images (clip_uuid, full_content, file_path, file_size, storage_kind, mime_type, created_at)
-                    VALUES (?, x'', ?, ?, 'file', 'image/png', CURRENT_TIMESTAMP)
-                    "#,
-                )
-                .bind(&clip.uuid)
-                .bind(&file_path)
-                .bind(full_bytes.len() as i64)
-                .execute(pool)
-                .await;
-
-                let _ = sqlx::query(
-                    r#"UPDATE clips SET content = x'', is_thumbnail = 0 WHERE uuid = ?"#,
-                )
-                .bind(&clip.uuid)
-                .execute(pool)
-                .await;
+    if let Some((file_path, full_content)) = row {
+        if let Some(path) = file_path.as_deref().filter(|path| !path.is_empty()) {
+            if let Ok(stored) = std::fs::read(path) {
+                let plaintext = if crate::crypto::CryptoManager::is_encrypted(&stored) {
+                    db.crypto.decrypt(&stored)?
+                } else {
+                    stored
+                };
+                return Ok((plaintext, file_path));
             }
-            Err(e) => {
-                log::error!("Failed to migrate legacy clip {}: {}", clip.uuid, e);
-            }
+        }
+        if !full_content.is_empty() {
+            let plaintext = if crate::crypto::CryptoManager::is_encrypted(&full_content) {
+                db.crypto.decrypt(&full_content)?
+            } else {
+                full_content
+            };
+            return Ok((plaintext, file_path));
         }
     }
 
-    // 2. Migrate DB-stored images in 'clip_images'
-    let db_images: Vec<(String, Vec<u8>)> = sqlx::query_as(
-        r#"SELECT clip_uuid, full_content FROM clip_images WHERE storage_kind = 'db' AND length(full_content) > 0"#,
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    for (uuid, content) in db_images {
-        log::info!("Migrating DB-stored image for clip {}...", uuid);
-        match crate::clipboard::persist_full_image_file(&uuid, &content) {
-            Ok(file_path) => {
-                let _ = sqlx::query(
-                    r#"
-                    UPDATE clip_images
-                    SET full_content = x'', file_path = ?, storage_kind = 'file'
-                    WHERE clip_uuid = ?
-                    "#,
-                )
-                .bind(&file_path)
-                .bind(&uuid)
-                .execute(pool)
-                .await;
-            }
-            Err(e) => {
-                log::error!("Failed to migrate DB image for clip {}: {}", uuid, e);
-            }
-        }
+    if !clip.content.is_empty() && !crate::crypto::CryptoManager::is_encrypted(&clip.content) {
+        return Ok((clip.content.clone(), None));
     }
-
-    log::info!("Background image migration completed.");
-    Ok(())
+    Err(format!("image payload is missing for clip {}", clip.uuid))
 }
 
-async fn load_full_image_content(pool: &SqlitePool, clip: &mut Clip) -> Result<Vec<u8>, String> {
+pub async fn migrate_encrypted_storage(db: &Database) -> Result<u64, String> {
+    let version: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'storage_encryption_version'")
+            .fetch_optional(&db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    if version.as_deref() == Some("1") {
+        return Ok(0);
+    }
+
+    let clips: Vec<Clip> = sqlx::query_as("SELECT * FROM clips ORDER BY id")
+        .fetch_all(&db.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut migrated = 0_u64;
+
+    for clip in clips {
+        let (plaintext, new_image_path, old_image_path) = if clip.clip_type == "image" {
+            let (full_image, old_path) = image_bytes_for_encryption_migration(db, &clip).await?;
+            let preview = crate::clipboard::create_image_preview(&full_image)?;
+            let new_path = crate::clipboard::persist_full_image_file(
+                &db.crypto,
+                &db.image_dir,
+                &clip.uuid,
+                &full_image,
+            )?;
+            (preview, Some((new_path, full_image)), old_path)
+        } else {
+            let plaintext = if crate::crypto::CryptoManager::is_encrypted(&clip.content) {
+                db.crypto.decrypt(&clip.content)?
+            } else {
+                clip.content.clone()
+            };
+            (plaintext, None, None)
+        };
+
+        let hash_source = new_image_path
+            .as_ref()
+            .map(|(_, full_image)| full_image.as_slice())
+            .unwrap_or(plaintext.as_slice());
+        let encrypted_content = db.crypto.encrypt(&plaintext)?;
+        let encrypted_preview = encrypt_existing_text(&db.crypto, &clip.text_preview)?;
+        let encrypted_source_app =
+            encrypt_existing_optional_text(&db.crypto, clip.source_app.as_deref())?;
+        let encrypted_source_icon =
+            encrypt_existing_optional_text(&db.crypto, clip.source_icon.as_deref())?;
+        let encrypted_metadata =
+            encrypt_existing_optional_text(&db.crypto, clip.metadata.as_deref())?;
+
+        let mut transaction = db.pool.begin().await.map_err(|e| e.to_string())?;
+        sqlx::query(
+            r#"
+            UPDATE clips
+            SET content = ?, text_preview = ?, content_hash = ?, source_app = ?, source_icon = ?, metadata = ?, is_thumbnail = ?
+            WHERE uuid = ?
+            "#,
+        )
+        .bind(encrypted_content)
+        .bind(encrypted_preview)
+        .bind(db.crypto.keyed_hash(hash_source))
+        .bind(encrypted_source_app)
+        .bind(encrypted_source_icon)
+        .bind(encrypted_metadata)
+        .bind(clip.clip_type == "image")
+        .bind(&clip.uuid)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        if let Some((path, full_image)) = &new_image_path {
+            sqlx::query(
+                r#"
+                INSERT OR REPLACE INTO clip_images
+                    (clip_uuid, full_content, file_path, file_size, storage_kind, mime_type, created_at)
+                VALUES (?, x'', ?, ?, 'encrypted_file', 'image/png', CURRENT_TIMESTAMP)
+                "#,
+            )
+            .bind(&clip.uuid)
+            .bind(path)
+            .bind(full_image.len() as i64)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+        transaction.commit().await.map_err(|e| e.to_string())?;
+
+        if let (Some(old_path), Some((new_path, _))) = (old_image_path, &new_image_path) {
+            if old_path != *new_path {
+                crate::clipboard::remove_full_image_file(&old_path);
+            }
+        }
+        migrated += 1;
+    }
+
+    sqlx::query(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_encryption_version', '1')",
+    )
+    .execute(&db.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(migrated)
+}
+
+async fn load_full_image_content(db: &Database, clip: &mut Clip) -> Result<Vec<u8>, String> {
+    let pool = &db.pool;
     if clip.clip_type != "image" {
         return Err("Clip is not an image".to_string());
     }
@@ -184,11 +281,11 @@ async fn load_full_image_content(pool: &SqlitePool, clip: &mut Clip) -> Result<V
     if let Some(path) = file_path {
         if !path.is_empty() {
             // If file exists, return it
-            if let Ok(bytes) = crate::clipboard::read_full_image_file(&path) {
+            if let Ok(bytes) = crate::clipboard::read_full_image_file(&db.crypto, &path) {
                 return Ok(bytes);
             }
             // If file missing, try fallbacks below
-            log::warn!("Image file missing at {}, checking DB backups...", path);
+            log::warn!("Stored image file is missing; checking database fallbacks");
         }
     }
 
@@ -202,13 +299,21 @@ async fn load_full_image_content(pool: &SqlitePool, clip: &mut Clip) -> Result<V
 
     if let Some(content) = full_content {
         if !content.is_empty() {
-            return Ok(content);
+            return if crate::crypto::CryptoManager::is_encrypted(&content) {
+                db.crypto.decrypt(&content)
+            } else {
+                Ok(content)
+            };
         }
     }
 
     // 3. Legacy content in clips table
     if !clip.content.is_empty() {
-        return Ok(clip.content.clone());
+        return if crate::crypto::CryptoManager::is_encrypted(&clip.content) {
+            db.crypto.decrypt(&clip.content)
+        } else {
+            Ok(clip.content.clone())
+        };
     }
 
     Err("Image content missing".to_string())
@@ -233,7 +338,7 @@ pub async fn get_clips(
     );
 
     let sql_started = Instant::now();
-    let clips: Vec<Clip> = match filter_id.as_deref() {
+    let mut clips: Vec<Clip> = match filter_id.as_deref() {
         Some(id) => {
             let folder_id_num = id.parse::<i64>().ok();
             if let Some(numeric_id) = folder_id_num {
@@ -273,49 +378,21 @@ pub async fn get_clips(
     let sql_ms = sql_started.elapsed().as_millis();
 
     log::info!("DB: Found {} clips", clips.len());
-
-    // Batch fetch image paths
-    let mut image_path_map: HashMap<String, String> = HashMap::new();
-    let image_uuids: Vec<String> = clips
-        .iter()
-        .filter(|c| c.clip_type == "image")
-        .map(|c| c.uuid.clone())
-        .collect();
-
-    if !image_uuids.is_empty() {
-        // Construct query: SELECT clip_uuid, file_path FROM clip_images WHERE clip_uuid IN (?, ?, ...)
-        let placeholders: Vec<String> = image_uuids.iter().map(|_| "?".to_string()).collect();
-        let query = format!(
-            "SELECT clip_uuid, file_path FROM clip_images WHERE clip_uuid IN ({})",
-            placeholders.join(",")
-        );
-
-        let mut query_builder = sqlx::query_as::<_, (String, Option<String>)>(&query);
-        for uuid in &image_uuids {
-            query_builder = query_builder.bind(uuid);
-        }
-
-        let results = query_builder
-            .fetch_all(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-        for (uuid, path) in results {
-            if let Some(p) = path {
-                if !p.is_empty() {
-                    image_path_map.insert(uuid, p);
-                }
-            }
-        }
+    for clip in &mut clips {
+        decrypt_clip_fields(&db, clip)?;
     }
 
-    let image_rows = image_uuids.len();
+    let image_rows = clips
+        .iter()
+        .filter(|clip| clip.clip_type == "image")
+        .count();
     let raw_bytes: usize = clips.iter().map(|clip| clip.content.len()).sum();
     let map_started = Instant::now();
     let items: Vec<ClipboardItem> = clips
         .iter()
         .enumerate()
         .map(|(idx, clip)| {
-            let item = clip_to_list_item(clip, image_path_map.get(&clip.uuid).map(|s| s.as_str()));
+            let item = clip_to_list_item(clip);
             // Only log first 10 clips to reduce noise
             if idx < 10 {
                 log::trace!(
@@ -364,9 +441,11 @@ pub async fn get_clip(
     match clip {
         Some(mut clip) => {
             if clip.clip_type == "image" {
-                let full = load_full_image_content(pool, &mut clip).await?;
+                let full = load_full_image_content(&db, &mut clip).await?;
+                decrypt_clip_fields(&db, &mut clip)?;
                 Ok(clip_to_detail_item(&clip, Some(&full)))
             } else {
+                decrypt_clip_fields(&db, &mut clip)?;
                 Ok(clip_to_detail_item(&clip, None))
             }
         }
@@ -399,7 +478,8 @@ async fn restore_clip(
         .map_err(|e| e.to_string())?;
 
     match clip {
-        Some(clip) => {
+        Some(mut clip) => {
+            decrypt_clip_fields(db, &mut clip)?;
             if plain_text && clip.clip_type == "image" {
                 return Err("Plain text is not available for image clips".to_string());
             }
@@ -407,7 +487,12 @@ async fn restore_clip(
             // Synchronize clipboard access across the app
             let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
 
-            let content_hash = clip.content_hash.clone();
+            let content_hash = if clip.clip_type == "image" {
+                let full_image = load_full_image_content(db, &mut clip).await?;
+                crate::clipboard::calculate_hash(&full_image)
+            } else {
+                crate::clipboard::calculate_hash(&clip.content)
+            };
             let uuid = clip.uuid.clone();
 
             let mut final_res = Ok(());
@@ -700,83 +785,58 @@ pub async fn search_clips(
     let pool = &db.pool;
     let started = Instant::now();
 
-    let search_pattern = format!("%{}%", query);
-
     let sql_started = Instant::now();
-    let clips: Vec<Clip> = match filter_id.as_deref() {
+    let mut clips: Vec<Clip> = match filter_id.as_deref() {
         Some(id) => {
             let folder_id_num = id.parse::<i64>().ok();
             if let Some(numeric_id) = folder_id_num {
-                sqlx::query_as(r#"
-                    SELECT * FROM clips WHERE is_deleted = 0 AND folder_id = ? AND (text_preview LIKE ? OR content LIKE ?)
-                    ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?
-                "#)
+                sqlx::query_as(
+                    r#"
+                    SELECT * FROM clips WHERE is_deleted = 0 AND folder_id = ?
+                    ORDER BY is_pinned DESC, created_at DESC
+                "#,
+                )
                 .bind(numeric_id)
-                .bind(&search_pattern)
-                .bind(&search_pattern)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(pool).await.map_err(|e| e.to_string())?
+                .fetch_all(pool)
+                .await
+                .map_err(|e| e.to_string())?
             } else {
                 Vec::new()
             }
         }
         None => sqlx::query_as(
             r#"
-                SELECT * FROM clips WHERE is_deleted = 0 AND (text_preview LIKE ? OR content LIKE ?)
-                ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?
+                SELECT * FROM clips WHERE is_deleted = 0
+                ORDER BY is_pinned DESC, created_at DESC
             "#,
         )
-        .bind(&search_pattern)
-        .bind(&search_pattern)
-        .bind(limit)
-        .bind(offset)
         .fetch_all(pool)
         .await
         .map_err(|e| e.to_string())?,
     };
     let sql_ms = sql_started.elapsed().as_millis();
-
-    // Batch fetch image paths
-    let mut image_path_map: HashMap<String, String> = HashMap::new();
-    let image_uuids: Vec<String> = clips
-        .iter()
-        .filter(|c| c.clip_type == "image")
-        .map(|c| c.uuid.clone())
-        .collect();
-
-    if !image_uuids.is_empty() {
-        let placeholders: Vec<String> = image_uuids.iter().map(|_| "?".to_string()).collect();
-        let query = format!(
-            "SELECT clip_uuid, file_path FROM clip_images WHERE clip_uuid IN ({})",
-            placeholders.join(",")
-        );
-
-        let mut query_builder = sqlx::query_as::<_, (String, Option<String>)>(&query);
-        for uuid in &image_uuids {
-            query_builder = query_builder.bind(uuid);
-        }
-
-        let results = query_builder
-            .fetch_all(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-        for (uuid, path) in results {
-            if let Some(p) = path {
-                if !p.is_empty() {
-                    image_path_map.insert(uuid, p);
-                }
-            }
-        }
+    for clip in &mut clips {
+        decrypt_clip_fields(&db, clip)?;
     }
 
-    let image_rows = image_uuids.len();
+    let normalized_query = query.to_lowercase();
+    let offset = offset.max(0) as usize;
+    let limit = limit.max(0) as usize;
+    clips.retain(|clip| {
+        String::from_utf8_lossy(&clip.content)
+            .to_lowercase()
+            .contains(&normalized_query)
+            || clip.text_preview.to_lowercase().contains(&normalized_query)
+    });
+    let clips: Vec<Clip> = clips.into_iter().skip(offset).take(limit).collect();
+
+    let image_rows = clips
+        .iter()
+        .filter(|clip| clip.clip_type == "image")
+        .count();
     let raw_bytes: usize = clips.iter().map(|clip| clip.content.len()).sum();
     let map_started = Instant::now();
-    let items: Vec<ClipboardItem> = clips
-        .iter()
-        .map(|clip| clip_to_list_item(clip, image_path_map.get(&clip.uuid).map(|s| s.as_str())))
-        .collect();
+    let items: Vec<ClipboardItem> = clips.iter().map(clip_to_list_item).collect();
     let map_ms = map_started.elapsed().as_millis();
     let total_ms = started.elapsed().as_millis();
     log::info!(
@@ -1156,9 +1216,15 @@ pub fn get_system_accent_color() -> Result<serde_json::Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{clear_clips_in_pool, enforce_retention_in_pool, toggle_clip_pin_in_pool};
+    use super::{
+        clear_clips_in_pool, enforce_retention_in_pool, migrate_encrypted_storage,
+        toggle_clip_pin_in_pool,
+    };
+    use crate::crypto::CryptoManager;
     use crate::database::Database;
+    use crate::models::Clip;
     use sqlx::sqlite::SqlitePoolOptions;
+    use std::sync::Arc;
 
     async fn test_database() -> Database {
         let pool = SqlitePoolOptions::new()
@@ -1166,7 +1232,11 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .expect("in-memory database should open");
-        let database = Database { pool };
+        let database = Database {
+            pool,
+            crypto: Arc::new(crate::crypto::CryptoManager::ephemeral()),
+            image_dir: std::env::temp_dir().join(format!("cubby-test-{}", uuid::Uuid::new_v4())),
+        };
         database.migrate().await.expect("migration should succeed");
         database
     }
@@ -1194,6 +1264,102 @@ mod tests {
             toggle_clip_pin_in_pool(&database.pool, "missing").await,
             Err("Clipboard item not found".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn storage_migration_encrypts_plaintext_history_and_is_idempotent() {
+        let database = test_database().await;
+        sqlx::query(
+            r#"
+            INSERT INTO clips
+                (uuid, clip_type, content, text_preview, content_hash, source_app, metadata)
+            VALUES
+                ('legacy-text', 'text', ?, 'private preview', 'legacy-sha', 'Editor.exe', '{"kind":"text"}')
+            "#,
+        )
+        .bind(b"private clipboard payload".as_slice())
+        .execute(&database.pool)
+        .await
+        .expect("legacy clip should be inserted");
+
+        assert_eq!(migrate_encrypted_storage(&database).await.unwrap(), 1);
+        assert_eq!(migrate_encrypted_storage(&database).await.unwrap(), 0);
+
+        let mut stored: Clip = sqlx::query_as("SELECT * FROM clips WHERE uuid = 'legacy-text'")
+            .fetch_one(&database.pool)
+            .await
+            .expect("migrated clip should load");
+        assert!(CryptoManager::is_encrypted(&stored.content));
+        assert!(CryptoManager::is_encrypted_text(&stored.text_preview));
+        assert!(CryptoManager::is_encrypted_text(
+            stored.source_app.as_deref().unwrap()
+        ));
+        assert_ne!(stored.content_hash, "legacy-sha");
+
+        super::decrypt_clip_fields(&database, &mut stored).unwrap();
+        assert_eq!(stored.content, b"private clipboard payload");
+        assert_eq!(stored.text_preview, "private preview");
+        assert_eq!(stored.source_app.as_deref(), Some("Editor.exe"));
+        assert_eq!(stored.metadata.as_deref(), Some("{\"kind\":\"text\"}"));
+    }
+
+    #[tokio::test]
+    async fn storage_migration_replaces_plaintext_images_with_encrypted_files_and_previews() {
+        let database = test_database().await;
+        std::fs::create_dir_all(&database.image_dir).unwrap();
+        let old_path = database.image_dir.join("legacy-image.png");
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(4, 3)
+            .write_to(&mut png, image::ImageOutputFormat::Png)
+            .unwrap();
+        let png = png.into_inner();
+        std::fs::write(&old_path, &png).unwrap();
+
+        sqlx::query(
+            r#"
+            INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash, metadata)
+            VALUES ('legacy-image', 'image', x'', '[Image]', 'legacy-image-sha', '{"width":4,"height":3}')
+            "#,
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO clip_images (clip_uuid, full_content, file_path, file_size, storage_kind)
+            VALUES ('legacy-image', x'', ?, ?, 'file')
+            "#,
+        )
+        .bind(old_path.to_string_lossy().to_string())
+        .bind(png.len() as i64)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(migrate_encrypted_storage(&database).await.unwrap(), 1);
+        let mut stored: Clip = sqlx::query_as("SELECT * FROM clips WHERE uuid = 'legacy-image'")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        let (new_path, storage_kind): (String, String) = sqlx::query_as(
+            "SELECT file_path, storage_kind FROM clip_images WHERE clip_uuid = 'legacy-image'",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+
+        assert!(CryptoManager::is_encrypted(&stored.content));
+        assert_eq!(storage_kind, "encrypted_file");
+        assert!(new_path.ends_with("legacy-image.cubby"));
+        assert!(!old_path.exists());
+        let encrypted_file = std::fs::read(&new_path).unwrap();
+        assert!(CryptoManager::is_encrypted(&encrypted_file));
+        assert_eq!(database.crypto.decrypt(&encrypted_file).unwrap(), png);
+        super::decrypt_clip_fields(&database, &mut stored).unwrap();
+        assert!(!stored.content.is_empty());
+        image::load_from_memory(&stored.content).expect("decrypted preview should be a PNG");
+
+        std::fs::remove_dir_all(&database.image_dir).unwrap();
     }
 
     #[tokio::test]

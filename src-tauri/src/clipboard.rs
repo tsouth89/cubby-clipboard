@@ -288,6 +288,7 @@ async fn process_clipboard_snapshot(
                 source_type,
             } => {
                 let size_bytes = png_bytes.len();
+                let preview_bytes = create_image_preview(&png_bytes).unwrap_or_default();
                 log::debug!(
                     "CLIPBOARD: Materialized image sequence={} {}x{} source_type={} png_bytes={} decode_ms={}",
                     sequence,
@@ -299,7 +300,7 @@ async fn process_clipboard_snapshot(
                 );
                 (
                     "image",
-                    Vec::new(),
+                    preview_bytes,
                     "[Image]".to_string(),
                     hash,
                     Some(png_bytes),
@@ -384,11 +385,48 @@ async fn process_clipboard_snapshot(
 
     // DB Logic
     let pool = &db.pool;
+    let hash_source = full_image_content.as_deref().unwrap_or(&clip_content);
+    let storage_hash = db.crypto.keyed_hash(hash_source);
+    let encrypted_content = match db.crypto.encrypt(&clip_content) {
+        Ok(content) => content,
+        Err(error) => {
+            log::error!("CLIPBOARD: Failed to encrypt captured content: {}", error);
+            return;
+        }
+    };
+    let encrypted_preview = match db.crypto.encrypt_text(&clip_preview) {
+        Ok(preview) => preview,
+        Err(error) => {
+            log::error!("CLIPBOARD: Failed to encrypt captured preview: {}", error);
+            return;
+        }
+    };
+    let encrypted_source_app = match db.crypto.encrypt_optional_text(source_app.as_deref()) {
+        Ok(value) => value,
+        Err(error) => {
+            log::error!("CLIPBOARD: Failed to encrypt source attribution: {}", error);
+            return;
+        }
+    };
+    let encrypted_source_icon = match db.crypto.encrypt_optional_text(source_icon.as_deref()) {
+        Ok(value) => value,
+        Err(error) => {
+            log::error!("CLIPBOARD: Failed to encrypt source icon: {}", error);
+            return;
+        }
+    };
+    let encrypted_metadata = match db.crypto.encrypt_optional_text(metadata.as_deref()) {
+        Ok(value) => value,
+        Err(error) => {
+            log::error!("CLIPBOARD: Failed to encrypt content metadata: {}", error);
+            return;
+        }
+    };
 
     let db_lookup_started = std::time::Instant::now();
     let existing_uuid: Option<String> =
         sqlx::query_scalar::<_, String>(r#"SELECT uuid FROM clips WHERE content_hash = ?"#)
-            .bind(&clip_hash)
+            .bind(&storage_hash)
             .fetch_optional(pool)
             .await
             .unwrap_or(None);
@@ -412,11 +450,11 @@ async fn process_clipboard_snapshot(
                 WHERE uuid = ?
                 "#,
             )
-            .bind(&source_app)
-            .bind(&source_icon)
-            .bind(&clip_content)
-            .bind(&clip_preview)
-            .bind(metadata.clone())
+            .bind(&encrypted_source_app)
+            .bind(&encrypted_source_icon)
+            .bind(&encrypted_content)
+            .bind(&encrypted_preview)
+            .bind(encrypted_metadata.clone())
             .bind(&existing_id)
             .execute(pool)
             .await
@@ -430,7 +468,12 @@ async fn process_clipboard_snapshot(
             }
 
             if let Some(full_bytes) = &full_image_content {
-                match persist_full_image_file(&existing_id, full_bytes) {
+                match persist_full_image_file(
+                    &db.crypto,
+                    &db.image_dir,
+                    &existing_id,
+                    full_bytes,
+                ) {
                     Ok(file_path) => {
                         if let Err(error) = sqlx::query(
                             r#"
@@ -463,8 +506,8 @@ async fn process_clipboard_snapshot(
             }
         } else {
             if let Err(error) = sqlx::query(r#"UPDATE clips SET created_at = CURRENT_TIMESTAMP, is_deleted = 0, source_app = ?, source_icon = ? WHERE uuid = ?"#)
-                .bind(&source_app)
-                .bind(&source_icon)
+                .bind(&encrypted_source_app)
+                .bind(&encrypted_source_icon)
                 .bind(&existing_id)
                 .execute(pool)
                 .await
@@ -489,13 +532,13 @@ async fn process_clipboard_snapshot(
         )
         .bind(&clip_uuid)
         .bind(clip_type)
-        .bind(&clip_content)
-        .bind(&clip_preview)
-        .bind(&clip_hash)
+        .bind(&encrypted_content)
+        .bind(&encrypted_preview)
+        .bind(&storage_hash)
         .bind(false)
-        .bind(&source_app)
-        .bind(&source_icon)
-        .bind(metadata)
+        .bind(&encrypted_source_app)
+        .bind(&encrypted_source_icon)
+        .bind(encrypted_metadata)
         .execute(pool)
         .await
         {
@@ -510,7 +553,12 @@ async fn process_clipboard_snapshot(
 
         if clip_type == "image" {
             if let Some(full_bytes) = &full_image_content {
-                match persist_full_image_file(&clip_uuid, full_bytes) {
+                match persist_full_image_file(
+                    &db.crypto,
+                    &db.image_dir,
+                    &clip_uuid,
+                    full_bytes,
+                ) {
                     Ok(file_path) => {
                         if let Err(error) = sqlx::query(
                             r#"
@@ -605,32 +653,42 @@ async fn process_clipboard_snapshot(
         started.elapsed().as_millis()
     );
 }
-fn calculate_hash(content: &[u8]) -> String {
+pub(crate) fn calculate_hash(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
     let result = hasher.finalize();
     format!("{:x}", result)
 }
 
-fn get_image_store_dir() -> std::path::PathBuf {
-    let current_dir = std::env::current_dir().unwrap_or(std::path::PathBuf::from("."));
-    let app_data_dir = match dirs::data_dir() {
-        Some(path) => path.join("Cubby Clipboard"),
-        None => current_dir.join("Cubby Clipboard"),
-    };
-    app_data_dir.join("images")
+pub fn create_image_preview(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let image = image::load_from_memory(png_bytes).map_err(|e| e.to_string())?;
+    let preview = image.thumbnail(320, 220);
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    preview
+        .write_to(&mut bytes, image::ImageOutputFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(bytes.into_inner())
 }
 
-pub fn persist_full_image_file(clip_uuid: &str, png_bytes: &[u8]) -> Result<String, String> {
-    let dir = get_image_store_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let file_path = dir.join(format!("{}.png", clip_uuid));
-    std::fs::write(&file_path, png_bytes).map_err(|e| e.to_string())?;
+pub fn persist_full_image_file(
+    crypto: &crate::crypto::CryptoManager,
+    image_dir: &std::path::Path,
+    clip_uuid: &str,
+    png_bytes: &[u8],
+) -> Result<String, String> {
+    std::fs::create_dir_all(image_dir).map_err(|e| e.to_string())?;
+    let file_path = image_dir.join(format!("{}.cubby", clip_uuid));
+    let encrypted = crypto.encrypt(png_bytes)?;
+    std::fs::write(&file_path, encrypted).map_err(|e| e.to_string())?;
     Ok(file_path.to_string_lossy().to_string())
 }
 
-pub fn read_full_image_file(file_path: &str) -> Result<Vec<u8>, String> {
-    std::fs::read(file_path).map_err(|e| e.to_string())
+pub fn read_full_image_file(
+    crypto: &crate::crypto::CryptoManager,
+    file_path: &str,
+) -> Result<Vec<u8>, String> {
+    let encrypted = std::fs::read(file_path).map_err(|e| e.to_string())?;
+    crypto.decrypt(&encrypted)
 }
 
 pub fn remove_full_image_file(file_path: &str) {

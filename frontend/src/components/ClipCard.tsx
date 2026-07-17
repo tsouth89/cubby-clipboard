@@ -1,7 +1,6 @@
 import { ClipboardItem } from '../types';
 import { clsx } from 'clsx';
 import { memo, useMemo } from 'react';
-import { convertFileSrc } from '@tauri-apps/api/core';
 import { Copy, File, Image as ImageIcon, MoreHorizontal, Pin } from 'lucide-react';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { PREVIEW_CHAR_LIMIT } from '../constants';
@@ -84,9 +83,6 @@ export const ClipCard = memo(function ClipCard({
       value.startsWith('tauri://')
     ) {
       return value;
-    }
-    if (value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value)) {
-      return convertFileSrc(value);
     }
     return `data:image/png;base64,${value}`;
   }, [clip.clip_type, clip.content]);

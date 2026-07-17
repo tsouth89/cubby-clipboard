@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 const root = new URL('../', import.meta.url);
 const read = (path) => readFile(new URL(path, root), 'utf8');
 
-const [packageText, tauriText, cargoText, changelog, releaseWorkflow, capabilityText, clipboardSource] = await Promise.all([
+const [packageText, tauriText, cargoText, changelog, releaseWorkflow, capabilityText, clipboardSource, cryptoSource, databaseSource, commandSource, clipCardSource] = await Promise.all([
   read('package.json'),
   read('src-tauri/tauri.conf.json'),
   read('src-tauri/Cargo.toml'),
@@ -11,6 +11,10 @@ const [packageText, tauriText, cargoText, changelog, releaseWorkflow, capability
   read('.github/workflows/release.yml'),
   read('src-tauri/capabilities/default.json'),
   read('src-tauri/src/clipboard.rs'),
+  read('src-tauri/src/crypto.rs'),
+  read('src-tauri/src/database.rs'),
+  read('src-tauri/src/commands.rs'),
+  read('frontend/src/components/ClipCard.tsx'),
 ]);
 
 const packageVersion = JSON.parse(packageText).version;
@@ -61,6 +65,33 @@ if (cargoText.includes('tauri-plugin-notification')) {
 
 if (JSON.parse(packageText).dependencies?.['@tauri-apps/plugin-clipboard-manager']) {
   throw new Error('The unused JavaScript clipboard-manager plugin must not return');
+}
+
+for (const dependency of ['aes-gcm', 'hmac']) {
+  if (!cargoText.includes(`${dependency} =`)) {
+    throw new Error(`Encrypted storage requires the Rust ${dependency} dependency`);
+  }
+}
+
+if (
+  cargoText.includes('protocol-asset') ||
+  clipCardSource.includes('convertFileSrc') ||
+  tauriConfig.app?.security?.assetProtocol?.enable
+) {
+  throw new Error('Release builds must not expose stored image files through the WebView asset protocol');
+}
+
+for (const encryptedStorageGate of [
+  'CryptProtectData',
+  'Aes256Gcm',
+  'keyed_hash',
+  'storage_encryption_version',
+  'migrate_encrypted_storage',
+]) {
+  const sources = `${cryptoSource}\n${databaseSource}\n${commandSource}\n${clipboardSource}`;
+  if (!sources.includes(encryptedStorageGate)) {
+    throw new Error(`Encrypted-storage release gate is missing: ${encryptedStorageGate}`);
+  }
 }
 
 for (const sensitiveLogFragment of ['Detected self-paste for hash', 'full_path: {:?}', 'path match): {}']) {
