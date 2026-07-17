@@ -30,6 +30,17 @@ interface SettingsPanelProps {
 
 type Tab = 'general' | 'folders';
 
+type DittoImportResult = {
+  total: number;
+  imported: number;
+  duplicates: number;
+  skipped_groups: number;
+  skipped_images: number;
+  skipped_empty: number;
+  errors: string[];
+  dry_run: boolean;
+};
+
 export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPanelProps) {
   const [activeTab, setActiveTab] = useState<Tab>('general');
   const [settings, setSettings] = useState<Settings>(initialSettings);
@@ -126,6 +137,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   const [ignoredApps, setIgnoredApps] = useState<string[]>([]);
   const [newIgnoredApp, setNewIgnoredApp] = useState('');
   const [appVersion, setAppVersion] = useState('');
+  const [dittoBusy, setDittoBusy] = useState(false);
 
   // Confirmation Dialog State
   const [confirmDialog, setConfirmDialog] = useState({
@@ -172,6 +184,64 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     } catch (e) {
       console.log('File picker cancelled or failed', e);
     }
+  };
+
+  const handleImportFromDitto = async () => {
+    let dbPath: string;
+    try {
+      dbPath = await invoke<string>('pick_ditto_database');
+    } catch {
+      return; // picker cancelled
+    }
+
+    let preview: DittoImportResult;
+    setDittoBusy(true);
+    try {
+      preview = await invoke<DittoImportResult>('import_from_ditto', { dbPath, dryRun: true });
+    } catch (e) {
+      toast.error(t('settings.dittoImportError', { error: String(e) }));
+      return;
+    } finally {
+      setDittoBusy(false);
+    }
+
+    if (preview.imported === 0) {
+      toast.info(
+        preview.duplicates > 0
+          ? t('settings.dittoAllDuplicates')
+          : t('settings.dittoNothingToImport')
+      );
+      return;
+    }
+
+    setConfirmDialog({
+      isOpen: true,
+      title: t('settings.dittoImportTitle'),
+      message: t('settings.dittoImportConfirm', { count: preview.imported }),
+      action: async () => {
+        setDittoBusy(true);
+        try {
+          const result = await invoke<DittoImportResult>('import_from_ditto', {
+            dbPath,
+            dryRun: false,
+          });
+          if (result.errors.length > 0) {
+            toast.warning(
+              t('settings.dittoImportPartial', {
+                count: result.imported,
+                failed: result.errors.length,
+              })
+            );
+          } else {
+            toast.success(t('settings.dittoImportSuccess', { count: result.imported }));
+          }
+        } catch (e) {
+          toast.error(t('settings.dittoImportError', { error: String(e) }));
+        } finally {
+          setDittoBusy(false);
+        }
+      },
+    });
   };
 
   const handleRemoveIgnoredApp = async (app: string) => {
@@ -645,6 +715,9 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                             </span>
                           </button>
                         </div>
+                        <p className="mt-3 text-xs text-muted-foreground">
+                          {t('settings.remoteHotkeyHint')}
+                        </p>
                       </div>
                     </div>
                   </section>
@@ -742,6 +815,27 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         className="btn btn-secondary text-xs"
                       >
                         {t('settings.removeDuplicates')}
+                      </button>
+                    </div>
+                  </section>
+
+                  <section className="space-y-4">
+                    <h3 className="text-sm font-medium text-muted-foreground">
+                      {t('settings.importHeading')}
+                    </h3>
+                    <div className="flex items-center justify-between rounded-lg border border-border bg-accent/20 p-3">
+                      <div className="pr-3">
+                        <span className="text-sm font-medium">{t('settings.dittoImport')}</span>
+                        <p className="text-xs text-muted-foreground">
+                          {t('settings.dittoImportDesc')}
+                        </p>
+                      </div>
+                      <button
+                        onClick={handleImportFromDitto}
+                        disabled={dittoBusy}
+                        className="btn btn-secondary shrink-0 text-xs"
+                      >
+                        {dittoBusy ? t('settings.dittoImporting') : t('settings.dittoImportButton')}
                       </button>
                     </div>
                   </section>

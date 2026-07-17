@@ -19,6 +19,7 @@ mod commands;
 mod constants;
 mod crypto;
 mod database;
+mod ditto_import;
 mod models;
 pub mod paste_engine;
 mod settings_commands;
@@ -397,10 +398,12 @@ pub fn run_app() {
             commands::remove_duplicate_clips,
             commands::register_global_shortcut,
             commands::show_window,
+            commands::import_from_ditto,
             settings_commands::add_ignored_app,
             settings_commands::remove_ignored_app,
             settings_commands::get_ignored_apps,
             commands::pick_file,
+            commands::pick_ditto_database,
             commands::get_layout_config,
             commands::get_paste_context,
             commands::get_system_accent_color,
