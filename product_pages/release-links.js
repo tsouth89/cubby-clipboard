@@ -10,7 +10,20 @@
     !release.draft &&
     typeof release.tag_name === "string" &&
     typeof release.html_url === "string" &&
+    typeof release.published_at === "string" &&
+    Number.isFinite(Date.parse(release.published_at)) &&
     release.html_url.startsWith(`${releasesUrl}/tag/`);
+
+  const selectLatestRelease = (releases) =>
+    releases
+      .filter(isCubbyRelease)
+      .reduce(
+        (latest, release) =>
+          !latest || Date.parse(release.published_at) > Date.parse(latest.published_at)
+            ? release
+            : latest,
+        null,
+      );
 
   const applyRelease = (release) => {
     if (!isCubbyRelease(release)) return;
@@ -47,7 +60,7 @@
       if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
       return response.json();
     })
-    .then((releases) => releases.find(isCubbyRelease))
+    .then(selectLatestRelease)
     .then((release) => {
       if (!release) return;
       applyRelease(release);
