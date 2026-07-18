@@ -431,8 +431,8 @@ pub fn run_app() {
 /// How the flyout anchors when it opens.
 #[derive(Clone, Copy)]
 pub enum ShowAnchor {
-    /// Anchor near the mouse cursor (hotkey): newest entry under the cursor,
-    /// shrinking to fit and opening a compact list upward near the screen bottom.
+    /// Anchor near the mouse cursor (hotkey): center the flyout horizontally,
+    /// prefer its full height below the cursor, then flip it above the cursor.
     Cursor,
     /// Anchor to the bottom of the work area (taskbar/tray click): a full-height
     /// window rising from the taskbar, which is what a tray click expects.
@@ -487,14 +487,8 @@ pub fn animate_window_show(window: &tauri::WebviewWindow, anchor: ShowAnchor) {
             let work_top = work_area.position.y + margin_px;
             let work_right = work_area.position.x + work_area.size.width as i32 - margin_px;
             let work_bottom = work_area.position.y + work_area.size.height as i32 - margin_px;
-            let max_x = (work_right - window_width_px as i32).max(work_left);
-            let right_candidate = cursor.x + cursor_offset_px;
-            let left_candidate = cursor.x - cursor_offset_px - window_width_px as i32;
-            let mut target_x = if right_candidate + window_width_px as i32 <= work_right {
-                right_candidate
-            } else {
-                left_candidate
-            };
+            let target_x =
+                calculate_horizontal_placement(cursor.x, work_left, work_right, window_width_px);
 
             let (target_y, window_height_px) = match anchor {
                 ShowAnchor::Cursor => calculate_vertical_placement(
@@ -502,7 +496,6 @@ pub fn animate_window_show(window: &tauri::WebviewWindow, anchor: ShowAnchor) {
                     work_top,
                     work_bottom,
                     desired_height_px,
-                    minimum_height_px,
                     cursor_offset_px,
                 ),
                 ShowAnchor::Bottom => {
@@ -512,8 +505,6 @@ pub fn animate_window_show(window: &tauri::WebviewWindow, anchor: ShowAnchor) {
                     ((work_bottom - height as i32).max(work_top), height)
                 }
             };
-
-            target_x = target_x.clamp(work_left, max_x);
 
             let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize {
                 width: window_width_px,
@@ -640,25 +631,44 @@ fn calculate_vertical_placement(
     work_top: i32,
     work_bottom: i32,
     desired_height: u32,
-    minimum_height: u32,
     cursor_offset: i32,
 ) -> (i32, u32) {
     let below_candidate = cursor_y + cursor_offset;
     let available_below = (work_bottom - below_candidate).max(0) as u32;
+    let above_candidate = cursor_y - cursor_offset;
+    let available_above = (above_candidate - work_top).max(0) as u32;
 
-    if available_below >= minimum_height {
-        return (below_candidate, desired_height.min(available_below));
+    if available_below >= desired_height {
+        return (below_candidate, desired_height);
     }
 
-    // The cursor is too near the bottom to open a usable list below it. Open a
-    // compact list upward instead of a jarring full-height flip: cap the height
-    // at the compact minimum so only a short list appears above the cursor.
-    let available_above = (cursor_y - cursor_offset - work_top).max(minimum_height as i32) as u32;
-    let height = minimum_height.min(available_above);
-    (
-        (cursor_y - cursor_offset - height as i32).max(work_top),
-        height,
-    )
+    if available_above >= desired_height {
+        return (above_candidate - desired_height as i32, desired_height);
+    }
+
+    // Full height fits on neither side. Use the roomier side and shorten only
+    // as a last resort without drawing outside the work area.
+    let (opens_below, available) = if available_below >= available_above {
+        (true, available_below)
+    } else {
+        (false, available_above)
+    };
+    let height = desired_height.min(available);
+    if opens_below {
+        (below_candidate, height)
+    } else {
+        (above_candidate - height as i32, height)
+    }
+}
+
+fn calculate_horizontal_placement(
+    cursor_x: i32,
+    work_left: i32,
+    work_right: i32,
+    window_width: u32,
+) -> i32 {
+    let max_x = (work_right - window_width as i32).max(work_left);
+    (cursor_x - window_width as i32 / 2).clamp(work_left, max_x)
 }
 
 fn point_is_inside_rect(
@@ -901,33 +911,56 @@ pub fn update_tray_icon(tray: &TrayIcon, theme: &tauri::Theme) {
 
 #[cfg(test)]
 mod flyout_tests {
-    use super::{calculate_vertical_placement, point_is_inside_rect};
+    use super::{
+        calculate_horizontal_placement, calculate_vertical_placement, point_is_inside_rect,
+    };
     use windows::Win32::Foundation::{POINT, RECT};
 
     #[test]
     fn opens_full_height_below_the_cursor_when_space_allows() {
         assert_eq!(
-            calculate_vertical_placement(250, 12, 1392, 620, 300, 14),
+            calculate_vertical_placement(250, 12, 1392, 620, 14),
             (264, 620)
         );
     }
 
     #[test]
-    fn shrinks_below_the_cursor_before_flipping_upward() {
+    fn flips_full_height_above_instead_of_shrinking_below() {
         assert_eq!(
-            calculate_vertical_placement(962, 12, 1392, 620, 300, 14),
-            (976, 416)
+            calculate_vertical_placement(962, 12, 1392, 620, 14),
+            (328, 620)
         );
     }
 
     #[test]
-    fn flips_upward_as_a_compact_list_when_too_little_space_remains_below() {
-        // Near the bottom edge Cubby opens a compact list upward (capped at the
-        // minimum height), not a jarring full-height flip.
+    fn opens_full_height_above_near_the_bottom_edge() {
         assert_eq!(
-            calculate_vertical_placement(1272, 12, 1392, 620, 300, 14),
-            (958, 300)
+            calculate_vertical_placement(1272, 12, 1392, 620, 14),
+            (638, 620)
         );
+    }
+
+    #[test]
+    fn shortens_on_the_roomier_side_only_when_full_height_fits_neither_side() {
+        assert_eq!(
+            calculate_vertical_placement(500, 12, 900, 620, 14),
+            (12, 474)
+        );
+        assert_eq!(
+            calculate_vertical_placement(400, 12, 900, 620, 14),
+            (414, 486)
+        );
+    }
+
+    #[test]
+    fn centers_the_flyout_horizontally_on_the_cursor() {
+        assert_eq!(calculate_horizontal_placement(800, 12, 1588, 520), 540);
+    }
+
+    #[test]
+    fn clamps_centered_placement_to_monitor_edges() {
+        assert_eq!(calculate_horizontal_placement(50, 12, 1588, 520), 12);
+        assert_eq!(calculate_horizontal_placement(1550, 12, 1588, 520), 1068);
     }
 
     #[test]
