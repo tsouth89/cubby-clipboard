@@ -160,7 +160,9 @@
     "updateAvailable": "Update available! Version {{version}}",
     "noUpdates": "You're on the latest version",
     "updateError": "Failed to check for updates",
-    "copyContent": "Copy content"
+    "copyContent": "Copy content",
+    "skipSensitive": "Skip passwords and sensitive copies",
+    "skipSensitiveDesc": "When an app such as a password manager marks a copy as sensitive, Cubby won't save it (Windows' own clipboard history does the same). Turn this off to capture everything, including passwords."
   },
   "ai": {
     "processing": "Processing with AI...",
