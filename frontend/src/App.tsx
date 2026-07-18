@@ -14,6 +14,7 @@ import { useKeyboard } from './hooks/useKeyboard';
 import { useTheme } from './hooks/useTheme';
 import { useLanguage } from './hooks/useLanguage';
 import { useSystemAccent } from './hooks/useSystemAccent';
+import { useUpdater } from './hooks/useUpdater';
 import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
 import { generateDemoClips } from './debug/demoData';
@@ -48,6 +49,7 @@ function App() {
 
   const effectiveTheme = useTheme(theme);
   useSystemAccent();
+  useUpdater();
   useLanguage(settings?.language);
   const { t } = useTranslation();
   const hasRoundedCorners = settings?.round_corners ?? true;
