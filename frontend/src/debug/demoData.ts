@@ -191,5 +191,5 @@ export function generateDemoClips(): ClipboardItem[] {
       source_icon: null,
       metadata: JSON.stringify({ size_bytes: 92160 }),
     },
-  ].map((clip) => ({ ...clip, is_pinned: false }));
+  ].map((clip) => ({ ...clip, is_pinned: false, ocr_match: null }));
 }

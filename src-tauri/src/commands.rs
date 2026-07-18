@@ -1,5 +1,5 @@
 use crate::database::Database;
-use crate::models::{Clip, ClipboardItem, Folder, FolderItem};
+use crate::models::{Clip, ClipboardItem, Folder, FolderItem, OcrMatch};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use clipboard_rs::common::RustImage;
 use clipboard_rs::{Clipboard, ClipboardContent, ClipboardContext, RustImageData};
@@ -27,7 +27,129 @@ fn clip_to_list_item(clip: &Clip) -> ClipboardItem {
         source_app: clip.source_app.clone(),
         source_icon: clip.source_icon.clone(),
         metadata: clip.metadata.clone(),
+        ocr_match: None,
     }
+}
+
+const OCR_SNIPPET_CHAR_LIMIT: usize = 96;
+
+fn find_case_insensitive(haystack: &str, needle: &str) -> Option<(usize, usize)> {
+    let folded_needle = needle.to_lowercase();
+    if folded_needle.is_empty() {
+        return None;
+    }
+
+    for (start, _) in haystack.char_indices() {
+        let mut folded_candidate = String::new();
+        for (relative_start, character) in haystack[start..].char_indices() {
+            folded_candidate.extend(character.to_lowercase());
+            if !folded_needle.starts_with(&folded_candidate) {
+                break;
+            }
+            if folded_candidate == folded_needle {
+                return Some((start, start + relative_start + character.len_utf8()));
+            }
+        }
+    }
+
+    None
+}
+
+fn normalize_ocr_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn tail_chars(value: &str, limit: usize) -> (String, bool) {
+    let characters: Vec<char> = value.chars().collect();
+    if characters.len() <= limit {
+        return (value.to_string(), false);
+    }
+
+    let mut tail: String = characters[characters.len() - limit..].iter().collect();
+    if let Some(first_space) = tail.find(char::is_whitespace) {
+        tail = tail[first_space..].trim_start().to_string();
+    }
+    (tail, true)
+}
+
+fn head_chars(value: &str, limit: usize) -> (String, bool) {
+    let characters: Vec<char> = value.chars().collect();
+    if characters.len() <= limit {
+        return (value.to_string(), false);
+    }
+
+    let mut head: String = characters[..limit].iter().collect();
+    if let Some(last_space) = head.rfind(char::is_whitespace) {
+        head.truncate(last_space);
+    }
+    (head, true)
+}
+
+fn build_ocr_match(ocr_text: &str, query: &str) -> Option<OcrMatch> {
+    let query = query.trim();
+    let (match_start, match_end) = find_case_insensitive(ocr_text, query)?;
+    let matched = normalize_ocr_whitespace(&ocr_text[match_start..match_end]);
+    let before = normalize_ocr_whitespace(&ocr_text[..match_start]);
+    let after = normalize_ocr_whitespace(&ocr_text[match_end..]);
+
+    let matched_length = matched.chars().count();
+    if matched_length >= OCR_SNIPPET_CHAR_LIMIT {
+        let (mut matched, cropped) = head_chars(&matched, OCR_SNIPPET_CHAR_LIMIT - 1);
+        if cropped {
+            matched.push('…');
+        }
+        return Some(OcrMatch {
+            before: String::new(),
+            matched,
+            after: String::new(),
+        });
+    }
+
+    // Reserve the maximum decoration cost: one separator and one ellipsis on
+    // each side. Very long matches remain useful on their own without context.
+    if matched_length + 4 >= OCR_SNIPPET_CHAR_LIMIT {
+        return Some(OcrMatch {
+            before: String::new(),
+            matched,
+            after: String::new(),
+        });
+    }
+
+    let remaining = OCR_SNIPPET_CHAR_LIMIT - matched_length - 4;
+    let before_limit = remaining / 2;
+    let after_limit = remaining - before_limit;
+    let (mut before, before_cropped) = tail_chars(&before, before_limit);
+    let (mut after, after_cropped) = head_chars(&after, after_limit);
+
+    if before_cropped {
+        before = format!("…{before}");
+    }
+    if !before.is_empty() {
+        before.push(' ');
+    }
+    if !after.is_empty() {
+        after.insert(0, ' ');
+    }
+    if after_cropped {
+        after.push('…');
+    }
+
+    Some(OcrMatch {
+        before,
+        matched,
+        after,
+    })
+}
+
+fn clip_to_search_item(clip: &Clip, query: &str) -> ClipboardItem {
+    let mut item = clip_to_list_item(clip);
+    if clip.clip_type == "image" {
+        item.ocr_match = clip
+            .ocr_text
+            .as_deref()
+            .and_then(|text| build_ocr_match(text, query));
+    }
+    item
 }
 
 fn decrypt_clip_fields(db: &Database, clip: &mut Clip) -> Result<(), String> {
@@ -59,6 +181,7 @@ fn clip_to_detail_item(clip: &Clip, full_image_content: Option<&[u8]>) -> Clipbo
         source_app: clip.source_app.clone(),
         source_icon: clip.source_icon.clone(),
         metadata: clip.metadata.clone(),
+        ocr_match: None,
     }
 }
 
@@ -980,7 +1103,10 @@ pub async fn search_clips(
         .count();
     let raw_bytes: usize = clips.iter().map(|clip| clip.content.len()).sum();
     let map_started = Instant::now();
-    let items: Vec<ClipboardItem> = clips.iter().map(clip_to_list_item).collect();
+    let items: Vec<ClipboardItem> = clips
+        .iter()
+        .map(|clip| clip_to_search_item(clip, &query))
+        .collect();
     let map_ms = map_started.elapsed().as_millis();
     let total_ms = started.elapsed().as_millis();
     log::info!(
@@ -1392,9 +1518,10 @@ pub async fn import_from_ditto(
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_clips_in_pool, clipboard_contents_for_restore, enforce_retention_in_pool,
-        migrate_clip_format_model, migrate_encrypted_storage, remove_clip_image_files,
-        restore_hash_material, toggle_clip_pin_in_pool, ClipboardContent,
+        build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore,
+        enforce_retention_in_pool, migrate_clip_format_model, migrate_encrypted_storage,
+        remove_clip_image_files, restore_hash_material, toggle_clip_pin_in_pool, ClipboardContent,
+        OCR_SNIPPET_CHAR_LIMIT,
     };
     use crate::clipboard::CapturedFormat;
     use crate::database::Database;
@@ -1419,6 +1546,47 @@ mod tests {
         };
         database.migrate().await.expect("migration should succeed");
         database
+    }
+
+    #[test]
+    fn ocr_match_centers_and_highlights_the_query() {
+        let ocr_text = "The application could not start because the Windows clipboard history service is unavailable. Restart the computer and try again.";
+        let matched = build_ocr_match(ocr_text, "windows clipboard history")
+            .expect("OCR query should produce a visible match");
+
+        assert_eq!(matched.matched, "Windows clipboard history");
+        assert!(matched.before.starts_with('…'));
+        assert!(matched.before.ends_with("because the "));
+        assert!(matched.after.starts_with(" service is unavailable."));
+        assert!(matched.after.ends_with('…'));
+        assert!(
+            format!("{}{}{}", matched.before, matched.matched, matched.after)
+                .chars()
+                .count()
+                <= OCR_SNIPPET_CHAR_LIMIT
+        );
+    }
+
+    #[test]
+    fn ocr_match_is_case_insensitive_and_collapses_line_breaks() {
+        let matched = build_ocr_match(
+            "Receipt total\n\nCONFIRMATION NUMBER\nABCD-1234",
+            "confirmation number",
+        )
+        .expect("case-insensitive OCR query should match");
+
+        assert_eq!(matched.before, "Receipt total ");
+        assert_eq!(matched.matched, "CONFIRMATION NUMBER");
+        assert_eq!(matched.after, " ABCD-1234");
+    }
+
+    #[test]
+    fn ocr_match_returns_none_for_unrelated_text() {
+        assert_eq!(
+            build_ocr_match("A recipe for tomato soup", "error code"),
+            None
+        );
+        assert_eq!(build_ocr_match("Some OCR text", "   "), None);
     }
 
     #[tokio::test]

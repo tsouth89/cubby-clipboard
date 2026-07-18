@@ -9,6 +9,13 @@ export interface ClipboardItem {
   source_app: string | null;
   source_icon: string | null;
   metadata: string | null;
+  ocr_match: OcrMatch | null;
+}
+
+export interface OcrMatch {
+  before: string;
+  matched: string;
+  after: string;
 }
 
 export interface FolderItem {
