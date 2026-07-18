@@ -19,7 +19,7 @@ folder for supported behavior.
 | Text/image-only storage model | Replaced with encrypted text, HTML, RTF, image, and file-list preservation |
 | Plaintext clipboard storage | Replaced with AES-256-GCM payload encryption and a Windows DPAPI-protected key |
 | Inline/best-effort screenshot OCR | Replaced with a durable, recoverable single-worker queue using local Windows OCR |
-| SQLite/linear search | Still decrypts candidate rows and performs substring matching in Rust; encrypted-safe indexing remains planned |
+| SQLite/linear search | Replaced with an encrypted-at-rest-safe, memory-only trigram index; SQLite remains authoritative for order, folders, pins, and pagination |
 | Generic synthetic paste | Replaced with target-aware paste behavior and dedicated local/remote compatibility harnesses |
 | Generic popup placement | Replaced with cursor-anchored, monitor-aware Windows 11 flyout placement |
 | Upstream telemetry and AI UI | Removed; the desktop app contains no analytics, cloud AI, or API-key configuration |
@@ -28,13 +28,11 @@ folder for supported behavior.
 
 ## Remaining architecture work
 
-1. Add an encrypted-at-rest-safe search index without persisting plaintext
-   clipboard or OCR content.
-2. Continue accessibility validation with Narrator, high contrast, keyboard-only
+1. Continue accessibility validation with Narrator, high contrast, keyboard-only
    navigation, DPI changes, and multi-monitor placement.
-3. Expand clipboard and OCR fixtures across Windows applications, languages,
+2. Expand clipboard and OCR fixtures across Windows applications, languages,
    RDP, and representative remote-support tools.
-4. Keep the custom `window-vibrancy` source pinned and reviewed until it can be
+3. Keep the custom `window-vibrancy` source pinned and reviewed until it can be
    replaced with an appropriate maintained dependency.
 
 The live acceptance evidence is recorded in `CAPTURE_PROBE_RESULTS.md`,

@@ -397,6 +397,7 @@ async fn mark_completed(db: &Database, clip_uuid: &str, text: &str) -> Result<()
     .execute(&db.pool)
     .await
     .map_err(|error| error.to_string())?;
+    db.search_index.update_ocr(clip_uuid, text.trim());
     Ok(())
 }
 
@@ -505,6 +506,7 @@ mod tests {
             pool,
             crypto: Arc::new(CryptoManager::ephemeral()),
             image_dir: std::env::temp_dir().join(format!("cubby-ocr-{}", uuid::Uuid::new_v4())),
+            search_index: Arc::new(crate::search_index::SearchIndex::default()),
         };
         database.migrate().await.expect("migration should succeed");
         database

@@ -3,12 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::crypto::CryptoManager;
+use crate::search_index::SearchIndex;
 
 #[derive(Clone)]
 pub struct Database {
     pub pool: SqlitePool,
     pub crypto: Arc<CryptoManager>,
     pub image_dir: PathBuf,
+    pub search_index: Arc<SearchIndex>,
 }
 
 impl Database {
@@ -54,6 +56,7 @@ impl Database {
             pool,
             crypto,
             image_dir,
+            search_index: Arc::new(crate::search_index::SearchIndex::default()),
         })
     }
 
@@ -298,6 +301,7 @@ mod tests {
             pool,
             crypto: Arc::new(CryptoManager::ephemeral()),
             image_dir: std::env::temp_dir().join(format!("cubby-test-{}", uuid::Uuid::new_v4())),
+            search_index: Arc::new(crate::search_index::SearchIndex::default()),
         };
         database.migrate().await.expect("migration should succeed");
 

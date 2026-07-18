@@ -24,6 +24,7 @@ mod models;
 mod ocr;
 mod ocr_queue;
 pub mod paste_engine;
+mod search_index;
 mod settings_commands;
 mod settings_manager;
 mod shortcuts;
@@ -60,6 +61,16 @@ pub fn run_app() {
     });
 
     let db_arc = Arc::new(db);
+    let search_db = db_arc.clone();
+    rt.spawn(async move {
+        if let Err(error) = search_db
+            .search_index
+            .ensure_ready(&search_db.pool, &search_db.crypto)
+            .await
+        {
+            log::error!("SEARCH: Could not build the in-memory index: {error}");
+        }
+    });
 
     let mut log_builder = tauri_plugin_log::Builder::default()
         .format(|out, message, record| {
