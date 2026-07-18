@@ -2,6 +2,12 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
+## v1.0.1
+
+### Fixed
+- The welcome guide now shows Win+V, the default way to open Cubby, instead of the raw configured shortcut name
+- When Cubby opens near the bottom of the screen it now shows a compact list above the cursor instead of a jarring full-height window
+
 ## v1.0.0
 
 ### Added
