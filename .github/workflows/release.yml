@@ -306,4 +306,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
-        run: gh release edit "$RELEASE_TAG" --draft=false
+        # -R is required: this job has no checkout, so gh has no git context.
+        run: gh release edit "$RELEASE_TAG" -R ${{ github.repository }} --draft=false
