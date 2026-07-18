@@ -4,7 +4,7 @@
   const capture = (event, properties = {}) => {
     const payload = JSON.stringify({
       event,
-      pathname: `${location.pathname}${location.search}`,
+      pathname: location.pathname,
       referrer: document.referrer,
       ...properties,
     });

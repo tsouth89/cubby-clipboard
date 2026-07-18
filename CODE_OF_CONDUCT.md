@@ -6,4 +6,4 @@ Harassment, discrimination, threats, sexualized attention, deliberate intimidati
 
 Report conduct concerns privately through a [GitHub security advisory](https://github.com/tsouth89/cubby-clipboard/security/advisories/new). Reports will be reviewed promptly and handled as confidentially as practical. Good-faith reporters will not face retaliation.
 
-This code applies in project spaces and when someone is publicly representing the project.
+This Code of Conduct applies in project spaces and when someone is publicly representing the project.

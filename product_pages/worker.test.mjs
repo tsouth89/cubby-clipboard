@@ -30,8 +30,8 @@ test("aggregateReleases counts executable downloads without checksum assets", ()
   assert.equal(result.latest, 20);
   assert.equal(result.releases[0].assets.length, 2);
 });
-test("safePath accepts local paths and rejects untrusted values", () => {
-  assert.equal(safePath("/download?from=hero"), "/download?from=hero");
+test("safePath keeps only local pathnames and rejects untrusted values", () => {
+  assert.equal(safePath("/download?from=hero"), "/download");
   assert.equal(safePath("https://example.com"), "/");
   assert.equal(safePath(null), "/");
 });

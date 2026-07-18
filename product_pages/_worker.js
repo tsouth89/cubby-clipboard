@@ -278,14 +278,14 @@ async function getWebsiteMetrics(env) {
     return unavailableWebsite("Add POSTHOG_QUERY_KEY and POSTHOG_PROJECT_ID to unlock website analytics.");
   }
 
-  const conditions = "event = '$pageview' AND properties.$host = 'cubbyclipboard.com' AND timestamp >= now() - INTERVAL 30 DAY";
+  const conditions = "event = '$pageview' AND properties.$host = 'cubbyclipboard.com' AND properties.source = 'cubbyclipboard.com' AND timestamp >= now() - INTERVAL 30 DAY";
   try {
     const [dailyRows, totalRows, referrerRows, pathRows, clickRows] = await Promise.all([
       hogql(env, `SELECT toString(toDate(timestamp)) AS day, count() AS views, count(DISTINCT person_id) AS uniques FROM events WHERE ${conditions} GROUP BY day ORDER BY day`),
       hogql(env, `SELECT count(DISTINCT person_id), count() FROM events WHERE ${conditions}`),
       hogql(env, `SELECT properties.$referring_domain AS ref, count() AS views FROM events WHERE ${conditions} AND ref IS NOT NULL AND ref != '' AND ref != '$direct' AND ref NOT ILIKE '%cubbyclipboard.com%' GROUP BY ref ORDER BY views DESC LIMIT 10`),
       hogql(env, `SELECT properties.$pathname AS path, count() AS views, count(DISTINCT person_id) AS uniques FROM events WHERE ${conditions} GROUP BY path ORDER BY views DESC LIMIT 10`),
-      hogql(env, "SELECT count(), count(DISTINCT person_id) FROM events WHERE event = 'download_clicked' AND properties.$host = 'cubbyclipboard.com' AND timestamp >= now() - INTERVAL 30 DAY"),
+      hogql(env, "SELECT count(), count(DISTINCT person_id) FROM events WHERE event = 'download_clicked' AND properties.$host = 'cubbyclipboard.com' AND properties.source = 'cubbyclipboard.com' AND timestamp >= now() - INTERVAL 30 DAY"),
     ]);
     const days = fillWebsiteDays(dailyRows);
     const totals = totalRows[0] || [];
@@ -437,7 +437,7 @@ function sameOrigin(request) {
 
 export function safePath(value) {
   if (typeof value !== "string" || !value.startsWith("/")) return "/";
-  return value.replace(/[\r\n]/g, "").slice(0, 300);
+  return value.replace(/[\r\n]/g, "").split(/[?#]/, 1)[0].slice(0, 300) || "/";
 }
 
 function safeLabel(value, maxLength) {

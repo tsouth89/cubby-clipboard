@@ -23,7 +23,7 @@ export function useUpdater() {
     let active = true;
 
     const checkForUpdate = async () => {
-      if (checkInFlightRef.current) return;
+      if (!active || checkInFlightRef.current) return;
       checkInFlightRef.current = true;
 
       let update: Update | null = null;
