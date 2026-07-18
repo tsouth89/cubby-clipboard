@@ -47,10 +47,12 @@ Both places must have identical toggle logic. Issue #6 was caused by `register_g
 
 ### Cursor-anchored flyout
 The main window is a compact flyout. `animate_window_show` reads the physical
-cursor position and opens below and to the right. It shortens vertically to stay
-below the cursor when at least `MIN_WINDOW_HEIGHT` remains, and only flips upward
-inside the final minimum-height region near the taskbar. It may flip left near
-the monitor's right edge. Do not restore full-monitor shelf sizing.
+cursor position and centers the flyout horizontally around it. It opens at full
+height below the cursor when possible, then flips to full height above the cursor
+when there is not enough room below. It shortens vertically on the roomier side
+only when full height fits on neither side. The cursor stays just outside the
+nearest vertical edge, and the window clamps to the monitor work area without
+moving the cursor. Do not restore full-monitor shelf sizing.
 
 ### Blur → Auto-hide
 `on_window_event` → `Focused(false)` → skips if: settings window is open,

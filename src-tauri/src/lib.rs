@@ -487,6 +487,7 @@ pub fn animate_window_show(window: &tauri::WebviewWindow, anchor: ShowAnchor) {
             let work_top = work_area.position.y + margin_px;
             let work_right = work_area.position.x + work_area.size.width as i32 - margin_px;
             let work_bottom = work_area.position.y + work_area.size.height as i32 - margin_px;
+            let window_width_px = fit_window_width(window_width_px, work_left, work_right);
             let target_x =
                 calculate_horizontal_placement(cursor.x, work_left, work_right, window_width_px);
 
@@ -669,6 +670,10 @@ fn calculate_horizontal_placement(
 ) -> i32 {
     let max_x = (work_right - window_width as i32).max(work_left);
     (cursor_x - window_width as i32 / 2).clamp(work_left, max_x)
+}
+
+fn fit_window_width(requested_width: u32, work_left: i32, work_right: i32) -> u32 {
+    requested_width.min((work_right - work_left).max(1) as u32)
 }
 
 fn point_is_inside_rect(
@@ -912,7 +917,8 @@ pub fn update_tray_icon(tray: &TrayIcon, theme: &tauri::Theme) {
 #[cfg(test)]
 mod flyout_tests {
     use super::{
-        calculate_horizontal_placement, calculate_vertical_placement, point_is_inside_rect,
+        calculate_horizontal_placement, calculate_vertical_placement, fit_window_width,
+        point_is_inside_rect,
     };
     use windows::Win32::Foundation::{POINT, RECT};
 
@@ -961,6 +967,12 @@ mod flyout_tests {
     fn clamps_centered_placement_to_monitor_edges() {
         assert_eq!(calculate_horizontal_placement(50, 12, 1588, 520), 12);
         assert_eq!(calculate_horizontal_placement(1550, 12, 1588, 520), 1068);
+    }
+
+    #[test]
+    fn caps_the_flyout_width_to_unusually_narrow_work_areas() {
+        assert_eq!(fit_window_width(520, 12, 412), 400);
+        assert_eq!(fit_window_width(520, 12, 1588), 520);
     }
 
     #[test]
