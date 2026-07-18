@@ -92,7 +92,30 @@ fn build_ocr_match(ocr_text: &str, query: &str) -> Option<OcrMatch> {
     let before = normalize_ocr_whitespace(&ocr_text[..match_start]);
     let after = normalize_ocr_whitespace(&ocr_text[match_end..]);
 
-    let remaining = OCR_SNIPPET_CHAR_LIMIT.saturating_sub(matched.chars().count());
+    let matched_length = matched.chars().count();
+    if matched_length >= OCR_SNIPPET_CHAR_LIMIT {
+        let (mut matched, cropped) = head_chars(&matched, OCR_SNIPPET_CHAR_LIMIT - 1);
+        if cropped {
+            matched.push('…');
+        }
+        return Some(OcrMatch {
+            before: String::new(),
+            matched,
+            after: String::new(),
+        });
+    }
+
+    // Reserve the maximum decoration cost: one separator and one ellipsis on
+    // each side. Very long matches remain useful on their own without context.
+    if matched_length + 4 >= OCR_SNIPPET_CHAR_LIMIT {
+        return Some(OcrMatch {
+            before: String::new(),
+            matched,
+            after: String::new(),
+        });
+    }
+
+    let remaining = OCR_SNIPPET_CHAR_LIMIT - matched_length - 4;
     let before_limit = remaining / 2;
     let after_limit = remaining - before_limit;
     let (mut before, before_cropped) = tail_chars(&before, before_limit);
@@ -1498,6 +1521,7 @@ mod tests {
         build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore,
         enforce_retention_in_pool, migrate_clip_format_model, migrate_encrypted_storage,
         remove_clip_image_files, restore_hash_material, toggle_clip_pin_in_pool, ClipboardContent,
+        OCR_SNIPPET_CHAR_LIMIT,
     };
     use crate::clipboard::CapturedFormat;
     use crate::database::Database;
@@ -1531,13 +1555,15 @@ mod tests {
             .expect("OCR query should produce a visible match");
 
         assert_eq!(matched.matched, "Windows clipboard history");
+        assert!(matched.before.starts_with('…'));
         assert!(matched.before.ends_with("because the "));
         assert!(matched.after.starts_with(" service is unavailable."));
+        assert!(matched.after.ends_with('…'));
         assert!(
             format!("{}{}{}", matched.before, matched.matched, matched.after)
                 .chars()
                 .count()
-                <= 98
+                <= OCR_SNIPPET_CHAR_LIMIT
         );
     }
 
