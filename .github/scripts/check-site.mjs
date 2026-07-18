@@ -37,7 +37,12 @@ for (const forbidden of ['PastePaw', 'macOS', 'linear-gradient', 'purple', 'viol
   }
 }
 
-if (pages.length !== 4) errors.push(`expected 4 HTML pages, found ${pages.length}`);
+// Em/en dashes read as AI-written. Use a regular hyphen, comma, or period.
+if (combined.includes('—') || combined.includes('–')) {
+  errors.push('active site contains an em or en dash (use a regular hyphen, comma, or period)');
+}
+
+if (pages.length !== 5) errors.push(`expected 5 HTML pages, found ${pages.length}`);
 if (!files.has('_headers')) errors.push('missing Cloudflare Pages security headers');
 
 if (errors.length) {
