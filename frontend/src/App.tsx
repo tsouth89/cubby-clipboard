@@ -965,13 +965,31 @@ function App() {
                   ? t('pasteContext.copyAction')
                   : t('contextMenu.paste')}
               </span>
-              {selectedClipId &&
-                visibleClips.find((clip) => clip.id === selectedClipId)?.clip_type !== 'image' && (
-                  <span>
-                    <kbd>Shift</kbd>
-                    <kbd>Enter</kbd> Plain
-                  </span>
-                )}
+              {(() => {
+                const selected = selectedClipId
+                  ? visibleClips.find((clip) => clip.id === selectedClipId)
+                  : undefined;
+                if (!selected) return null;
+                // Non-images paste as plain text; image results with OCR paste
+                // their recognized text. Images without OCR have no Shift+Enter.
+                if (selected.clip_type !== 'image') {
+                  return (
+                    <span>
+                      <kbd>Shift</kbd>
+                      <kbd>Enter</kbd> Plain
+                    </span>
+                  );
+                }
+                if (selected.has_ocr_text) {
+                  return (
+                    <span>
+                      <kbd>Shift</kbd>
+                      <kbd>Enter</kbd> Text
+                    </span>
+                  );
+                }
+                return null;
+              })()}
               <span>
                 <kbd>Esc</kbd> Close
               </span>

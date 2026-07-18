@@ -378,6 +378,10 @@ pub fn run_app() {
                     Ok((deleted, image_paths)) => {
                         commands::remove_clip_image_files(&db_for_migration.image_dir, image_paths);
                         if deleted > 0 {
+                            // The eager index build can race ahead of retention; drop the
+                            // deleted clips' decrypted documents so they don't linger in
+                            // memory. The next search rebuilds without them.
+                            db_for_migration.search_index.invalidate();
                             log::info!("STARTUP: Retention removed {} expired or overflow items", deleted);
                         }
                     }

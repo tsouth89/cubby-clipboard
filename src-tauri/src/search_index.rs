@@ -168,9 +168,12 @@ impl SearchIndex {
                 );
             }
 
+            // Hold the write lock while rechecking the generation so a mutation
+            // cannot slip in between the check and the publish and get lost.
+            let mut state = self.state.write();
             if self.generation.load(Ordering::Acquire) == generation {
                 let count = next.documents.len();
-                *self.state.write() = Some(next);
+                *state = Some(next);
                 log::info!("SEARCH: Built encrypted-safe in-memory index for {count} clips");
                 return Ok(());
             }
