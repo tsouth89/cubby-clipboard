@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/tsouth89/cubby-clipboard/security/advisories/new
+    about: Report security issues privately. Do not include sensitive clipboard data in a public issue.
+  - name: Setup help
+    url: https://cubbyclipboard.com/start.html
+    about: Follow the installation and first-run guide.

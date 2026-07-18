@@ -23,10 +23,10 @@
       <p class="eyebrow">Privacy</p>
       <h1>Your clipboard stays yours.</h1>
       <p>Cubby is built to keep clipboard history useful without turning it into a cloud service.</p>
-      <div class="legal-meta">Last updated July 17, 2026</div>
+      <div class="legal-meta">Last updated July 18, 2026</div>
     </header>
     <article class="legal-content">
-      <div class="legal-callout"><p><strong>The short version:</strong> Cubby stores clipboard history locally on your Windows PC. It does not require an account and does not include telemetry, advertising, cloud sync, or network-backed AI features.</p></div>
+      <div class="legal-callout"><p><strong>The short version:</strong> Cubby stores clipboard history locally on your Windows PC. The desktop app does not include analytics, advertising, cloud sync, or network-backed AI features. This website collects limited, privacy-preserving visit counts.</p></div>
 
       <h2>What Cubby stores</h2>
       <p>To provide clipboard history, Cubby records supported content you copy while it is running. That currently includes plain text, HTML, RTF, images, and file lists, along with useful context such as the source application, content type, timestamps, and whether an item is pinned.</p>
@@ -36,14 +36,17 @@
       <ul>
         <li>No Cubby account or sign-in is required.</li>
         <li>No clipboard content is sent to Cubby or SouthForge AI servers.</li>
-        <li>No analytics or telemetry service receives your usage data.</li>
+        <li>The Cubby desktop app sends no product analytics or usage telemetry.</li>
         <li>No advertising identifiers are created.</li>
         <li>No AI service receives or processes your clipboard content.</li>
         <li>No cloud clipboard sync is included.</li>
       </ul>
 
       <h2>Network access</h2>
-      <p>The current early build is designed to operate locally. Future release infrastructure may use network access to check for app updates or open links you request. If that changes, this page will be updated before the behavior ships.</p>
+      <p>The desktop app uses network access to check GitHub periodically for signed updates and to open links you request. Update checks do not include clipboard content or product-usage events.</p>
+
+      <h2>Website analytics</h2>
+      <p>This website records page views and clicks on download and GitHub links so we can understand whether the site is useful. It does not load a third-party analytics script or set an analytics cookie. A first-party Cloudflare Worker hashes the request IP address, browser user agent, a private salt, and a 30-day rotation period before sending the event to PostHog. Raw IP addresses, browser user agents, and clipboard content are not included in the event sent to PostHog.</p>
 
       <h2>Sensitive information</h2>
       <p>Clipboard history can contain passwords, access tokens, personal messages, customer information, and other sensitive content. Cubby provides ignored-application controls so selected apps can be excluded from capture, but no exclusion system should be treated as a substitute for careful handling of secrets.</p>
@@ -53,7 +56,7 @@
       <p>You can delete individual clips, clear unpinned history while preserving pinned clips, or use the confirmed clear-everything action. Uninstalling Cubby may not automatically remove every application-data file; those files can be removed manually if you want to erase all remaining local history.</p>
 
       <h2>Third-party services</h2>
-      <p>The Cubby website may link to GitHub for source code, releases, and support. When you follow those links, GitHub’s own privacy terms apply. The Cubby desktop app does not send clipboard content to GitHub.</p>
+      <p>The Cubby website is served by Cloudflare, uses PostHog for the limited aggregate website metrics described above, and links to GitHub for source code, releases, and support. Those services process requests under their own privacy terms. The Cubby desktop app does not send clipboard content to any of them.</p>
 
       <h2>Changes to this policy</h2>
       <p>This policy will evolve as Cubby approaches a general release. Material changes will be reflected here and in the open-source repository.</p>
@@ -63,5 +66,6 @@
     </article>
   </main>
   <footer class="site-footer"><div class="shell footer-grid"><div><a class="brand footer-brand" href="index.html"><img class="brand-mark" src="brand-mark.svg" alt=""><span>cubby clipboard</span></a><p>A better place for what you copy.</p></div><nav aria-label="Footer navigation"><a href="privacy.html">Privacy</a><a href="terms.html">Terms</a><a href="support.html">Support</a><a href="https://github.com/tsouth89/cubby-clipboard">GitHub</a></nav></div><div class="shell footer-bottom"><span>© 2026 SouthForge AI</span><span>Free and open source · GPL-3.0</span></div></footer>
+  <script src="analytics.js" defer></script>
 </body>
 </html>
