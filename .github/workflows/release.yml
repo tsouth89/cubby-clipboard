@@ -191,6 +191,12 @@ jobs:
 
       - name: Build NSIS installer
         uses: tauri-apps/tauri-action@v1
+        env:
+          # createUpdaterArtifacts is on, so the build needs the updater key.
+          # This produces a .sig over the UNSIGNED installer; it is regenerated
+          # after Trusted Signing below so it matches the bytes users download.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: .
           args: --target ${{ matrix.target }} --bundles nsis
@@ -235,11 +241,63 @@ jobs:
           Copy-Item "${{ steps.installer.outputs.path }}" "${{ steps.installer.outputs.name }}"
           gh release upload "$env:TAG" "${{ steps.installer.outputs.name }}" --clobber
 
+      - name: Re-sign the installer for the updater (over the signed bytes)
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          # The updater verifies a signature over the installer's exact bytes.
+          # Trusted Signing changed those bytes after build, so regenerate the
+          # .sig over the signed installer. Overwrites the build-time .sig.
+          pnpm tauri signer sign --private-key "$env:TAURI_SIGNING_PRIVATE_KEY" --password "$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "${{ steps.installer.outputs.path }}"
+          Copy-Item "${{ steps.installer.outputs.path }}.sig" "${{ steps.installer.outputs.name }}.sig"
+
+      - name: Upload the updater signature
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+        run: |
+          gh release upload "$env:TAG" "${{ steps.installer.outputs.name }}.sig" --clobber
+
+  updater-manifest:
+    name: Assemble updater manifest
+    needs: [create-release, build-installers]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build and upload latest.json
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+        run: |
+          REPO="tsouth89/cubby-clipboard"
+          NAME_X64="Cubby.Clipboard_${VERSION}_x64-setup.exe"
+          NAME_ARM="Cubby.Clipboard_${VERSION}_arm64-setup.exe"
+          BASE="https://github.com/${REPO}/releases/download/${TAG}"
+          gh release download "$TAG" -R "$REPO" -p "${NAME_X64}.sig" -p "${NAME_ARM}.sig" -D sigs
+          SIG_X64=$(cat "sigs/${NAME_X64}.sig")
+          SIG_ARM=$(cat "sigs/${NAME_ARM}.sig")
+          PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          jq -n \
+            --arg v "$VERSION" --arg d "$PUB_DATE" \
+            --arg sx "$SIG_X64" --arg ux "${BASE}/${NAME_X64}" \
+            --arg sa "$SIG_ARM" --arg ua "${BASE}/${NAME_ARM}" \
+            '{version:$v, pub_date:$d, platforms:{"windows-x86_64":{signature:$sx,url:$ux},"windows-aarch64":{signature:$sa,url:$ua}}}' \
+            > latest.json
+          gh release upload "$TAG" latest.json --clobber
+
   publish-release:
     name: Publish validated release
     if: github.event_name != 'workflow_dispatch'
     # Gate publishing on validate too, since create-release/build no longer do.
-    needs: [validate, create-release, build-installers]
+    needs: [validate, create-release, build-installers, updater-manifest]
     runs-on: ubuntu-latest
     permissions:
       contents: write

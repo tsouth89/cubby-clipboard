@@ -200,5 +200,12 @@
     "pointUse": "Click an item (or press Enter) to paste it. Pin the ones you want to keep.",
     "pointPrivate": "Your history is encrypted and stays on this PC. Nothing is uploaded.",
     "dismiss": "Got it"
+  },
+  "updater": {
+    "available": "Cubby {{version}} is available.",
+    "install": "Update now",
+    "installing": "Downloading update…",
+    "restarting": "Update ready — restarting Cubby…",
+    "failed": "Update failed. Please try again later."
   }
 }
