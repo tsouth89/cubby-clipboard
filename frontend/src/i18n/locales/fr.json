@@ -10,7 +10,9 @@
     "search": "Rechercher",
     "loading": "Chargement...",
     "copied": "Copié dans le presse-papiers",
-    "pasteSuccess": "Collé avec succès"
+    "pasteSuccess": "Collé avec succès",
+    "pause": "Pause",
+    "resume": "Reprendre"
   },
   "clipList": {
     "empty": "Aucun élément pour le moment",
@@ -55,6 +57,16 @@
     "shortcuts": "Raccourcis",
     "privacyExceptions": "Exceptions de confidentialité",
     "dataManagement": "Gestion des données",
+    "ocrIndex": "Index de recherche des captures d’écran",
+    "ocrIndexing": "Indexation des captures d’écran",
+    "ocrPaused": "Indexation des captures d’écran en pause",
+    "ocrReady": "Index des captures d’écran prêt",
+    "ocrNeedsAttention": "L’index des captures d’écran nécessite votre attention",
+    "ocrUnavailableDesc": "La reconnaissance OCR de Windows est indisponible. Installez un module linguistique OCR dans les paramètres de langue de Windows, puis réessayez.",
+    "ocrIndexDesc": "Cubby indexe localement le texte des captures d’écran en arrière-plan. Les images ne sont jamais envoyées.",
+    "ocrProgress": "{{completed}} indexées · {{remaining}} restantes · {{failed}} à vérifier",
+    "ocrRetry": "Réessayer les images en échec",
+    "ocrRetryQueued": "{{count}} images ajoutées pour une nouvelle tentative OCR",
     "aiConfiguration": "Configuration de l'IA",
     "customPrompts": "Prompts personnalisés",
     "customPromptsDesc": "Laissez vide pour utiliser les prompts par défaut.",

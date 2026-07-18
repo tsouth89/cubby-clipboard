@@ -10,7 +10,9 @@
     "search": "搜索",
     "loading": "加载中...",
     "copied": "已复制到剪贴板",
-    "pasteSuccess": "粘贴成功"
+    "pasteSuccess": "粘贴成功",
+    "pause": "暂停",
+    "resume": "继续"
   },
   "clipList": {
     "empty": "暂无剪贴",
@@ -55,6 +57,16 @@
     "shortcuts": "快捷键",
     "privacyExceptions": "隐私例外",
     "dataManagement": "数据管理",
+    "ocrIndex": "截图搜索索引",
+    "ocrIndexing": "正在索引截图",
+    "ocrPaused": "截图索引已暂停",
+    "ocrReady": "截图索引已就绪",
+    "ocrNeedsAttention": "截图索引需要处理",
+    "ocrUnavailableDesc": "Windows OCR 不可用。请在 Windows 语言设置中安装 OCR 语言包，然后重试。",
+    "ocrIndexDesc": "Cubby 会在后台本地索引截图文字，图片绝不会上传。",
+    "ocrProgress": "已索引 {{completed}} 项 · 剩余 {{remaining}} 项 · {{failed}} 项需要处理",
+    "ocrRetry": "重试失败的图片",
+    "ocrRetryQueued": "已将 {{count}} 张图片加入 OCR 重试队列",
     "aiConfiguration": "AI 配置",
     "customPrompts": "自定义提示词",
     "customPromptsDesc": "留空则使用默认提示词。",

@@ -10,7 +10,9 @@
     "search": "Suchen",
     "loading": "Wird geladen...",
     "copied": "In die Zwischenablage kopiert",
-    "pasteSuccess": "Erfolgreich eingefügt"
+    "pasteSuccess": "Erfolgreich eingefügt",
+    "pause": "Pausieren",
+    "resume": "Fortsetzen"
   },
   "clipList": {
     "empty": "Noch keine Einträge",
@@ -55,6 +57,16 @@
     "shortcuts": "Tastenkombinationen",
     "privacyExceptions": "Datenschutz-Ausnahmen",
     "dataManagement": "Datenverwaltung",
+    "ocrIndex": "Screenshot-Suchindex",
+    "ocrIndexing": "Screenshots werden indexiert",
+    "ocrPaused": "Screenshot-Indexierung pausiert",
+    "ocrReady": "Screenshot-Index ist bereit",
+    "ocrNeedsAttention": "Screenshot-Index erfordert Aufmerksamkeit",
+    "ocrUnavailableDesc": "Windows OCR ist nicht verfügbar. Installiere ein OCR-Sprachpaket in den Windows-Spracheinstellungen und versuche es erneut.",
+    "ocrIndexDesc": "Cubby indexiert Screenshot-Text lokal im Hintergrund. Bilder werden nie hochgeladen.",
+    "ocrProgress": "{{completed}} indexiert · {{remaining}} ausstehend · {{failed}} benötigen Aufmerksamkeit",
+    "ocrRetry": "Fehlgeschlagene Bilder erneut versuchen",
+    "ocrRetryQueued": "{{count}} Bilder für einen neuen OCR-Versuch eingeplant",
     "aiConfiguration": "KI-Konfiguration",
     "customPrompts": "Benutzerdefinierte Prompts",
     "customPromptsDesc": "Leer lassen, um die Standard-Prompts zu verwenden.",
