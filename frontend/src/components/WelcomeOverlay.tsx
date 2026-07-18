@@ -2,20 +2,19 @@ import { Clipboard, Keyboard, Lock, Pin } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 interface WelcomeOverlayProps {
-  hotkey: string;
   onDismiss: () => void;
 }
 
 /**
- * First-run welcome shown over the flyout until the user dismisses it. Aimed at
- * non-technical users who just installed Cubby and need to know it's running,
- * how to open it, and what it does.
+ * First-run welcome shown over the flyout until the user dismisses it. Tells the
+ * user Cubby is running, how to open it, and what it does. References Win+V,
+ * which replaces the native flyout by default.
  */
-export function WelcomeOverlay({ hotkey, onDismiss }: WelcomeOverlayProps) {
+export function WelcomeOverlay({ onDismiss }: WelcomeOverlayProps) {
   const { t } = useTranslation();
 
   const points = [
-    { icon: Keyboard, text: t('onboarding.pointOpen', { hotkey }) },
+    { icon: Keyboard, text: t('onboarding.pointOpen') },
     { icon: Clipboard, text: t('onboarding.pointAuto') },
     { icon: Pin, text: t('onboarding.pointUse') },
     { icon: Lock, text: t('onboarding.pointPrivate') },
