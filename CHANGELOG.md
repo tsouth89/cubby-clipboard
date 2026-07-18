@@ -2,6 +2,30 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
+## v1.0.0
+
+### Added
+- First-run welcome guide so new users know how to open and use Cubby
+- Automatic updates: Cubby checks for new versions and installs them for you
+- Skips clipboard items that apps such as password managers mark as sensitive, with a setting to capture everything if you prefer
+- Offline text recognition for copied screenshots, so images are searchable by the text inside them
+- Import clipboard history and pinned items from Ditto
+- The configured hotkey opens Cubby inside supported remote sessions when the remote client's keyboard forwarding is off
+
+### Changed
+- Windows installers are now digitally signed, so Windows recognizes Cubby's publisher
+
+### 新增
+- 首次启动引导，帮助新用户了解如何打开和使用 Cubby
+- 自动更新：Cubby 会检查新版本并为您安装
+- 自动跳过应用（如密码管理器）标记为敏感的剪贴板内容，并提供设置以在需要时捕获全部内容
+- 对复制的截图进行离线文字识别，使图片可按其中的文字进行搜索
+- 从 Ditto 导入剪贴板历史和固定项目
+- 当远程客户端关闭键盘转发时，配置的快捷键可在受支持的远程会话中打开 Cubby
+
+### 变更
+- Windows 安装程序现已进行数字签名，使 Windows 能够识别 Cubby 的发布者
+
 ## v0.1.0-beta.2
 
 ### Added
