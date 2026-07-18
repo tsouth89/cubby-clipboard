@@ -59,6 +59,7 @@ pub fn set_ignore_hash(hash: String) {
 }
 
 pub fn init(app: &AppHandle, db: Arc<Database>) {
+    crate::ocr_queue::init(db.clone());
     let (snapshot_tx, mut snapshot_rx) = tokio::sync::mpsc::unbounded_channel();
     let app_for_consumer = app.clone();
     let db_for_consumer = db.clone();
@@ -634,8 +635,8 @@ async fn process_clipboard_snapshot(
 
         if let Err(error) = sqlx::query(
             r#"
-            INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash, folder_id, is_deleted, is_thumbnail, source_app, source_icon, metadata, created_at, last_accessed)
-            VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash, folder_id, is_deleted, is_thumbnail, source_app, source_icon, metadata, ocr_status, created_at, last_accessed)
+            VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             "#,
         )
         .bind(&clip_uuid)
@@ -647,6 +648,7 @@ async fn process_clipboard_snapshot(
         .bind(&encrypted_source_app)
         .bind(&encrypted_source_icon)
         .bind(encrypted_metadata)
+        .bind((clip_type == "image").then_some("pending"))
         .execute(pool)
         .await
         {
@@ -712,57 +714,11 @@ async fn process_clipboard_snapshot(
     };
     let db_write_ms = db_write_started.elapsed().as_millis();
 
-    // Background OCR: pull text out of screenshot/image clips so they become
-    // searchable by their words. Runs on its own thread, off the capture path,
-    // and never blocks capture; a missing OCR language just leaves ocr_text unset.
-    if inserted_new && clip_type == "image" {
-        if let Some(full_bytes) = full_image_content.clone() {
-            use std::sync::atomic::{AtomicUsize, Ordering};
-            // Cap concurrent OCR workers so a burst of image copies can't spawn
-            // unbounded threads; excess images simply skip OCR.
-            static OCR_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
-            const MAX_OCR_WORKERS: usize = 3;
-            if OCR_IN_FLIGHT.fetch_add(1, Ordering::SeqCst) >= MAX_OCR_WORKERS {
-                OCR_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
-            } else {
-                let db_for_ocr = db.clone();
-                let clip_for_ocr = emitted_id.clone();
-                std::thread::spawn(move || {
-                    match crate::ocr::recognize_png(&full_bytes) {
-                        Ok(text) if !text.trim().is_empty() => {
-                            match db_for_ocr.crypto.encrypt_text(text.trim()) {
-                                Ok(encrypted) => match crate::models::get_runtime() {
-                                    Ok(runtime) => {
-                                        if let Err(error) = runtime.block_on(
-                                            sqlx::query(
-                                                "UPDATE clips SET ocr_text = ? WHERE uuid = ?",
-                                            )
-                                            .bind(&encrypted)
-                                            .bind(&clip_for_ocr)
-                                            .execute(&db_for_ocr.pool),
-                                        ) {
-                                            log::warn!(
-                                                "OCR: could not store text for {}: {}",
-                                                clip_for_ocr,
-                                                error
-                                            );
-                                        }
-                                    }
-                                    Err(error) => log::warn!("OCR: runtime unavailable: {}", error),
-                                },
-                                Err(error) => log::warn!(
-                                    "OCR: could not encrypt text for {}: {}",
-                                    clip_for_ocr,
-                                    error
-                                ),
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(error) => log::debug!("OCR: skipped clip {}: {}", clip_for_ocr, error),
-                    }
-                    OCR_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
-                });
-            }
+    // Durable background OCR is queued only after the image payload is safely
+    // stored. Re-copying an image with missing OCR also gives it a fresh retry.
+    if clip_type == "image" {
+        if let Err(error) = crate::ocr_queue::enqueue(&db, &emitted_id).await {
+            log::warn!("OCR: could not queue stored image: {error}");
         }
     }
 

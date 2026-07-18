@@ -157,6 +157,50 @@ impl Database {
         // Encrypted OCR text extracted from screenshot/image clips, so images are
         // findable by their words. NULL until (or unless) OCR runs for a clip.
         add_column_if_missing(&self.pool, "ALTER TABLE clips ADD COLUMN ocr_text TEXT").await?;
+        add_column_if_missing(&self.pool, "ALTER TABLE clips ADD COLUMN ocr_status TEXT").await?;
+        add_column_if_missing(
+            &self.pool,
+            "ALTER TABLE clips ADD COLUMN ocr_attempts INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        add_column_if_missing(
+            &self.pool,
+            "ALTER TABLE clips ADD COLUMN ocr_next_retry_at DATETIME",
+        )
+        .await?;
+        add_column_if_missing(
+            &self.pool,
+            "ALTER TABLE clips ADD COLUMN ocr_error_kind TEXT",
+        )
+        .await?;
+
+        // Existing images without OCR become durable background work. A process
+        // that exited while a job was running leaves it as `processing`; reset
+        // those jobs so the next launch can recover them.
+        sqlx::query(
+            r#"
+            UPDATE clips
+            SET ocr_status = CASE
+                    WHEN ocr_text IS NOT NULL THEN 'completed'
+                    ELSE 'pending'
+                END,
+                ocr_next_retry_at = NULL,
+                ocr_error_kind = NULL
+            WHERE clip_type = 'image'
+              AND (ocr_status IS NULL OR ocr_status IN ('processing', 'unavailable'))
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_clips_ocr_queue
+            ON clips(ocr_status, ocr_next_retry_at, created_at)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
 
         sqlx::query(
             r#"

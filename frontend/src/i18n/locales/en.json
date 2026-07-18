@@ -10,7 +10,9 @@
     "search": "Search",
     "loading": "Loading...",
     "copied": "Copied to clipboard",
-    "pasteSuccess": "Pasted successfully"
+    "pasteSuccess": "Pasted successfully",
+    "pause": "Pause",
+    "resume": "Resume"
   },
   "clipList": {
     "empty": "No clips yet",
@@ -76,6 +78,16 @@
     "shortcuts": "Shortcuts",
     "privacyExceptions": "Privacy Exceptions",
     "dataManagement": "Data Management",
+    "ocrIndex": "Screenshot search index",
+    "ocrIndexing": "Indexing screenshots",
+    "ocrPaused": "Screenshot indexing paused",
+    "ocrReady": "Screenshot index ready",
+    "ocrNeedsAttention": "Screenshot index needs attention",
+    "ocrUnavailableDesc": "Windows OCR is unavailable. Install an OCR language pack in Windows Language settings, then retry.",
+    "ocrIndexDesc": "Cubby indexes screenshot text locally in the background. Images are never uploaded.",
+    "ocrProgress": "{{completed}} indexed · {{remaining}} remaining · {{failed}} need attention",
+    "ocrRetry": "Retry failed images",
+    "ocrRetryQueued": "Queued {{count}} images for another OCR attempt",
     "aiConfiguration": "AI Configuration",
     "customPrompts": "Custom Prompts",
     "customPromptsDesc": "Leave blank to use default prompts.",

@@ -22,6 +22,7 @@ mod database;
 mod ditto_import;
 mod models;
 mod ocr;
+mod ocr_queue;
 pub mod paste_engine;
 mod settings_commands;
 mod settings_manager;
@@ -422,7 +423,10 @@ pub fn run_app() {
             commands::get_system_accent_color,
             commands::test_log,
             commands::focus_window,
-            commands::refresh_window
+            commands::refresh_window,
+            ocr_queue::get_ocr_queue_status,
+            ocr_queue::set_ocr_queue_paused,
+            ocr_queue::retry_failed_ocr
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
