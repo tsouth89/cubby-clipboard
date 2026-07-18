@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'product_pages/**'
+      - 'docs/WEBSITE_DEPLOYMENT.md'
       - '.github/scripts/check-site.mjs'
       - '.github/workflows/website.yml'
   push:
@@ -11,6 +12,7 @@ on:
       - main
     paths:
       - 'product_pages/**'
+      - 'docs/WEBSITE_DEPLOYMENT.md'
       - '.github/scripts/check-site.mjs'
       - '.github/workflows/website.yml'
   workflow_dispatch:
@@ -31,3 +33,4 @@ jobs:
         with:
           node-version: 24
       - run: node .github/scripts/check-site.mjs
+      - run: node --test product_pages/worker.test.mjs

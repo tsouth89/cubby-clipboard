@@ -45,6 +45,8 @@ jobs:
       - run: pnpm run format:check
       - run: pnpm run release:check
       - run: pnpm run build
+      - run: node .github/scripts/check-site.mjs
+      - run: node --test product_pages/worker.test.mjs
       - run: pnpm audit --prod
       - run: cargo install cargo-audit --locked
       - shell: pwsh
