@@ -9,6 +9,7 @@ import { ContentFilter, FlyoutHeader } from './components/FlyoutHeader';
 import { ContextMenu } from './components/ContextMenu';
 import { FolderModal } from './components/FolderModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import { WelcomeOverlay } from './components/WelcomeOverlay';
 import { useKeyboard } from './hooks/useKeyboard';
 import { useTheme } from './hooks/useTheme';
 import { useLanguage } from './hooks/useLanguage';
@@ -39,6 +40,7 @@ function App() {
   } | null>(null);
   const [clearRequest, setClearRequest] = useState<'unpinned' | 'all' | null>(null);
   const [isClearing, setIsClearing] = useState(false);
+  const [showWelcome, setShowWelcome] = useState(false);
 
   // Add Folder Modal State
   const [showAddFolderModal, setShowAddFolderModal] = useState(false);
@@ -86,6 +88,9 @@ function App() {
       .then((s) => {
         setTheme(s.theme);
         setSettings(s);
+        if (!s.has_completed_onboarding) {
+          setShowWelcome(true);
+        }
       })
       .catch(console.error);
 
@@ -156,6 +161,12 @@ function App() {
     settingsWin.once('tauri://error', function (e) {
       console.error('Error creating settings window', e);
     });
+  }, []);
+
+  const handleDismissWelcome = useCallback(() => {
+    setShowWelcome(false);
+    setSettings((prev) => (prev ? { ...prev, has_completed_onboarding: true } : prev));
+    invoke('complete_onboarding').catch(console.error);
   }, []);
 
   const loadClips = useCallback(
@@ -479,7 +490,7 @@ function App() {
 
   useEffect(() => {
     const focusSearchOnTyping = (event: KeyboardEvent) => {
-      if (contextMenu || clearRequest || showAddFolderModal) return;
+      if (contextMenu || clearRequest || showAddFolderModal || showWelcome) return;
       const target = event.target as HTMLElement | null;
       const isEditing =
         target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
@@ -496,7 +507,7 @@ function App() {
 
     document.addEventListener('keydown', focusSearchOnTyping);
     return () => document.removeEventListener('keydown', focusSearchOnTyping);
-  }, [clearRequest, contextMenu, showAddFolderModal]);
+  }, [clearRequest, contextMenu, showAddFolderModal, showWelcome]);
 
   const handleNavigateUp = useCallback(() => {
     if (visibleClips.length === 0) return;
@@ -546,7 +557,7 @@ function App() {
   }, [selectedClipId, handleCopy]);
 
   useKeyboard({
-    disabled: Boolean(contextMenu || clearRequest || showAddFolderModal),
+    disabled: Boolean(contextMenu || clearRequest || showAddFolderModal || showWelcome),
     onClose: () => {
       if (searchQuery) {
         setSearchQuery('');
@@ -713,6 +724,10 @@ function App() {
         className={`relative h-full w-full overflow-hidden border ${windowBorder} ${windowShape} ${windowSurface}`}
       >
         <div data-el="app-frame" className="flex h-full w-full flex-col font-sans text-foreground">
+          {showWelcome && settings && (
+            <WelcomeOverlay hotkey={settings.hotkey} onDismiss={handleDismissWelcome} />
+          )}
+
           {contextMenu && (
             <ContextMenu
               x={contextMenu.x}

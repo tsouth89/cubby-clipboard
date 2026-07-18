@@ -22,6 +22,9 @@ pub struct AppSettings {
     pub float_above_taskbar: bool,
     pub density: String,
 
+    // First-run onboarding: false until the user dismisses the welcome overlay.
+    pub has_completed_onboarding: bool,
+
     // Privacy
     pub ignored_apps: HashSet<String>,
 }
@@ -43,6 +46,8 @@ impl Default for AppSettings {
             round_corners: true,
             float_above_taskbar: true,
             density: "comfortable".to_string(),
+
+            has_completed_onboarding: false,
 
             ignored_apps: HashSet::new(),
         }

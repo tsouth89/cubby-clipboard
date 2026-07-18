@@ -371,6 +371,15 @@ pub fn run_app() {
                 }
             });
 
+            // First launch: surface the flyout so the welcome overlay is visible.
+            // Otherwise Cubby starts hidden in the tray and a new user has no idea
+            // it's running or how to open it.
+            if !manager.get().has_completed_onboarding {
+                if let Some(win) = app_handle.get_webview_window("main") {
+                    crate::position_window_near_cursor(&win);
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -391,6 +400,7 @@ pub fn run_app() {
             // Replaced by settings_commands
             settings_commands::get_settings,
             settings_commands::save_settings,
+            settings_commands::complete_onboarding,
             commands::hide_window,
             commands::get_clipboard_history_size,
             commands::clear_clipboard_history,

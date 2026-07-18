@@ -189,5 +189,14 @@
     "confirmUnpinned": "Clear unpinned",
     "confirmAll": "Clear everything",
     "clearing": "Clearing…"
+  },
+  "onboarding": {
+    "title": "Welcome to Cubby",
+    "intro": "Cubby keeps a history of everything you copy, so you can paste it back whenever you need it.",
+    "pointOpen": "Press {{hotkey}} any time to open Cubby.",
+    "pointAuto": "Everything you copy is saved here automatically — no extra steps.",
+    "pointUse": "Click an item (or press Enter) to paste it. Pin the ones you want to keep.",
+    "pointPrivate": "Your history is encrypted and stays on this PC. Nothing is uploaded.",
+    "dismiss": "Got it"
   }
 }
