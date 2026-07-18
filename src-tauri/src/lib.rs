@@ -624,8 +624,11 @@ fn calculate_vertical_placement(
         return (below_candidate, desired_height.min(available_below));
     }
 
+    // The cursor is too near the bottom to open a usable list below it. Open a
+    // compact list upward instead of a jarring full-height flip: cap the height
+    // at the compact minimum so only a short list appears above the cursor.
     let available_above = (cursor_y - cursor_offset - work_top).max(minimum_height as i32) as u32;
-    let height = desired_height.min(available_above);
+    let height = minimum_height.min(available_above);
     (
         (cursor_y - cursor_offset - height as i32).max(work_top),
         height,
@@ -892,10 +895,12 @@ mod flyout_tests {
     }
 
     #[test]
-    fn flips_upward_only_when_too_little_space_remains_below() {
+    fn flips_upward_as_a_compact_list_when_too_little_space_remains_below() {
+        // Near the bottom edge Cubby opens a compact list upward (capped at the
+        // minimum height), not a jarring full-height flip.
         assert_eq!(
             calculate_vertical_placement(1272, 12, 1392, 620, 300, 14),
-            (638, 620)
+            (958, 300)
         );
     }
 
