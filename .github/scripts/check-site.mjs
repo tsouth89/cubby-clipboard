@@ -15,7 +15,7 @@ for (const page of pages) {
     errors.push(`${page}: missing canonical cubbyclipboard.com URL`);
   }
   if (!html.includes('href="styles.css"')) errors.push(`${page}: missing shared stylesheet`);
-  if (!html.includes('href="favicon.svg"')) errors.push(`${page}: missing favicon`);
+  if (!html.includes('href="favicon-v2.svg"')) errors.push(`${page}: missing favicon`);
 
   for (const [, href] of html.matchAll(/href="([^"]+)"/g)) {
     if (/^(https?:|mailto:|#)/.test(href)) continue;
