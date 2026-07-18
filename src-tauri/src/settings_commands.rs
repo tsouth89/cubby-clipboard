@@ -134,6 +134,17 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
 }
 
 #[tauri::command]
+pub async fn complete_onboarding(app: AppHandle) -> Result<(), String> {
+    let manager = app.state::<Arc<SettingsManager>>();
+    let mut current = manager.get();
+    if !current.has_completed_onboarding {
+        current.has_completed_onboarding = true;
+        manager.save(current)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn add_ignored_app(app_name: String, app: AppHandle) -> Result<(), String> {
     let manager = app.state::<Arc<SettingsManager>>();
     let mut current = manager.get();
