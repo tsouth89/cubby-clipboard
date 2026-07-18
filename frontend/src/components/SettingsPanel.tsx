@@ -7,6 +7,9 @@ import {
   Settings as SettingsIcon,
   Folder as FolderIcon,
   MoreHorizontal,
+  Pause,
+  Play,
+  RefreshCw,
 } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 import { useTheme } from '../hooks/useTheme';
@@ -39,6 +42,15 @@ type DittoImportResult = {
   skipped_empty: number;
   errors: string[];
   dry_run: boolean;
+};
+
+type OcrQueueStatus = {
+  pending: number;
+  processing: number;
+  completed: number;
+  failed: number;
+  unavailable: number;
+  paused: boolean;
 };
 
 export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPanelProps) {
@@ -138,6 +150,19 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   const [newIgnoredApp, setNewIgnoredApp] = useState('');
   const [appVersion, setAppVersion] = useState('');
   const [dittoBusy, setDittoBusy] = useState(false);
+  const [ocrStatus, setOcrStatus] = useState<OcrQueueStatus | null>(null);
+  const [ocrActionBusy, setOcrActionBusy] = useState(false);
+  const ocrRemaining = (ocrStatus?.pending ?? 0) + (ocrStatus?.processing ?? 0);
+  const ocrFailures = (ocrStatus?.failed ?? 0) + (ocrStatus?.unavailable ?? 0);
+  const ocrStatusLabel = !ocrStatus
+    ? t('common.loading')
+    : ocrStatus.paused
+      ? t('settings.ocrPaused')
+      : ocrRemaining > 0
+        ? t('settings.ocrIndexing')
+        : ocrFailures > 0
+          ? t('settings.ocrNeedsAttention')
+          : t('settings.ocrReady');
 
   // Confirmation Dialog State
   const [confirmDialog, setConfirmDialog] = useState({
@@ -156,12 +181,49 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     }
   };
 
+  const loadOcrStatus = async () => {
+    try {
+      setOcrStatus(await invoke<OcrQueueStatus>('get_ocr_queue_status'));
+    } catch (error) {
+      console.error('Failed to load OCR index status:', error);
+    }
+  };
+
   useEffect(() => {
     invoke<number>('get_clipboard_history_size').then(setHistorySize).catch(console.error);
     invoke<string[]>('get_ignored_apps').then(setIgnoredApps).catch(console.error);
     getVersion().then(setAppVersion).catch(console.error);
     loadFolders();
+    loadOcrStatus();
+    const ocrStatusTimer = window.setInterval(loadOcrStatus, 3000);
+    return () => window.clearInterval(ocrStatusTimer);
   }, []);
+
+  const handleOcrPauseToggle = async () => {
+    if (!ocrStatus) return;
+    setOcrActionBusy(true);
+    try {
+      await invoke('set_ocr_queue_paused', { paused: !ocrStatus.paused });
+      await loadOcrStatus();
+    } catch (error) {
+      toast.error(String(error));
+    } finally {
+      setOcrActionBusy(false);
+    }
+  };
+
+  const handleRetryOcr = async () => {
+    setOcrActionBusy(true);
+    try {
+      const count = await invoke<number>('retry_failed_ocr');
+      toast.success(t('settings.ocrRetryQueued', { count }));
+      await loadOcrStatus();
+    } catch (error) {
+      toast.error(String(error));
+    } finally {
+      setOcrActionBusy(false);
+    }
+  };
 
   const handleAddIgnoredApp = async () => {
     if (!newIgnoredApp.trim()) return;
@@ -803,6 +865,56 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                           ))
                         )}
                       </div>
+                    </div>
+                  </section>
+
+                  <section className="space-y-4">
+                    <h3 className="text-sm font-medium text-muted-foreground">
+                      {t('settings.ocrIndex')}
+                    </h3>
+                    <div className="rounded-lg border border-border bg-accent/20 p-3">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <span className="text-sm font-medium">{ocrStatusLabel}</span>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {t('settings.ocrIndexDesc')}
+                          </p>
+                          {ocrStatus && (
+                            <p className="mt-2 text-xs text-muted-foreground">
+                              {t('settings.ocrProgress', {
+                                completed: ocrStatus.completed,
+                                remaining: ocrRemaining,
+                                failed: ocrFailures,
+                              })}
+                            </p>
+                          )}
+                          {!!ocrStatus?.unavailable && (
+                            <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
+                              {t('settings.ocrUnavailableDesc')}
+                            </p>
+                          )}
+                        </div>
+                        <button
+                          onClick={handleOcrPauseToggle}
+                          disabled={!ocrStatus || ocrActionBusy}
+                          className="btn btn-secondary shrink-0 px-3 text-xs"
+                        >
+                          {ocrStatus?.paused ? <Play size={14} /> : <Pause size={14} />}
+                          <span className="ml-2">
+                            {ocrStatus?.paused ? t('common.resume') : t('common.pause')}
+                          </span>
+                        </button>
+                      </div>
+                      {!!ocrStatus && ocrFailures > 0 && (
+                        <button
+                          onClick={handleRetryOcr}
+                          disabled={ocrActionBusy}
+                          className="btn btn-secondary mt-3 px-3 text-xs"
+                        >
+                          <RefreshCw size={14} className="mr-2" />
+                          {t('settings.ocrRetry')}
+                        </button>
+                      )}
                     </div>
                   </section>
 

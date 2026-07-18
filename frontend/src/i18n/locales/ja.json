@@ -10,7 +10,9 @@
     "search": "検索",
     "loading": "読み込み中...",
     "copied": "クリップボードにコピーしました",
-    "pasteSuccess": "貼り付けに成功しました"
+    "pasteSuccess": "貼り付けに成功しました",
+    "pause": "一時停止",
+    "resume": "再開"
   },
   "clipList": {
     "empty": "まだクリップがありません",
@@ -55,6 +57,16 @@
     "shortcuts": "ショートカット",
     "privacyExceptions": "プライバシー例外",
     "dataManagement": "データ管理",
+    "ocrIndex": "スクリーンショット検索インデックス",
+    "ocrIndexing": "スクリーンショットをインデックス中",
+    "ocrPaused": "スクリーンショットのインデックスを一時停止中",
+    "ocrReady": "スクリーンショットのインデックスは準備完了です",
+    "ocrNeedsAttention": "スクリーンショットのインデックスを確認してください",
+    "ocrUnavailableDesc": "Windows OCR を利用できません。Windows の言語設定で OCR 言語パックをインストールしてから再試行してください。",
+    "ocrIndexDesc": "Cubby はスクリーンショット内のテキストをローカルでバックグラウンド処理します。画像がアップロードされることはありません。",
+    "ocrProgress": "{{completed}} 件完了 · {{remaining}} 件残り · {{failed}} 件要確認",
+    "ocrRetry": "失敗した画像を再試行",
+    "ocrRetryQueued": "{{count}} 件の画像を OCR 再試行に追加しました",
     "aiConfiguration": "AI 設定",
     "customPrompts": "カスタムプロンプト",
     "customPromptsDesc": "空欄のままにするとデフォルトのプロンプトを使用します。",
