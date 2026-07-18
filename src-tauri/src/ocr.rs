@@ -121,7 +121,24 @@ pub fn recognize_png(png_bytes: &[u8]) -> Result<String, String> {
     }
     let result = operation.GetResults().map_err(|e| e.to_string())?;
 
-    Ok(result.Text().map_err(|e| e.to_string())?.to_string())
+    // Assemble the text line by line so the recognized output keeps the source
+    // layout. OcrResult::Text flattens everything into a single space-separated
+    // blob with no line breaks, which reads as an unusable run-on for any
+    // multi-line image.
+    let lines = result.Lines().map_err(|e| e.to_string())?;
+    let mut text = String::new();
+    for index in 0..lines.Size().map_err(|e| e.to_string())? {
+        let line = lines.GetAt(index).map_err(|e| e.to_string())?;
+        let line_text = line.Text().map_err(|e| e.to_string())?.to_string();
+        if line_text.is_empty() {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&line_text);
+    }
+    Ok(text)
 }
 
 #[cfg(not(target_os = "windows"))]
