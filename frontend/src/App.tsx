@@ -386,6 +386,28 @@ function App() {
     [clips, t]
   );
 
+  const handlePasteOcrText = useCallback(async (clipId: string) => {
+    try {
+      await invoke('paste_ocr_text', { id: clipId });
+    } catch (error) {
+      console.error('Failed to paste recognized text:', error);
+      toast.error('Failed to paste recognized text');
+    }
+  }, []);
+
+  const handleCopyOcrText = useCallback(
+    async (clipId: string) => {
+      try {
+        await invoke('copy_ocr_text', { id: clipId });
+        toast.success(t('common.copied'));
+      } catch (error) {
+        console.error('Failed to copy recognized text:', error);
+        toast.error(t('notifications.copyFailed'));
+      }
+    },
+    [t]
+  );
+
   const handleTogglePin = useCallback(
     async (clipId: string | null) => {
       if (!clipId) return;
@@ -548,9 +570,13 @@ function App() {
   const handlePasteSelectedAsPlainText = useCallback(() => {
     if (!selectedClipId) return;
     const selectedClip = visibleClips.find((clip) => clip.id === selectedClipId);
-    if (!selectedClip || selectedClip.clip_type === 'image') return;
+    if (!selectedClip) return;
+    if (selectedClip.clip_type === 'image') {
+      if (selectedClip.has_ocr_text) handlePasteOcrText(selectedClipId);
+      return;
+    }
     handlePaste(selectedClipId, true);
-  }, [selectedClipId, visibleClips, handlePaste]);
+  }, [selectedClipId, visibleClips, handlePaste, handlePasteOcrText]);
 
   const handleCopySelected = useCallback(() => {
     if (selectedClipId) {
@@ -760,20 +786,40 @@ function App() {
                             label: t('contextMenu.paste'),
                             onClick: () => handlePaste(contextMenu.itemId),
                           },
-                          {
-                            label: t('contextMenu.pastePlainText'),
-                            disabled: clip?.clip_type === 'image',
-                            onClick: () => handlePaste(contextMenu.itemId, true),
-                          },
+                          ...(clip?.clip_type === 'image'
+                            ? clip.has_ocr_text
+                              ? [
+                                  {
+                                    label: t('contextMenu.pasteOcrText'),
+                                    onClick: () => handlePasteOcrText(contextMenu.itemId),
+                                  },
+                                ]
+                              : []
+                            : [
+                                {
+                                  label: t('contextMenu.pastePlainText'),
+                                  onClick: () => handlePaste(contextMenu.itemId, true),
+                                },
+                              ]),
                           {
                             label: t('contextMenu.copy'),
                             onClick: () => handleCopy(contextMenu.itemId),
                           },
-                          {
-                            label: t('contextMenu.copyPlainText'),
-                            disabled: clip?.clip_type === 'image',
-                            onClick: () => handleCopy(contextMenu.itemId, true),
-                          },
+                          ...(clip?.clip_type === 'image'
+                            ? clip.has_ocr_text
+                              ? [
+                                  {
+                                    label: t('contextMenu.copyOcrText'),
+                                    onClick: () => handleCopyOcrText(contextMenu.itemId),
+                                  },
+                                ]
+                              : []
+                            : [
+                                {
+                                  label: t('contextMenu.copyPlainText'),
+                                  onClick: () => handleCopy(contextMenu.itemId, true),
+                                },
+                              ]),
                           ...(clip?.folder_id
                             ? [
                                 {

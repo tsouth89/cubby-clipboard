@@ -400,6 +400,8 @@ pub fn run_app() {
             commands::get_clips,
             commands::paste_clip,
             commands::copy_clip,
+            commands::paste_ocr_text,
+            commands::copy_ocr_text,
             commands::delete_clip,
             commands::toggle_clip_pin,
             commands::move_to_folder,

@@ -27,6 +27,10 @@ fn clip_to_list_item(clip: &Clip) -> ClipboardItem {
         source_app: clip.source_app.clone(),
         source_icon: clip.source_icon.clone(),
         metadata: clip.metadata.clone(),
+        has_ocr_text: clip
+            .ocr_text
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty()),
         ocr_match: None,
     }
 }
@@ -159,7 +163,9 @@ fn decrypt_clip_fields(db: &Database, clip: &mut Clip) -> Result<(), String> {
     db.crypto.decrypt_optional_text(&mut clip.source_icon)?;
     db.crypto.decrypt_optional_text(&mut clip.metadata)?;
     // OCR text is auxiliary; never let a bad value block loading the clip.
-    let _ = db.crypto.decrypt_optional_text(&mut clip.ocr_text);
+    if db.crypto.decrypt_optional_text(&mut clip.ocr_text).is_err() {
+        clip.ocr_text = None;
+    }
     Ok(())
 }
 
@@ -741,6 +747,71 @@ async fn restore_clip(
     }
 }
 
+async fn load_recognized_text(db: &Database, id: &str) -> Result<String, String> {
+    let encrypted: Option<String> = sqlx::query_scalar(
+        "SELECT ocr_text FROM clips WHERE uuid = ? AND is_deleted = 0 AND clip_type = 'image'",
+    )
+    .bind(id)
+    .fetch_optional(&db.pool)
+    .await
+    .map_err(|error| error.to_string())?
+    .flatten();
+
+    let text = encrypted
+        .map(|value| db.crypto.decrypt_text(&value))
+        .transpose()?
+        .ok_or_else(|| "Recognized text is not available for this image".to_string())?;
+    if text.trim().is_empty() {
+        return Err("Recognized text is not available for this image".to_string());
+    }
+    Ok(text)
+}
+
+async fn restore_recognized_text(
+    id: &str,
+    should_paste: bool,
+    window: &tauri::WebviewWindow,
+    db: &Database,
+) -> Result<(), String> {
+    let text = load_recognized_text(db, id).await?;
+    let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
+    let mut hash_material = b"text\0".to_vec();
+    hash_material.extend_from_slice(text.as_bytes());
+    crate::clipboard::set_ignore_hash(crate::clipboard::calculate_hash(&hash_material));
+    ClipboardContext::new()
+        .and_then(|context| context.set(vec![ClipboardContent::Text(text.clone())]))
+        .map_err(|error| format!("Failed to copy recognized text: {error}"))?;
+
+    let _ = sqlx::query("UPDATE clips SET created_at = CURRENT_TIMESTAMP WHERE uuid = ?")
+        .bind(id)
+        .execute(&db.pool)
+        .await;
+    let _ = window.emit("clipboard-write", &text);
+
+    if should_paste {
+        let remote_paste_mode = window
+            .state::<Arc<crate::settings_manager::SettingsManager>>()
+            .get()
+            .remote_paste_mode;
+        crate::animate_window_hide(
+            window,
+            Some(Box::new(move || {
+                let strategy = crate::paste_engine::previous_paste_strategy();
+                crate::restore_previous_foreground_window();
+                if !crate::paste_engine::should_auto_paste_with_mode(strategy, &remote_paste_mode) {
+                    log::info!("PASTE: Recognized text is ready; waiting for physical Ctrl+V");
+                    return;
+                }
+                std::thread::sleep(crate::paste_engine::paste_settle_delay(strategy));
+                crate::paste_engine::send_paste_input(strategy);
+            })),
+        );
+    } else {
+        crate::animate_window_hide(window, None);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn paste_clip(
     id: String,
@@ -759,6 +830,24 @@ pub async fn copy_clip(
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<(), String> {
     restore_clip(&id, plain_text, false, &window, db.inner()).await
+}
+
+#[tauri::command]
+pub async fn paste_ocr_text(
+    id: String,
+    window: tauri::WebviewWindow,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<(), String> {
+    restore_recognized_text(&id, true, &window, db.inner()).await
+}
+
+#[tauri::command]
+pub async fn copy_ocr_text(
+    id: String,
+    window: tauri::WebviewWindow,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<(), String> {
+    restore_recognized_text(&id, false, &window, db.inner()).await
 }
 
 #[tauri::command]
@@ -1423,9 +1512,10 @@ pub async fn import_from_ditto(
 mod tests {
     use super::{
         build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore,
-        enforce_retention_in_pool, migrate_clip_format_model, migrate_encrypted_storage,
-        remove_clip_image_files, restore_hash_material, search_clips_in_database,
-        toggle_clip_pin_in_pool, ClipboardContent, OCR_SNIPPET_CHAR_LIMIT,
+        enforce_retention_in_pool, load_recognized_text, migrate_clip_format_model,
+        migrate_encrypted_storage, remove_clip_image_files, restore_hash_material,
+        search_clips_in_database, toggle_clip_pin_in_pool, ClipboardContent,
+        OCR_SNIPPET_CHAR_LIMIT,
     };
     use crate::clipboard::CapturedFormat;
     use crate::database::Database;
@@ -1548,6 +1638,11 @@ mod tests {
             .unwrap();
         assert_eq!(first[0].id, "ocr-result");
         assert!(first[0].ocr_match.is_some());
+        assert!(first[0].has_ocr_text);
+        assert_eq!(
+            load_recognized_text(&database, "ocr-result").await.unwrap(),
+            "Alpha receipt 8372"
+        );
 
         let second = search_clips_in_database("alpha".into(), None, 1, 1, &database)
             .await

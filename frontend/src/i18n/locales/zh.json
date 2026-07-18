@@ -28,6 +28,8 @@
     "paste": "粘贴",
     "copyPlainText": "以纯文本复制",
     "pastePlainText": "以纯文本粘贴",
+    "copyOcrText": "复制识别的文本",
+    "pasteOcrText": "粘贴识别的文本",
     "delete": "删除",
     "rename": "重命名"
   },

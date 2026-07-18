@@ -28,6 +28,8 @@
     "paste": "Coller",
     "copyPlainText": "Copier en texte brut",
     "pastePlainText": "Coller en texte brut",
+    "copyOcrText": "Copier le texte reconnu",
+    "pasteOcrText": "Coller le texte reconnu",
     "delete": "Supprimer",
     "rename": "Renommer"
   },

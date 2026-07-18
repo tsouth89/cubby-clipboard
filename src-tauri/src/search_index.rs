@@ -149,10 +149,14 @@ impl SearchIndex {
                     crypto.decrypt(&encrypted_content)?
                 };
                 let preview = crypto.decrypt_text(&encrypted_preview)?;
-                let ocr = encrypted_ocr
-                    .as_deref()
-                    .map(|value| crypto.decrypt_text(value))
-                    .transpose()?;
+                let ocr = encrypted_ocr.as_deref().and_then(|value| {
+                    crypto
+                        .decrypt_text(value)
+                        .map_err(|error| {
+                            log::warn!("SEARCH: Ignoring unreadable auxiliary OCR text: {error}")
+                        })
+                        .ok()
+                });
                 let searchable_content = if clip_type != "image" {
                     String::from_utf8_lossy(&content).into_owned()
                 } else {

@@ -9,6 +9,7 @@ export interface ClipboardItem {
   source_app: string | null;
   source_icon: string | null;
   metadata: string | null;
+  has_ocr_text?: boolean;
   ocr_match: OcrMatch | null;
 }
 

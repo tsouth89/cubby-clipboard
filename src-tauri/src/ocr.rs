@@ -199,4 +199,67 @@ mod tests {
             Err(error) => panic!("OCR failed unexpectedly: {error}"),
         }
     }
+
+    #[test]
+    fn reads_dark_error_dialogs_and_small_ui_text() {
+        let dark_path = std::env::temp_dir().join("cubby-ocr-dark-corpus.png");
+        let ui_path = std::env::temp_dir().join("cubby-ocr-ui-corpus.png");
+        let dark_target = dark_path.to_string_lossy().replace('\\', "\\\\");
+        let ui_target = ui_path.to_string_lossy().replace('\\', "\\\\");
+        let script = format!(
+            "Add-Type -AssemblyName System.Drawing; \
+             $dark = New-Object System.Drawing.Bitmap 1200,260; \
+             $g = [System.Drawing.Graphics]::FromImage($dark); \
+             $g.Clear([System.Drawing.Color]::FromArgb(32,32,36)); \
+             $f = New-Object System.Drawing.Font('Segoe UI',34); \
+             $g.DrawString('ERROR 0x80070005 - ACCESS DENIED', $f, [System.Drawing.Brushes]::White, 24, 82); \
+             $g.Dispose(); $dark.Save('{dark_target}'); $dark.Dispose(); \
+             $ui = New-Object System.Drawing.Bitmap 1920,1080; \
+             $g2 = [System.Drawing.Graphics]::FromImage($ui); \
+             $g2.Clear([System.Drawing.Color]::White); \
+             $f2 = New-Object System.Drawing.Font('Segoe UI',20); \
+             $g2.DrawString('Server support-17   Ticket CB-2048', $f2, [System.Drawing.Brushes]::Black, 80, 120); \
+             $g2.Dispose(); $ui.Save('{ui_target}'); $ui.Dispose()"
+        );
+        let generated = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !generated {
+            eprintln!("skipping OCR corpus test: could not generate sample images");
+            return;
+        }
+
+        let dark_png = std::fs::read(&dark_path).expect("dark corpus image should be readable");
+        let ui_png = std::fs::read(&ui_path).expect("UI corpus image should be readable");
+        let _ = std::fs::remove_file(&dark_path);
+        let _ = std::fs::remove_file(&ui_path);
+
+        let dark_text = match recognize_png(&dark_png) {
+            Ok(text) => text.to_uppercase(),
+            Err(error) if error.contains("no OCR language") => {
+                eprintln!("skipping OCR corpus assertion: {error}");
+                return;
+            }
+            Err(error) => panic!("dark OCR corpus failed unexpectedly: {error}"),
+        };
+        assert!(
+            dark_text.contains("ERROR"),
+            "dark OCR result: {dark_text:?}"
+        );
+        assert!(
+            dark_text.contains("DENIED"),
+            "dark OCR result: {dark_text:?}"
+        );
+
+        let ui_text = recognize_png(&ui_png)
+            .unwrap_or_else(|error| panic!("small UI OCR corpus failed unexpectedly: {error}"))
+            .to_uppercase();
+        assert!(
+            ui_text.contains("TICKET"),
+            "small UI OCR result: {ui_text:?}"
+        );
+        assert!(ui_text.contains("2048"), "small UI OCR result: {ui_text:?}");
+    }
 }

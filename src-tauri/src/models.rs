@@ -151,6 +151,7 @@ pub struct ClipboardItem {
     pub source_app: Option<String>,
     pub source_icon: Option<String>,
     pub metadata: Option<String>,
+    pub has_ocr_text: bool,
     pub ocr_match: Option<OcrMatch>,
 }
 

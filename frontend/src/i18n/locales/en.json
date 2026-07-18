@@ -47,6 +47,8 @@
     "paste": "Paste",
     "copyPlainText": "Copy as plain text",
     "pastePlainText": "Paste as plain text",
+    "copyOcrText": "Copy recognized text",
+    "pasteOcrText": "Paste recognized text",
     "delete": "Delete",
     "clearUnpinned": "Clear unpinned items…",
     "clearAll": "Clear everything…",
