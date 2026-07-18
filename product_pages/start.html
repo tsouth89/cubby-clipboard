@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f5ef">
+  <meta name="description" content="A simple, step-by-step guide to installing Cubby and using it to keep everything you copy. Written for everyone — no computer jargon.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://cubbyclipboard.com/start.html">
+  <meta property="og:title" content="Getting started with Cubby">
+  <meta property="og:description" content="Install Cubby in a couple of minutes and keep everything you copy. Plain-language steps, no jargon.">
+  <link rel="canonical" href="https://cubbyclipboard.com/start.html">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <title>Getting started with Cubby — the easy guide</title>
+  <style>
+    .start-hero { padding-block: 60px 40px; text-align: center; }
+    .start-hero h1 { margin-inline: auto; font-size: clamp(2.6rem, 5vw, 4rem); }
+    .start-hero .hero-lede { margin-inline: auto; text-align: center; }
+    .start-hero .cta-row { justify-content: center; }
+    .plain-band { background: var(--paper-deep); border-block: 1px solid var(--line); }
+    .plain-band .shell { padding-block: 44px; }
+    .idea-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 26px; }
+    .idea { background: var(--white); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
+    .idea .num { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 50%; background: var(--blue-soft); color: var(--blue-dark); font-weight: 800; font-size: 15px; }
+    .idea h3 { margin: 14px 0 6px; font-size: 18px; }
+    .idea p { margin: 0; color: var(--muted); font-size: 15px; }
+    .steps { max-width: 760px; margin: 34px auto 0; display: flex; flex-direction: column; gap: 18px; }
+    .step { display: grid; grid-template-columns: 52px 1fr; gap: 20px; align-items: start; background: var(--white); border: 1px solid var(--line); border-radius: 16px; padding: 22px 24px; box-shadow: 0 10px 30px rgba(31,42,46,.05); }
+    .step .badge { width: 52px; height: 52px; border-radius: 14px; background: var(--blue); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 800; }
+    .step h3 { margin: 4px 0 8px; font-size: 20px; }
+    .step p { margin: 0 0 8px; color: #4a565a; font-size: 16px; }
+    .step p:last-child { margin-bottom: 0; }
+    .callout { margin-top: 12px; border-radius: 12px; border: 1px solid #f0d9a8; background: #fdf5e3; padding: 16px 18px; }
+    .callout strong { display: block; margin-bottom: 4px; color: #7a5a12; }
+    .callout p { color: #6c5a34; font-size: 15px; }
+    .keycap { display: inline-block; min-width: 24px; padding: 2px 8px; border: 1px solid #c9cac5; border-bottom-width: 2px; border-radius: 6px; background: var(--white); font: 600 13px/1.4 "Segoe UI", system-ui, sans-serif; }
+    /* Little "where's the icon" picture */
+    .tray-illustration { max-width: 520px; margin: 16px auto 0; }
+    .taskbar { display: flex; align-items: center; justify-content: flex-end; gap: 14px; background: #1f2a2e; border-radius: 12px; padding: 12px 16px; color: #cdd6d8; font-size: 13px; }
+    .taskbar .chev { opacity: .7; }
+    .taskbar .cubby-dot { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 8px; background: var(--blue); color: #fff; font-weight: 800; box-shadow: 0 0 0 3px rgba(8,120,201,.35); }
+    .taskbar .clock { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.15; }
+    .tray-caption { margin: 10px 0 0; text-align: center; color: var(--muted); font-size: 14px; }
+    .reassure { max-width: 760px; margin: 30px auto 0; text-align: center; color: #4a565a; }
+    .final-cta { text-align: center; padding-block: 56px; }
+    @media (max-width: 720px) {
+      .idea-row { grid-template-columns: 1fr; }
+      .step { grid-template-columns: 44px 1fr; gap: 14px; padding: 18px; }
+      .step .badge { width: 44px; height: 44px; font-size: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="shell nav-wrap">
+      <a class="brand" href="index.html" aria-label="Cubby Clipboard home">
+        <img class="brand-mark" src="brand-mark.svg" alt="">
+        <span>cubby</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="index.html#why-cubby">Why Cubby</a>
+        <a href="index.html#privacy">Privacy</a>
+        <a href="support.html">Support</a>
+        <a class="nav-github" href="https://github.com/tsouth89/cubby-clipboard">GitHub <span aria-hidden="true">↗</span></a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="shell start-hero">
+      <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> New here? Start with this</p>
+      <h1>Keep everything you copy.</h1>
+      <p class="hero-lede">You copy things all day — a phone number, an address, a bit of text. Windows only remembers the <em>last</em> thing you copied. Cubby quietly keeps them all, so you can grab any of them again whenever you want.</p>
+      <div class="cta-row">
+        <a class="button button-primary" data-latest-installer href="https://github.com/tsouth89/cubby-clipboard/releases/latest">Download Cubby (free) <span aria-hidden="true">↓</span></a>
+      </div>
+      <p class="release-note">Free · Works on Windows 11 · Nothing to sign up for</p>
+    </section>
+
+    <section class="plain-band">
+      <div class="shell">
+        <div class="section-heading compact">
+          <p class="eyebrow">The whole idea, in one line</p>
+          <h2>You already know how to copy and paste. Cubby just gives it a memory.</h2>
+        </div>
+        <div class="idea-row">
+          <div class="idea">
+            <span class="num" aria-hidden="true">1</span>
+            <h3>Copy like normal</h3>
+            <p>Highlight something and copy it the way you always do (right-click → Copy, or hold <span class="keycap">Ctrl</span> and press <span class="keycap">C</span>).</p>
+          </div>
+          <div class="idea">
+            <span class="num" aria-hidden="true">2</span>
+            <h3>Cubby saves it</h3>
+            <p>Every time you copy, Cubby tucks it away in a tidy list — automatically. You don't have to do anything.</p>
+          </div>
+          <div class="idea">
+            <span class="num" aria-hidden="true">3</span>
+            <h3>Paste it back later</h3>
+            <p>Open Cubby, click the thing you want, and it's ready to paste — even something you copied yesterday.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section shell">
+      <div class="section-heading">
+        <p class="eyebrow">Step by step</p>
+        <h2>Installing Cubby</h2>
+        <p>It takes about two minutes. Just follow along.</p>
+      </div>
+
+      <div class="steps">
+        <div class="step">
+          <div class="badge" aria-hidden="true">1</div>
+          <div>
+            <h3>Click the download button</h3>
+            <p>Use the blue <strong>Download Cubby</strong> button on this page. A file will save to your computer — usually into a folder called <strong>Downloads</strong>.</p>
+            <p><a class="button button-primary" data-latest-installer href="https://github.com/tsouth89/cubby-clipboard/releases/latest" style="min-height:44px;">Download Cubby <span aria-hidden="true">↓</span></a></p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="badge" aria-hidden="true">2</div>
+          <div>
+            <h3>Open the file you just downloaded</h3>
+            <p>Find the downloaded file (your browser usually shows it at the bottom of the screen, or you can open your <strong>Downloads</strong> folder) and <strong>double-click it</strong> to start.</p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="badge" aria-hidden="true">3</div>
+          <div>
+            <h3>If a blue "Windows protected your PC" box appears</h3>
+            <p>Windows shows this for brand-new apps it hasn't seen many times yet. Cubby is safe and digitally signed by its maker (SouthForge). To continue:</p>
+            <div class="callout">
+              <strong>Do this:</strong>
+              <p>Click <strong>More info</strong>, then click the <strong>Run anyway</strong> button that appears. That's it — you can keep going.</p>
+            </div>
+            <p style="margin-top:12px;">Not everyone will see this box. If you don't, just skip to the next step.</p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="badge" aria-hidden="true">4</div>
+          <div>
+            <h3>Let it install</h3>
+            <p>Click through the little installer (usually <strong>Next</strong>, then <strong>Install</strong>, then <strong>Finish</strong>). When it's done, Cubby is running and ready.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="plain-band">
+      <div class="shell">
+        <div class="section-heading">
+          <p class="eyebrow">Using it every day</p>
+          <h2>How to see everything you've copied</h2>
+          <p>You don't need any special keys or shortcuts. Here's the easy way.</p>
+        </div>
+
+        <div class="steps">
+          <div class="step">
+            <div class="badge" aria-hidden="true">✓</div>
+            <div>
+              <h3>Copy things exactly like you do now</h3>
+              <p>Nothing changes about copying. Cubby is already saving everything in the background.</p>
+            </div>
+          </div>
+
+          <div class="step">
+            <div class="badge" aria-hidden="true">☰</div>
+            <div>
+              <h3>To open Cubby, click its little icon near the clock</h3>
+              <p>Look at the <strong>bottom-right corner</strong> of your screen, next to the time and date. You'll see a row of tiny icons — click the <strong>Cubby</strong> one to open your copied history.</p>
+              <div class="tray-illustration" aria-hidden="true">
+                <div class="taskbar">
+                  <span class="chev">︿</span>
+                  <span>🔊</span>
+                  <span>▲</span>
+                  <span class="cubby-dot">c</span>
+                  <span class="clock"><span>3:42 PM</span><span>7/18/2026</span></span>
+                </div>
+              </div>
+              <p class="tray-caption">The Cubby icon lives down here, by the clock. If you don't see it, click the small <span class="keycap">︿</span> arrow to show the hidden ones.</p>
+            </div>
+          </div>
+
+          <div class="step">
+            <div class="badge" aria-hidden="true">☞</div>
+            <div>
+              <h3>Click anything to paste it</h3>
+              <p>Cubby opens a list of everything you've copied. Click the item you want, and it drops right into wherever you were typing. To find something specific, just start typing a word you remember.</p>
+            </div>
+          </div>
+        </div>
+
+        <p class="reassure">Prefer a keyboard shortcut? There's one for that too, and you can change it in Cubby's settings — but clicking the icon works great and is all you ever need.</p>
+      </div>
+    </section>
+
+    <section class="privacy-section" id="privacy">
+      <div class="shell privacy-card">
+        <div class="privacy-copy">
+          <p class="eyebrow light">In case you're wondering</p>
+          <h2>Everything stays on your computer.</h2>
+          <p>Cubby doesn't ask you to sign up, and it doesn't send your copied items anywhere. Your history lives on your PC, saved in a scrambled (encrypted) form so it's private to you.</p>
+          <a href="privacy.html">Read the plain-language privacy page <span aria-hidden="true">→</span></a>
+        </div>
+        <div class="privacy-points">
+          <div><span aria-hidden="true">01</span><p><strong>No account</strong>Install it and you're done.</p></div>
+          <div><span aria-hidden="true">02</span><p><strong>No cloud</strong>Nothing is uploaded.</p></div>
+          <div><span aria-hidden="true">03</span><p><strong>Free</strong>No cost, no catch.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="shell final-cta">
+      <div class="section-heading compact" style="margin-inline:auto;">
+        <p class="eyebrow">Ready?</p>
+        <h2>Give Cubby a try.</h2>
+      </div>
+      <div class="cta-row" style="justify-content:center;">
+        <a class="button button-primary" data-latest-installer href="https://github.com/tsouth89/cubby-clipboard/releases/latest">Download Cubby (free) <span aria-hidden="true">↓</span></a>
+        <a class="button button-secondary" href="support.html">Need help? <span aria-hidden="true">→</span></a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="shell footer-grid">
+      <div><a class="brand footer-brand" href="index.html"><img class="brand-mark" src="brand-mark.svg" alt=""><span>cubby clipboard</span></a><p>A better place for what you copy.</p></div>
+      <nav aria-label="Footer navigation"><a href="index.html">Home</a><a href="privacy.html">Privacy</a><a href="terms.html">Terms</a><a href="support.html">Support</a><a href="https://github.com/tsouth89/cubby-clipboard">GitHub</a></nav>
+    </div>
+    <div class="shell footer-bottom"><span>© 2026 SouthForge AI</span><span>Free and open source · GPL-3.0</span></div>
+  </footer>
+  <script src="release-links.js" defer></script>
+</body>
+</html>

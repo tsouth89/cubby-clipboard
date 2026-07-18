@@ -25,12 +25,34 @@
         null,
       );
 
+  const findInstaller = (release) => {
+    if (!Array.isArray(release.assets)) return null;
+    const asset = release.assets.find(
+      (a) =>
+        a &&
+        typeof a.name === "string" &&
+        typeof a.browser_download_url === "string" &&
+        /x64-setup\.exe$/i.test(a.name),
+    );
+    return asset ? asset.browser_download_url : null;
+  };
+
   const applyRelease = (release) => {
     if (!isCubbyRelease(release)) return;
 
     document.querySelectorAll("[data-latest-release]").forEach((link) => {
       link.href = release.html_url;
     });
+
+    // Direct one-click installer download for non-technical visitors, so they
+    // never have to pick a file off the GitHub releases page. Falls back to the
+    // releases page (the element's existing href) when no installer is found.
+    const installerUrl = findInstaller(release);
+    if (installerUrl) {
+      document.querySelectorAll("[data-latest-installer]").forEach((link) => {
+        link.href = installerUrl;
+      });
+    }
 
     document.querySelectorAll("[data-release-version]").forEach((label) => {
       label.textContent = `${release.prerelease ? "Latest beta" : "Latest release"} · ${release.tag_name}`;
