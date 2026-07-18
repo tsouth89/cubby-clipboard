@@ -153,6 +153,14 @@ pub struct ClipboardItem {
     pub source_app: Option<String>,
     pub source_icon: Option<String>,
     pub metadata: Option<String>,
+    pub ocr_match: Option<OcrMatch>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OcrMatch {
+    pub before: String,
+    pub matched: String,
+    pub after: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
