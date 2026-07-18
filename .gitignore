@@ -24,3 +24,8 @@ data/
 
 # Don't know why this file is always created...
 nul
+
+# Tauri updater signing keys — the private key must NEVER be committed.
+# It belongs in a GitHub Actions secret (TAURI_SIGNING_PRIVATE_KEY), not the repo.
+cubby-updater.key
+cubby-updater.key.pub

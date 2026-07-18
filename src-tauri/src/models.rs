@@ -26,6 +26,9 @@ pub struct AppSettings {
     pub has_completed_onboarding: bool,
 
     // Privacy
+    // Skip clipboard content that the source app tags as sensitive (password
+    // managers, etc.). Matches Win+V, which also hides these. On by default.
+    pub skip_sensitive: bool,
     pub ignored_apps: HashSet<String>,
 }
 
@@ -49,6 +52,7 @@ impl Default for AppSettings {
 
             has_completed_onboarding: false,
 
+            skip_sensitive: true,
             ignored_apps: HashSet::new(),
         }
     }

@@ -122,6 +122,29 @@ struct ClipboardSnapshot {
     content: CapturedContent,
     formats: Vec<CapturedFormat>,
     materialize_ms: u128,
+    /// The source application tagged this copy as sensitive (e.g. a password
+    /// manager) so clipboard monitors should skip it. See `clipboard_marked_sensitive`.
+    sensitive: bool,
+}
+
+/// Returns true when the current clipboard contents are tagged with the
+/// well-known `ExcludeClipboardContentFromMonitorProcessing` format. Password
+/// managers and other secret-holding apps set this so clipboard history tools
+/// skip the copy. Its mere presence means "do not retain"; reading it does not
+/// require opening the clipboard, so this is cheap and contention-free.
+#[cfg(target_os = "windows")]
+fn clipboard_marked_sensitive() -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::DataExchange::{
+        IsClipboardFormatAvailable, RegisterClipboardFormatW,
+    };
+
+    let name: Vec<u16> = "ExcludeClipboardContentFromMonitorProcessing"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let format = unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) };
+    format != 0 && unsafe { IsClipboardFormatAvailable(format) }.is_ok()
 }
 
 pub(crate) struct CapturedFormat {
@@ -148,6 +171,7 @@ fn run_native_listener(snapshot_tx: tokio::sync::mpsc::UnboundedSender<Clipboard
                 let sequence =
                     unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
                 let source_app_identity = get_clipboard_owner_identity();
+                let sensitive = clipboard_marked_sensitive();
 
                 if let Some((content, formats)) = materialize_clipboard_content() {
                     let snapshot = ClipboardSnapshot {
@@ -156,6 +180,7 @@ fn run_native_listener(snapshot_tx: tokio::sync::mpsc::UnboundedSender<Clipboard
                         content,
                         formats,
                         materialize_ms: started.elapsed().as_millis(),
+                        sensitive,
                     };
 
                     if snapshot_tx.send(snapshot).is_err() {
@@ -319,6 +344,7 @@ async fn process_clipboard_snapshot(
 
     let materialize_ms = snapshot.materialize_ms;
     let sequence = snapshot.sequence;
+    let sensitive = snapshot.sensitive;
     let source_app_info = resolve_source_app_info(snapshot.source_app_identity);
     let captured_formats = snapshot.formats;
     let has_files = captured_formats.iter().any(|format| format.name == "files");
@@ -419,6 +445,11 @@ async fn process_clipboard_snapshot(
     use tauri::Manager;
     let manager = app.state::<Arc<SettingsManager>>();
     let settings = manager.get();
+
+    if settings.skip_sensitive && sensitive {
+        log::info!("CLIPBOARD: Skipping content the source app marked as sensitive");
+        return;
+    }
 
     if settings.ignore_ghost_clips && !is_explicit_owner {
         log::info!("CLIPBOARD: Ignoring ghost clip (unknown owner)");
