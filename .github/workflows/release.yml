@@ -268,6 +268,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
+
       - name: Build and upload latest.json
         shell: bash
         env:
