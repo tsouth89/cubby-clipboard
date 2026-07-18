@@ -195,7 +195,7 @@
   "onboarding": {
     "title": "Welcome to Cubby",
     "intro": "Cubby keeps a history of everything you copy, so you can paste it back whenever you need it.",
-    "pointOpen": "Press {{hotkey}} any time to open Cubby.",
+    "pointOpen": "To open Cubby, click its icon near the clock, in the bottom-right corner of your screen.",
     "pointAuto": "Everything you copy is saved here automatically — no extra steps.",
     "pointUse": "Click an item (or press Enter) to paste it. Pin the ones you want to keep.",
     "pointPrivate": "Your history is encrypted and stays on this PC. Nothing is uploaded.",

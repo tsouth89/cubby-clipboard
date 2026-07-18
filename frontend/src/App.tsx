@@ -726,9 +726,7 @@ function App() {
         className={`relative h-full w-full overflow-hidden border ${windowBorder} ${windowShape} ${windowSurface}`}
       >
         <div data-el="app-frame" className="flex h-full w-full flex-col font-sans text-foreground">
-          {showWelcome && settings && (
-            <WelcomeOverlay hotkey={settings.hotkey} onDismiss={handleDismissWelcome} />
-          )}
+          {showWelcome && settings && <WelcomeOverlay onDismiss={handleDismissWelcome} />}
 
           {contextMenu && (
             <ContextMenu
