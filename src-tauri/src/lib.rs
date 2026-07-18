@@ -236,14 +236,14 @@ pub fn run_app() {
                         app.exit(0);
                     } else if event.id.as_ref() == "show" {
                         if let Some(win) = app.get_webview_window("main") {
-                            position_window_near_cursor(&win);
+                            position_window_from_taskbar(&win);
                         }
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
                     if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
                         if let Some(win) = tray.app_handle().get_webview_window("main") {
-                            position_window_near_cursor(&win);
+                            position_window_from_taskbar(&win);
                         }
                     }
                 })
@@ -428,11 +428,29 @@ pub fn run_app() {
         .expect("error while running tauri application");
 }
 
-pub fn position_window_near_cursor(window: &tauri::WebviewWindow) {
-    animate_window_show(window);
+/// How the flyout anchors when it opens.
+#[derive(Clone, Copy)]
+pub enum ShowAnchor {
+    /// Anchor near the mouse cursor (hotkey): newest entry under the cursor,
+    /// shrinking to fit and opening a compact list upward near the screen bottom.
+    Cursor,
+    /// Anchor to the bottom of the work area (taskbar/tray click): a full-height
+    /// window rising from the taskbar, which is what a tray click expects.
+    Bottom,
 }
 
-pub fn animate_window_show(window: &tauri::WebviewWindow) {
+pub fn position_window_near_cursor(window: &tauri::WebviewWindow) {
+    animate_window_show(window, ShowAnchor::Cursor);
+}
+
+/// Opens the flyout from the taskbar as a full-height window rising from the
+/// bottom. Used when the user clicks the tray icon, where the cursor is at the
+/// taskbar and a compact list would feel wrong.
+pub fn position_window_from_taskbar(window: &tauri::WebviewWindow) {
+    animate_window_show(window, ShowAnchor::Bottom);
+}
+
+pub fn animate_window_show(window: &tauri::WebviewWindow, anchor: ShowAnchor) {
     if IS_ANIMATING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -478,14 +496,22 @@ pub fn animate_window_show(window: &tauri::WebviewWindow) {
                 left_candidate
             };
 
-            let (target_y, window_height_px) = calculate_vertical_placement(
-                cursor.y,
-                work_top,
-                work_bottom,
-                desired_height_px,
-                minimum_height_px,
-                cursor_offset_px,
-            );
+            let (target_y, window_height_px) = match anchor {
+                ShowAnchor::Cursor => calculate_vertical_placement(
+                    cursor.y,
+                    work_top,
+                    work_bottom,
+                    desired_height_px,
+                    minimum_height_px,
+                    cursor_offset_px,
+                ),
+                ShowAnchor::Bottom => {
+                    // Full-height window anchored to the bottom of the work area.
+                    let height = desired_height_px
+                        .min((work_bottom - work_top).max(minimum_height_px as i32) as u32);
+                    ((work_bottom - height as i32).max(work_top), height)
+                }
+            };
 
             target_x = target_x.clamp(work_left, max_x);
 
