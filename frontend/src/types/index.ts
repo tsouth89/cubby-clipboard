@@ -40,7 +40,6 @@ export interface Settings {
   round_corners?: boolean;
   float_above_taskbar?: boolean;
   density?: 'compact' | 'comfortable';
-  auto_paste: boolean;
   remote_paste_mode: 'copy_then_paste' | 'paste_as_keystrokes';
   ignore_ghost_clips: boolean;
   skip_sensitive?: boolean;

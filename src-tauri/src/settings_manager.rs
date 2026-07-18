@@ -72,11 +72,6 @@ impl SettingsManager {
             settings.hotkey = v;
         }
 
-        if let Some(v) = get_val(pool, "auto_paste").await {
-            if let Ok(b) = v.parse() {
-                settings.auto_paste = b;
-            }
-        }
         if let Some(v) = get_val(pool, "ignore_ghost_clips").await {
             if let Ok(b) = v.parse() {
                 settings.ignore_ghost_clips = b;

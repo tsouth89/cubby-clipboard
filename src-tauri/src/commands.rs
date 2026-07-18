@@ -163,28 +163,6 @@ fn decrypt_clip_fields(db: &Database, clip: &mut Clip) -> Result<(), String> {
     Ok(())
 }
 
-fn clip_to_detail_item(clip: &Clip, full_image_content: Option<&[u8]>) -> ClipboardItem {
-    let content_str = if clip.clip_type == "image" {
-        BASE64.encode(full_image_content.unwrap_or(&clip.content))
-    } else {
-        String::from_utf8_lossy(&clip.content).to_string()
-    };
-
-    ClipboardItem {
-        id: clip.uuid.clone(),
-        clip_type: clip.clip_type.clone(),
-        content: content_str,
-        preview: clip.text_preview.clone(),
-        folder_id: clip.folder_id.map(|id| id.to_string()),
-        is_pinned: clip.is_pinned,
-        created_at: clip.created_at.to_rfc3339(),
-        source_app: clip.source_app.clone(),
-        source_icon: clip.source_icon.clone(),
-        metadata: clip.metadata.clone(),
-        ocr_match: None,
-    }
-}
-
 async fn cleanup_orphan_clip_image_files(
     pool: &SqlitePool,
     image_dir: &std::path::Path,
@@ -643,43 +621,6 @@ pub async fn get_clips(
     );
 
     Ok(items)
-}
-
-#[tauri::command]
-pub async fn get_clip(
-    id: String,
-    db: tauri::State<'_, Arc<Database>>,
-) -> Result<ClipboardItem, String> {
-    let pool = &db.pool;
-
-    let clip: Option<Clip> = sqlx::query_as(r#"SELECT * FROM clips WHERE uuid = ?"#)
-        .bind(&id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    match clip {
-        Some(mut clip) => {
-            if clip.clip_type == "image" {
-                let full = load_full_image_content(&db, &mut clip).await?;
-                decrypt_clip_fields(&db, &mut clip)?;
-                Ok(clip_to_detail_item(&clip, Some(&full)))
-            } else {
-                decrypt_clip_fields(&db, &mut clip)?;
-                Ok(clip_to_detail_item(&clip, None))
-            }
-        }
-        None => Err("Clip not found".to_string()),
-    }
-}
-
-// TODO(xueshi) get_clip is same as get_clip_detail???
-#[tauri::command]
-pub async fn get_clip_detail(
-    id: String,
-    db: tauri::State<'_, Arc<Database>>,
-) -> Result<ClipboardItem, String> {
-    get_clip(id, db).await
 }
 
 fn restore_hash_material(
@@ -1168,26 +1109,6 @@ pub async fn get_folders(db: tauri::State<'_, Arc<Database>>) -> Result<Vec<Fold
 }
 
 #[tauri::command]
-pub fn hide_window(window: tauri::WebviewWindow) -> Result<(), String> {
-    window.hide().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn ping() -> Result<String, String> {
-    Ok("pong".to_string())
-}
-
-#[tauri::command]
-pub fn test_log() -> Result<String, String> {
-    log::trace!("[TEST] Trace level log");
-    log::debug!("[TEST] Debug level log");
-    log::info!("[TEST] Info level log");
-    log::warn!("[TEST] Warn level log");
-    log::error!("[TEST] Error level log");
-    Ok("Logs emitted - check console".to_string())
-}
-
-#[tauri::command]
 pub async fn get_clipboard_history_size(
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<i64, String> {
@@ -1199,18 +1120,6 @@ pub async fn get_clipboard_history_size(
             .await
             .map_err(|e| e.to_string())?;
     Ok(count)
-}
-
-#[tauri::command]
-pub async fn clear_clipboard_history(db: tauri::State<'_, Arc<Database>>) -> Result<(), String> {
-    let pool = &db.pool;
-
-    sqlx::query(r#"DELETE FROM clips WHERE is_deleted = 1"#)
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    cleanup_orphan_clip_image_files(pool, &db.image_dir).await?;
-    Ok(())
 }
 
 async fn clear_clips_in_pool(
@@ -1387,14 +1296,6 @@ pub async fn remove_duplicate_clips(db: tauri::State<'_, Arc<Database>>) -> Resu
 }
 
 #[tauri::command]
-pub async fn register_global_shortcut(
-    hotkey: String,
-    window: tauri::WebviewWindow,
-) -> Result<(), String> {
-    crate::shortcuts::register_standard_shortcut(window.app_handle(), &hotkey)
-}
-
-#[tauri::command]
 pub async fn refresh_window(app: AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("main") {
         let win_for_show = win.clone();
@@ -1428,19 +1329,13 @@ pub async fn focus_window(app: AppHandle, label: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn show_window(window: tauri::WebviewWindow) -> Result<(), String> {
-    crate::position_window_near_cursor(&window);
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn pick_file(app: AppHandle) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let file_path = app
         .dialog()
         .file()
-        .add_filter("Executables", &["exe", "app"])
+        .add_filter("Executables", &["exe"])
         .blocking_pick_file();
 
     match file_path {
@@ -1465,13 +1360,6 @@ pub async fn pick_ditto_database(app: AppHandle) -> Result<String, String> {
         Some(path) => Ok(path.to_string()),
         None => Err("No file selected".to_string()),
     }
-}
-
-#[tauri::command]
-pub fn get_layout_config() -> serde_json::Value {
-    serde_json::json!({
-        "window_height": crate::constants::WINDOW_HEIGHT,
-    })
 }
 
 #[tauri::command]

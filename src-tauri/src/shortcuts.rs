@@ -40,11 +40,6 @@ pub fn toggle_main_window(app: &AppHandle) {
     }
 }
 
-pub fn register_standard_shortcut(app: &AppHandle, hotkey: &str) -> Result<(), String> {
-    let replace_win_v = CURRENT_CONFIGURATION.lock().unwrap().replace_win_v;
-    register_shortcuts(app, hotkey, replace_win_v)
-}
-
 pub fn register_shortcuts(
     app: &AppHandle,
     hotkey: &str,
