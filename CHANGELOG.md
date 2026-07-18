@@ -2,6 +2,11 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
+## v1.0.2
+
+### Fixed
+- Clicking the Cubby tray icon now opens the full window rising from the taskbar instead of a small list
+
 ## v1.0.1
 
 ### Fixed
