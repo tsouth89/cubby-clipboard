@@ -1,5 +1,5 @@
 /*
-  Content-Security-Policy: default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; style-src 'self'
+  Content-Security-Policy: default-src 'self'; base-uri 'none'; connect-src 'self' https://api.github.com; form-action 'none'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; style-src 'self'
   Permissions-Policy: camera=(), geolocation=(), microphone=()
   Referrer-Policy: strict-origin-when-cross-origin
   X-Content-Type-Options: nosniff
