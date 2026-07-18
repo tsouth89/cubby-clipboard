@@ -183,11 +183,23 @@ export const ClipCard = memo(function ClipCard({
               <p className="truncate text-[13px] font-medium text-foreground">
                 {imageLabel(label)}
               </p>
-              {imageDetails.length > 0 && (
+              {clip.ocr_match ? (
+                <p
+                  data-el="ocr-match"
+                  className="mt-1 line-clamp-2 break-words text-[11px] leading-[15px] text-foreground/65"
+                  title={`${clip.ocr_match.before}${clip.ocr_match.matched}${clip.ocr_match.after}`}
+                >
+                  {clip.ocr_match.before}
+                  <mark className="rounded-[3px] bg-primary/25 px-0.5 font-medium text-foreground">
+                    {clip.ocr_match.matched}
+                  </mark>
+                  {clip.ocr_match.after}
+                </p>
+              ) : imageDetails.length > 0 ? (
                 <p className="mt-1 truncate text-[11px] text-foreground/55">
                   {imageDetails.join(' · ')}
                 </p>
-              )}
+              ) : null}
               <p className="mt-1.5 truncate text-[11px] text-muted-foreground">
                 {label}
                 {age && <span className="px-1.5 text-muted-foreground/40">•</span>}
