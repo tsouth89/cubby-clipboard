@@ -39,6 +39,7 @@ enum OcrFailureKind {
     Timeout,
     Canceled,
     Decode,
+    ResourceLimit,
     MissingImage,
     Engine,
 }
@@ -50,6 +51,7 @@ impl OcrFailureKind {
             Self::Timeout => "timeout",
             Self::Canceled => "canceled",
             Self::Decode => "decode",
+            Self::ResourceLimit => "resource_limit",
             Self::MissingImage => "missing_image",
             Self::Engine => "engine",
         }
@@ -468,6 +470,11 @@ fn classify_failure(error: &str) -> OcrFailureKind {
         OcrFailureKind::Timeout
     } else if normalized.contains("canceled") {
         OcrFailureKind::Canceled
+    } else if normalized.contains("safe ocr limit")
+        || normalized.contains("too large for safe ocr")
+        || normalized.contains("within safe limits")
+    {
+        OcrFailureKind::ResourceLimit
     } else if normalized.contains("decode") || normalized.contains("decrypted") {
         OcrFailureKind::Decode
     } else if normalized.contains("missing") || normalized.contains("unreadable") {
@@ -625,6 +632,10 @@ mod tests {
         assert_eq!(
             classify_failure("stored image is missing or unreadable"),
             OcrFailureKind::MissingImage
+        );
+        assert_eq!(
+            classify_failure("screenshot dimensions 10000x10000 exceed safe OCR limits"),
+            OcrFailureKind::ResourceLimit
         );
         assert_eq!(retry_delay_seconds(1), 30);
         assert_eq!(retry_delay_seconds(2), 60);
