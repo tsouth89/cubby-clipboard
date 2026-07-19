@@ -63,17 +63,23 @@ export function Select({
       if (menuRef.current?.contains(target)) return;
       setIsOpen(false);
     };
-    // The menu is fixed-positioned, so close it if the page scrolls or resizes
-    // rather than letting it detach from the trigger.
+    // The menu is fixed-positioned, so close it if an ancestor or the page
+    // scrolls (it would otherwise detach from the trigger). Ignore scrolls that
+    // originate inside the menu's own option list so it stays open while paging
+    // through long lists.
+    const handleScroll = (event: Event) => {
+      if (menuRef.current?.contains(event.target as Node)) return;
+      setIsOpen(false);
+    };
     const close = () => setIsOpen(false);
 
     document.addEventListener('mousedown', handleClickOutside);
-    window.addEventListener('scroll', close, true);
+    window.addEventListener('scroll', handleScroll, true);
     window.addEventListener('resize', close);
 
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
-      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('scroll', handleScroll, true);
       window.removeEventListener('resize', close);
     };
   }, [isOpen]);
