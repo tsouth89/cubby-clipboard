@@ -16,15 +16,19 @@
 
 ## Why Cubby?
 
-Windows Clipboard History is convenient, but its short memory makes it hard to depend on. Cubby keeps the familiar `Win+V` workflow while adding persistent local history, instant search, rich clipboard formats, and controls for sensitive apps.
+Windows Clipboard History is convenient, but its short memory makes it hard to depend on. Cubby keeps the familiar `Win+V` workflow while adding persistent local history, instant search, offline text recognition for screenshots, rich clipboard formats, and controls for sensitive apps.
 
 <p align="center">
   <img src="docs/images/cubby-flyout.png" width="528" alt="Cubby Clipboard flyout showing searchable clipboard history on Windows 11">
 </p>
 
+## Search inside your screenshots
+
+Copy a screenshot and Cubby reads the text inside it using the built-in Windows OCR engine — fully on your PC, no cloud and no extra downloads. Weeks later, search for a word you remember seeing (an error message, an address, a confirmation code) and the screenshot turns up in your history. Press `Shift+Enter` on an image to paste just the recognized text.
+
 | Built for everyday use | Private by design |
 | --- | --- |
-| Persistent history with fast text and screenshot search | No account, cloud sync, ads, or desktop analytics |
+| Search your history by text, including words inside copied screenshots (offline OCR) | No account, cloud sync, ads, or desktop analytics |
 | Text, HTML, RTF, images, and file lists | AES-256-GCM encryption for stored clipboard payloads |
 | Pinning, folders, filters, and per-app context | Encryption key protected for the current Windows user |
 | Keyboard-first navigation and paste | Ignored-app and sensitive-content controls |
