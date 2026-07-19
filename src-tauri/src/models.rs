@@ -29,7 +29,8 @@ pub struct AppSettings {
     // managers, etc.). Matches Win+V, which also hides these. On by default.
     pub skip_sensitive: bool,
     // Skip text that matches high-confidence secret heuristics (tokens, keys,
-    // payment cards). On by default; never logs matched content.
+    // payment cards). Off by default (opt-in): heuristic sniffing can drop a
+    // clip the user meant to keep. Never logs matched content when enabled.
     pub skip_likely_secrets: bool,
     // True after the built-in password-manager ignore list has been seeded once.
     // Clearing an entry in Settings must stick across restarts.
@@ -60,7 +61,11 @@ impl Default for AppSettings {
             has_completed_onboarding: false,
 
             skip_sensitive: true,
-            skip_likely_secrets: true,
+            // Heuristic content-sniffing is opt-in: guessing wrong silently drops
+            // a clip the user deliberately copied, which erodes trust fast. The
+            // reliable protections (OS sensitive tag + seeded password-manager
+            // ignore list) stay on by default and cover the important cases.
+            skip_likely_secrets: false,
             default_sensitive_apps_seeded: false,
             ignored_apps: HashSet::new(),
         }
