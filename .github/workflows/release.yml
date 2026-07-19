@@ -261,6 +261,57 @@ jobs:
         run: |
           gh release upload "$env:TAG" "${{ steps.installer.outputs.name }}.sig" --clobber
 
+      - name: Assemble the portable package
+        if: matrix.arch == 'x64'
+        id: portable
+        shell: pwsh
+        run: |
+          $stage = Join-Path (Get-Location) "portable"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "src-tauri/target/${{ matrix.target }}/release/cubby.exe" (Join-Path $stage "Cubby Clipboard.exe")
+          # The marker's presence next to the exe switches Cubby to portable mode.
+          Set-Content -Path (Join-Path $stage "portable.txt") -Value @(
+            "This file makes Cubby run in portable mode. Keep it next to Cubby Clipboard.exe.",
+            "Your clipboard history is stored in the 'data' folder here, not in AppData."
+          )
+          Set-Content -Path (Join-Path $stage "README.txt") -Value @(
+            "Cubby Clipboard - Portable",
+            "",
+            "Run 'Cubby Clipboard.exe'. Everything (history, settings, images) is stored in",
+            "the 'data' folder next to it, and nothing is written to AppData or the registry.",
+            "",
+            "Your history is encrypted with your Windows account, so this portable copy works",
+            "fully on this PC and account. Moved to a different PC or Windows user, it starts",
+            "a fresh history there.",
+            "",
+            "Requires Windows 10/11 (WebView2, which ships with Windows 11)."
+          )
+          "exe=$(Join-Path $stage 'Cubby Clipboard.exe')" >> $env:GITHUB_OUTPUT
+
+      - name: Sign the portable executable
+        if: matrix.arch == 'x64'
+        uses: Azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          files: ${{ steps.portable.outputs.exe }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Zip and upload the portable package
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+        run: |
+          $zip = "Cubby-Clipboard-Portable-$($env:VERSION)-x64.zip"
+          Compress-Archive -Path "portable/*" -DestinationPath $zip -Force
+          gh release upload "$env:TAG" $zip --clobber
+
   updater-manifest:
     name: Assemble updater manifest
     needs: [create-release, build-installers]
