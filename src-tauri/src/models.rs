@@ -217,4 +217,38 @@ mod tests {
         assert_eq!(settings.remote_paste_mode, "copy_then_paste");
         assert_eq!(settings.density, "comfortable");
     }
+
+    #[test]
+    fn secret_privacy_defaults_are_opt_in() {
+        // Omitted in an existing settings.json (upgrade path) and on a fresh
+        // install, heuristic secret sniffing and seeding must both default off
+        // so no clip is silently dropped and seeding runs at most once.
+        let migrated: AppSettings = serde_json::from_str("{}")
+            .expect("settings without the new fields should stay readable");
+        assert!(!migrated.skip_likely_secrets);
+        assert!(!migrated.default_sensitive_apps_seeded);
+
+        let fresh = AppSettings::default();
+        assert!(!fresh.skip_likely_secrets);
+        assert!(!fresh.default_sensitive_apps_seeded);
+
+        // The deterministic protection stays on regardless.
+        assert!(fresh.skip_sensitive);
+    }
+
+    #[test]
+    fn persisted_secret_privacy_values_survive_deserialization() {
+        // A user who opts in, or a machine that has already seeded, must keep
+        // those choices across restarts.
+        let settings: AppSettings = serde_json::from_str(
+            r#"{
+                "skip_likely_secrets": true,
+                "default_sensitive_apps_seeded": true
+            }"#,
+        )
+        .expect("explicitly persisted privacy flags should round-trip");
+
+        assert!(settings.skip_likely_secrets);
+        assert!(settings.default_sensitive_apps_seeded);
+    }
 }
