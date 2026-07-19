@@ -28,15 +28,34 @@ impl SettingsManager {
             Self::migrate_from_sqlite(db).await
         };
 
-        // Ensure we save it once immediately if migrating, so file exists
+        let mut settings = settings;
+        let seeded_defaults = Self::seed_default_sensitive_apps(&mut settings);
+
+        // Ensure we save it once immediately if migrating or seeding, so the
+        // file exists and the one-time password-manager ignore list sticks.
         let manager = Self {
             file_path: path,
             settings: RwLock::new(settings.clone()),
         };
-        if !manager.file_path.exists() {
+        if seeded_defaults || !manager.file_path.exists() {
             let _ = manager.save(settings);
         }
         manager
+    }
+
+    /// Insert the built-in password-manager executables the first time settings
+    /// load. Returns true when the settings object was mutated and should be
+    /// persisted. Users can remove any entry afterward; seeding will not run
+    /// again once `default_sensitive_apps_seeded` is true.
+    fn seed_default_sensitive_apps(settings: &mut AppSettings) -> bool {
+        if settings.default_sensitive_apps_seeded {
+            return false;
+        }
+        for exe in crate::secrets::DEFAULT_SENSITIVE_APP_EXES {
+            settings.ignored_apps.insert((*exe).to_string());
+        }
+        settings.default_sensitive_apps_seeded = true;
+        true
     }
 
     async fn migrate_from_sqlite(db: &Database) -> AppSettings {

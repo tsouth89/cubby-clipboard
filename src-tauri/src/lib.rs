@@ -25,6 +25,7 @@ mod ocr;
 mod ocr_queue;
 pub mod paste_engine;
 mod search_index;
+mod secrets;
 mod settings_commands;
 mod settings_manager;
 mod shortcuts;
@@ -639,7 +640,8 @@ pub fn portable_data_dir() -> Option<std::path::PathBuf> {
     }
 }
 
-fn get_data_dir() -> std::path::PathBuf {
+pub(crate) fn get_data_dir() -> std::path::PathBuf {
+    // Optional override for tests and intentional cross-channel debugging.
     #[cfg(debug_assertions)]
     if let Some(path) = std::env::var_os("CUBBY_DATA_DIR") {
         return std::path::PathBuf::from(path);
@@ -650,9 +652,21 @@ fn get_data_dir() -> std::path::PathBuf {
     }
 
     let current_dir = std::env::current_dir().unwrap_or(std::path::PathBuf::from("."));
-    match dirs::data_dir() {
+    let base = match dirs::data_dir() {
         Some(path) => path.join("Cubby Clipboard"),
         None => current_dir.join("Cubby Clipboard"),
+    };
+
+    // Keep `pnpm tauri dev` history out of the installed release database so a
+    // mismatched schema or encryption build cannot corrupt daily-driver data
+    // (SOU-227). Release builds continue to use the stable path.
+    #[cfg(debug_assertions)]
+    {
+        base.join("dev")
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        base
     }
 }
 

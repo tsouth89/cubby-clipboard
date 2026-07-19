@@ -1008,6 +1008,22 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         }
                       />
                       <Row
+                        title={t('settings.skipLikelySecrets')}
+                        desc={t('settings.skipLikelySecretsDesc')}
+                        control={
+                          <Toggle
+                            checked={settings.skip_likely_secrets ?? true}
+                            onChange={() =>
+                              updateSetting(
+                                'skip_likely_secrets',
+                                !(settings.skip_likely_secrets ?? true)
+                              )
+                            }
+                            label={t('settings.skipLikelySecrets')}
+                          />
+                        }
+                      />
+                      <Row
                         title={t('settings.ignoreGhostClips')}
                         desc={t('settings.ignoreGhostClipsDesc')}
                         control={

@@ -45,6 +45,7 @@ export interface Settings {
   remote_paste_mode: 'copy_then_paste' | 'paste_as_keystrokes';
   ignore_ghost_clips: boolean;
   skip_sensitive?: boolean;
+  skip_likely_secrets?: boolean;
   has_completed_onboarding?: boolean;
 }
 

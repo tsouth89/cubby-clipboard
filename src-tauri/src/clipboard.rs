@@ -460,6 +460,16 @@ async fn process_clipboard_snapshot(
         return;
     }
 
+    if settings.skip_likely_secrets && clip_type == "text" {
+        if let Ok(text) = std::str::from_utf8(&clip_content) {
+            if let Some(kind) = crate::secrets::classify_secret(text) {
+                // Category only — never log the matched clipboard bytes.
+                log::info!("CLIPBOARD: Skipping likely secret ({})", kind.as_str());
+                return;
+            }
+        }
+    }
+
     if settings.ignore_ghost_clips && !is_explicit_owner {
         log::info!("CLIPBOARD: Ignoring ghost clip (unknown owner)");
         return;

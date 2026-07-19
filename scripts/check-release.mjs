@@ -1,9 +1,27 @@
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const root = new URL('../', import.meta.url);
-const read = (path) => readFile(new URL(path, root), 'utf8');
+const rootDir = fileURLToPath(root);
+const read = (relativePath) => readFile(new URL(relativePath, root), 'utf8');
 
-const [packageText, tauriText, cargoText, changelog, releaseWorkflow, capabilityText, clipboardSource, cryptoSource, databaseSource, commandSource, clipCardSource] = await Promise.all([
+const [
+  packageText,
+  tauriText,
+  cargoText,
+  changelog,
+  releaseWorkflow,
+  capabilityText,
+  clipboardSource,
+  cryptoSource,
+  databaseSource,
+  commandSource,
+  clipCardSource,
+  secretsSource,
+  modelsSource,
+  securityDoc,
+] = await Promise.all([
   read('package.json'),
   read('src-tauri/tauri.conf.json'),
   read('src-tauri/Cargo.toml'),
@@ -15,6 +33,9 @@ const [packageText, tauriText, cargoText, changelog, releaseWorkflow, capability
   read('src-tauri/src/database.rs'),
   read('src-tauri/src/commands.rs'),
   read('frontend/src/components/ClipCard.tsx'),
+  read('src-tauri/src/secrets.rs'),
+  read('src-tauri/src/models.rs'),
+  read('SECURITY.md'),
 ]);
 
 const packageVersion = JSON.parse(packageText).version;
@@ -116,6 +137,52 @@ for (const clipboardFormatGate of [
 for (const sensitiveLogFragment of ['Detected self-paste for hash', 'full_path: {:?}', 'path match): {}']) {
   if (clipboardSource.includes(sensitiveLogFragment)) {
     throw new Error(`Clipboard source contains privacy-sensitive production logging: ${sensitiveLogFragment}`);
+  }
+}
+
+for (const secretGate of [
+  'classify_secret',
+  'DEFAULT_SENSITIVE_APP_EXES',
+  'skip_likely_secrets',
+  'default_sensitive_apps_seeded',
+]) {
+  const sources = `${secretsSource}\n${modelsSource}\n${clipboardSource}`;
+  if (!sources.includes(secretGate)) {
+    throw new Error(`Secret-aware privacy release gate is missing: ${secretGate}`);
+  }
+}
+
+if (!securityDoc.includes('RUSTSEC-2023-0071')) {
+  throw new Error('SECURITY.md must document the reviewed RSA advisory waiver');
+}
+
+if (!securityDoc.includes('Next review')) {
+  throw new Error('SECURITY.md must include a next-review date for the RSA waiver');
+}
+
+async function collectFrontendSources(dir) {
+  const entries = await readdir(dir, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await collectFrontendSources(fullPath)));
+      continue;
+    }
+    if (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx')) {
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
+
+const frontendFiles = await collectFrontendSources(path.join(rootDir, 'frontend', 'src'));
+for (const filePath of frontendFiles) {
+  const source = await readFile(filePath, 'utf8');
+  if (source.includes('dangerouslySetInnerHTML')) {
+    throw new Error(
+      `Frontend must not use dangerouslySetInnerHTML (${path.relative(rootDir, filePath)})`
+    );
   }
 }
 
