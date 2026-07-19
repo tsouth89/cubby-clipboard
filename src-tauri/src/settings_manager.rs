@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::RwLock;
 use tauri::AppHandle;
+#[cfg(not(debug_assertions))]
 use tauri::Manager;
 
 pub struct SettingsManager {
@@ -17,30 +18,16 @@ impl SettingsManager {
         // debug `/dev` isolation from SOU-227 and portable mode).
         let base = crate::get_data_dir();
         let path = base.join("settings.json");
+        let load_path = Self::resolve_settings_load_path(app, &base, &path);
 
-        // Older builds wrote settings under Tauri's identifier-based AppData
-        // folder. Copy once when the new path is empty so release users keep
-        // their preferences after the path alignment.
-        if !path.exists() {
-            if let Ok(legacy_base) = app.path().app_data_dir() {
-                let legacy = legacy_base.join("settings.json");
-                if legacy.exists() && legacy != path {
-                    if let Some(parent) = path.parent() {
-                        let _ = fs::create_dir_all(parent);
-                    }
-                    let _ = fs::copy(&legacy, &path);
-                }
-            }
-        }
-
-        let settings = if path.exists() {
-            // Load from file
-            match fs::read_to_string(&path) {
+        let settings = if load_path.exists() {
+            match fs::read_to_string(&load_path) {
                 Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
                 Err(_) => AppSettings::default(),
             }
         } else {
-            // Migrate from SQLite or use default
+            // One-shot import from the old SQLite settings tables. After the
+            // first successful JSON write, settings.json is the sole source.
             Self::migrate_from_sqlite(db).await
         };
 
@@ -54,9 +41,55 @@ impl SettingsManager {
             settings: RwLock::new(settings.clone()),
         };
         if seeded_defaults || !manager.file_path.exists() {
-            let _ = manager.save(settings);
+            if let Err(error) = manager.save(settings) {
+                log::error!("SETTINGS: Failed to persist settings: {error}");
+            }
         }
         manager
+    }
+
+    /// Prefer the canonical settings path. In release builds, migrate once from
+    /// the legacy Tauri identifier-based AppData file. Never copy release
+    /// preferences into the debug `/dev` tree.
+    fn resolve_settings_load_path(
+        app: &AppHandle,
+        base: &std::path::Path,
+        path: &PathBuf,
+    ) -> PathBuf {
+        if path.exists() {
+            return path.clone();
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            let _ = (app, base);
+            return path.clone();
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            let Ok(legacy_base) = app.path().app_data_dir() else {
+                return path.clone();
+            };
+            let legacy = legacy_base.join("settings.json");
+            if !legacy.exists() || legacy == *path {
+                return path.clone();
+            }
+
+            match fs::create_dir_all(base).and_then(|_| {
+                fs::copy(&legacy, path)?;
+                Ok(())
+            }) {
+                Ok(()) => path.clone(),
+                Err(error) => {
+                    log::warn!(
+                        "SETTINGS: Could not migrate legacy settings to {}: {error}. Loading legacy file in place.",
+                        path.display()
+                    );
+                    legacy
+                }
+            }
+        }
     }
 
     /// Insert the built-in password-manager executables the first time settings
