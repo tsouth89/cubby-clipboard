@@ -6,7 +6,12 @@
 
 const MAX_ENCODED_IMAGE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_SOURCE_DIMENSION: u32 = 16_384;
-const MAX_SOURCE_PIXELS: u64 = 64_000_000;
+// Bounds the fully-decoded RGBA buffer (~4 bytes/pixel) and everything derived
+// from it. 48 MP keeps 8K desktop screenshots (33 MP) comfortably in range while
+// capping the decode near ~192 MB, so the resize / BGRA-swap / WinRT-buffer steps
+// that follow don't push the transient peak as high as the old 64 MP (256 MB)
+// limit allowed.
+const MAX_SOURCE_PIXELS: u64 = 48_000_000;
 const MAX_DECODE_ALLOCATION_BYTES: u64 = 256 * 1024 * 1024;
 
 fn source_dimensions(png_bytes: &[u8]) -> Result<(u32, u32), String> {
@@ -69,7 +74,9 @@ fn decode_for_ocr(png_bytes: &[u8], max_ocr_dimension: u32) -> Result<image::Rgb
         image
     };
 
-    Ok(image.to_rgba8())
+    // Consume the decoded image so an already-RGBA source isn't cloned; this
+    // keeps a single full-resolution buffer at the peak instead of two.
+    Ok(image.into_rgba8())
 }
 
 /// Recognize text from PNG-encoded image bytes with the user's installed OCR
