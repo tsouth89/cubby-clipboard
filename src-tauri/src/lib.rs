@@ -419,6 +419,8 @@ pub fn run_app() {
             settings_commands::save_settings,
             settings_commands::complete_onboarding,
             commands::get_clipboard_history_size,
+            commands::get_storage_usage,
+            commands::apply_retention,
             commands::clear_unpinned_clips,
             commands::clear_all_clips,
             commands::remove_duplicate_clips,

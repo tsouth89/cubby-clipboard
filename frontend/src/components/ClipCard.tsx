@@ -4,6 +4,7 @@ import { memo, useMemo } from 'react';
 import { Copy, File, Image as ImageIcon, MoreHorizontal, Pin } from 'lucide-react';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { PREVIEW_CHAR_LIMIT } from '../constants';
+import { useTimeTick } from '../hooks/useTimeTick';
 
 interface ClipCardProps {
   clip: ClipboardItem;
@@ -90,11 +91,14 @@ export const ClipCard = memo(function ClipCard({
     return `data:image/png;base64,${value}`;
   }, [clip.clip_type, clip.content]);
 
+  // Ticks every 15s so the relative time stays current while the flyout is open.
+  const timeTick = useTimeTick();
   const age = useMemo(() => {
     const parsed = new Date(clip.created_at);
     if (Number.isNaN(parsed.getTime())) return '';
     return formatDistanceToNowStrict(parsed, { addSuffix: true });
-  }, [clip.created_at]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clip.created_at, timeTick]);
 
   const label = sourceLabel(clip.source_app, clip.clip_type);
   const preview = (clip.content || clip.preview)

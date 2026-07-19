@@ -6,14 +6,17 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 
 ### Added
 - Redesigned Settings, reorganized into General, Privacy, Folders, and About sections with cleaner grouped cards
+- Choose how long Cubby keeps your history under Privacy, from a week up to forever, with a storage-used readout; pinned items are always kept
 
 ### Changed
 - Search and filters now clear each time Cubby opens, so you always start on your full, most-recent history
 - Newly copied screenshots have their text recognized first, so you can search a screenshot right after copying it
+- Timestamps keep counting up while Cubby is open, and a screenshot you just copied shows its Paste text option the moment its text is recognized
 - Updated the app and tray icons to the current Cubby mark
 
 ### Fixed
 - Reusing a clip no longer re-labels it as copied from "Cubby Clipboard" or resets its timestamp to just now
+- Closing Cubby now dismisses the right-click menu and any open dialog, so it reopens on the clean list
 
 ## v1.1.1
 

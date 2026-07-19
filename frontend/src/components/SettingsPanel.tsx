@@ -16,6 +16,7 @@ import {
   Globe,
   ExternalLink,
   Lock,
+  AlertTriangle,
   FlaskConical,
 } from 'lucide-react';
 import { useState, useEffect, useRef, type ReactNode } from 'react';
@@ -64,6 +65,21 @@ type OcrQueueStatus = {
   unavailable: number;
   paused: boolean;
 };
+
+type StorageUsage = {
+  items: number;
+  bytes: number;
+};
+
+function formatBytes(bytes: number): string {
+  if (bytes <= 0) return '0 MB';
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${Math.round(kb)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
+}
 
 function CubbyMark({ className }: { className?: string }) {
   return (
@@ -302,6 +318,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   const [dittoBusy, setDittoBusy] = useState(false);
   const [ocrStatus, setOcrStatus] = useState<OcrQueueStatus | null>(null);
   const [ocrActionBusy, setOcrActionBusy] = useState(false);
+  const [storageUsage, setStorageUsage] = useState<StorageUsage | null>(null);
   const ocrRemaining = (ocrStatus?.pending ?? 0) + (ocrStatus?.processing ?? 0);
   const ocrFailures = (ocrStatus?.failed ?? 0) + (ocrStatus?.unavailable ?? 0);
   const ocrStatusLabel = !ocrStatus
@@ -339,15 +356,52 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     }
   };
 
+  const loadStorageUsage = async () => {
+    try {
+      setStorageUsage(await invoke<StorageUsage>('get_storage_usage'));
+    } catch (error) {
+      console.error('Failed to load storage usage:', error);
+    }
+  };
+
   useEffect(() => {
     invoke<number>('get_clipboard_history_size').then(setHistorySize).catch(console.error);
     invoke<string[]>('get_ignored_apps').then(setIgnoredApps).catch(console.error);
     getVersion().then(setAppVersion).catch(console.error);
     loadFolders();
     loadOcrStatus();
+    loadStorageUsage();
     const ocrStatusTimer = window.setInterval(loadOcrStatus, 3000);
     return () => window.clearInterval(ocrStatusTimer);
   }, []);
+
+  const retentionGenRef = useRef(0);
+  const handleRetentionChange = (value: string) => {
+    const updates: Partial<Settings> = { auto_delete_days: Number(value), max_items: 0 };
+    const generation = ++retentionGenRef.current;
+    settingsSaveQueue.current = settingsSaveQueue.current
+      .catch(() => undefined)
+      .then(async () => {
+        const newSettings = { ...settingsRef.current, ...updates };
+        try {
+          await invoke('save_settings', { settings: newSettings });
+          settingsRef.current = newSettings;
+          setSettings(newSettings);
+          await emit('settings-changed', newSettings);
+          // Prune only for the latest selection, and only after its save has
+          // persisted, so a rapid change can't prune with an intermediate value.
+          if (generation === retentionGenRef.current) {
+            await invoke('apply_retention');
+          }
+          await loadStorageUsage();
+          toast.success('Settings updated');
+        } catch (error) {
+          console.error('Failed to update retention:', error);
+          toast.error(String(error));
+        }
+      });
+    return settingsSaveQueue.current;
+  };
 
   const handleOcrPauseToggle = async () => {
     if (!ocrStatus) return;
@@ -508,6 +562,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
       toast.success(t('settings.removeDuplicatesSuccess', { count }));
       const newSize = await invoke<number>('get_clipboard_history_size');
       setHistorySize(newSize);
+      loadStorageUsage();
     } catch (error) {
       console.error(error);
       toast.error(`Failed to remove duplicates: ${error}`);
@@ -523,6 +578,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
         try {
           await invoke('clear_all_clips');
           setHistorySize(0);
+          loadStorageUsage();
           toast.success(t('settings.clearHistorySuccess'));
         } catch (error) {
           console.error('Failed to clear history:', error);
@@ -965,6 +1021,56 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         }
                       />
                     </SettingCard>
+                  </section>
+
+                  <section>
+                    <SectionLabel>{t('settings.historyRetention')}</SectionLabel>
+                    <SettingCard>
+                      <Row
+                        title={t('settings.keepHistoryFor')}
+                        control={
+                          <div className="w-40">
+                            <Select
+                              value={String(settings.auto_delete_days ?? 30)}
+                              onChange={handleRetentionChange}
+                              options={[
+                                { value: '7', label: t('settings.retention7') },
+                                { value: '30', label: t('settings.retention30') },
+                                { value: '90', label: t('settings.retention90') },
+                                { value: '365', label: t('settings.retention365') },
+                                { value: '0', label: t('settings.retentionForever') },
+                              ]}
+                            />
+                          </div>
+                        }
+                      />
+                      {settings.auto_delete_days === 0 && (
+                        <div className="flex gap-3 px-4 py-3">
+                          <AlertTriangle
+                            size={16}
+                            className="mt-0.5 flex-shrink-0 text-amber-500"
+                          />
+                          <p className="text-xs leading-relaxed text-muted-foreground">
+                            {t('settings.retentionForeverWarning')}
+                          </p>
+                        </div>
+                      )}
+                      <Row
+                        title={t('settings.storageUsed')}
+                        control={
+                          <span className="text-xs text-muted-foreground">
+                            {storageUsage
+                              ? `${t('settings.folderItemCount', {
+                                  count: storageUsage.items,
+                                })} · ${formatBytes(storageUsage.bytes)}`
+                              : '…'}
+                          </span>
+                        }
+                      />
+                    </SettingCard>
+                    <p className="ml-1 mt-2 text-xs text-muted-foreground">
+                      {t('settings.pinnedAlwaysKept')}
+                    </p>
                   </section>
 
                   <section>

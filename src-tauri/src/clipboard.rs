@@ -59,7 +59,7 @@ pub fn set_ignore_hash(hash: String) {
 }
 
 pub fn init(app: &AppHandle, db: Arc<Database>) {
-    crate::ocr_queue::init(db.clone());
+    crate::ocr_queue::init(app.clone(), db.clone());
     let (snapshot_tx, mut snapshot_rx) = tokio::sync::mpsc::unbounded_channel();
     let app_for_consumer = app.clone();
     let db_for_consumer = db.clone();

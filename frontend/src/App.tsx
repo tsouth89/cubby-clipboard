@@ -141,6 +141,11 @@ function App() {
         setSearchQuery('');
         setContentFilter('all');
         setSelectedFolder(null);
+        // Dismiss any transient overlays so reopening lands on the clean list.
+        setContextMenu(null);
+        setClearRequest(null);
+        setShowAddFolderModal(false);
+        setNewFolderName('');
       }
     });
     return () => {
@@ -343,8 +348,20 @@ function App() {
       refreshTotalCount(); // Refresh total count
     });
 
+    // When a screenshot finishes OCR in the background, surface its "paste text"
+    // affordance on the already-visible card instead of only after a reload.
+    const unlistenOcr = listen<string>('ocr-completed', (event) => {
+      const clipId = event.payload;
+      setClips((prev) =>
+        prev.map((clip) => (clip.id === clipId ? { ...clip, has_ocr_text: true } : clip))
+      );
+    });
+
     return () => {
       unlistenClipboard.then((unlisten) => {
+        if (typeof unlisten === 'function') unlisten();
+      });
+      unlistenOcr.then((unlisten) => {
         if (typeof unlisten === 'function') unlisten();
       });
     };
