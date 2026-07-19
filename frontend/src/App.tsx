@@ -131,6 +131,23 @@ function App() {
     return () => window.removeEventListener('focus', refreshPasteContext);
   }, [refreshPasteContext]);
 
+  // Clear the search and any active filters whenever the flyout closes, so each
+  // time Cubby opens it starts fresh instead of showing a stale, filtered list.
+  // The window hides on blur, so focus loss is the reliable "closed" signal for
+  // every dismissal path (Esc, click-away, and post-paste hide).
+  useEffect(() => {
+    const unlisten = appWindow.onFocusChanged(({ payload: focused }) => {
+      if (!focused) {
+        setSearchQuery('');
+        setContentFilter('all');
+        setSelectedFolder(null);
+      }
+    });
+    return () => {
+      unlisten.then((dispose) => dispose()).catch(() => undefined);
+    };
+  }, [appWindow]);
+
   const openSettings = useCallback(async () => {
     // Check if settings window already exists
     const existingWin = await WebviewWindow.getByLabel('settings');
