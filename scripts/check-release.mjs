@@ -140,15 +140,17 @@ for (const sensitiveLogFragment of ['Detected self-paste for hash', 'full_path: 
   }
 }
 
-for (const secretGate of [
-  'classify_secret',
-  'DEFAULT_SENSITIVE_APP_EXES',
-  'skip_likely_secrets',
-  'default_sensitive_apps_seeded',
-]) {
-  const sources = `${secretsSource}\n${modelsSource}\n${clipboardSource}`;
-  if (!sources.includes(secretGate)) {
-    throw new Error(`Secret-aware privacy release gate is missing: ${secretGate}`);
+const secretGates = [
+  [secretsSource, 'classify_secret'],
+  [secretsSource, 'DEFAULT_SENSITIVE_APP_EXES'],
+  [modelsSource, 'skip_likely_secrets'],
+  [modelsSource, 'default_sensitive_apps_seeded'],
+  [clipboardSource, 'settings.skip_likely_secrets'],
+  [clipboardSource, 'crate::secrets::classify_secret'],
+];
+for (const [source, gate] of secretGates) {
+  if (!source.includes(gate)) {
+    throw new Error(`Secret-aware privacy release gate is missing: ${gate}`);
   }
 }
 
@@ -156,8 +158,14 @@ if (!securityDoc.includes('RUSTSEC-2023-0071')) {
   throw new Error('SECURITY.md must document the reviewed RSA advisory waiver');
 }
 
-if (!securityDoc.includes('Next review')) {
-  throw new Error('SECURITY.md must include a next-review date for the RSA waiver');
+const reviewed = securityDoc.match(/^- Reviewed:\s*(\d{4}-\d{2}-\d{2})\s*$/m)?.[1];
+const nextReview = securityDoc.match(/^- Next review:\s*(\d{4}-\d{2}-\d{2})\b/m)?.[1];
+const today = new Date().toISOString().slice(0, 10);
+
+if (!reviewed || !nextReview || nextReview < today) {
+  throw new Error(
+    'SECURITY.md must contain current reviewed and next-review dates for the RSA waiver',
+  );
 }
 
 async function collectFrontendSources(dir) {

@@ -109,12 +109,15 @@ fn looks_like_aws_access_key(text: &str) -> bool {
 
 fn looks_like_github_token(text: &str) -> bool {
     contains_token(text, |candidate| {
-        (candidate.starts_with("ghp_") && candidate.len() == 40)
-            || (candidate.starts_with("gho_") && candidate.len() == 40)
-            || (candidate.starts_with("ghu_") && candidate.len() == 40)
-            || (candidate.starts_with("ghs_") && candidate.len() == 40)
-            || (candidate.starts_with("ghr_") && candidate.len() == 40)
-            || (candidate.starts_with("github_pat_") && candidate.len() >= 82)
+        let alnum = |s: &str| s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        ((candidate.starts_with("ghp_")
+            || candidate.starts_with("gho_")
+            || candidate.starts_with("ghu_")
+            || candidate.starts_with("ghs_")
+            || candidate.starts_with("ghr_"))
+            && candidate.len() == 40
+            && alnum(candidate))
+            || (candidate.starts_with("github_pat_") && candidate.len() >= 82 && alnum(candidate))
     })
 }
 
@@ -181,26 +184,18 @@ fn looks_like_jwt(text: &str) -> bool {
 }
 
 fn looks_like_payment_card(text: &str) -> bool {
-    // Require grouped digits (spaces or dashes). A bare 16-digit integer is too
-    // often an order id / tracking number to treat as a card by default.
-    let has_separator = text.chars().any(|c| c == ' ' || c == '-');
-    if !has_separator {
-        return false;
-    }
-
-    let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits.len() < 13 || digits.len() > 19 {
-        return false;
-    }
-    // Reject strings that are mostly non-digit noise around a digit run.
-    let non_digits = text
-        .chars()
-        .filter(|c| !c.is_ascii_digit() && !c.is_whitespace() && *c != '-')
-        .count();
-    if non_digits > 2 {
-        return false;
-    }
-    luhn_ok(&digits)
+    // Require a contiguous run of digit groups with an *internal* space/dash
+    // separator. A bare 16-digit integer (even after a word) is too often an
+    // order id / tracking number to treat as a card by default.
+    text.split(|c: char| !(c.is_ascii_digit() || c == ' ' || c == '-'))
+        .any(|chunk| {
+            let trimmed = chunk.trim_matches(|c: char| c == ' ' || c == '-');
+            if trimmed.is_empty() || !(trimmed.contains(' ') || trimmed.contains('-')) {
+                return false;
+            }
+            let digits: String = trimmed.chars().filter(|c| c.is_ascii_digit()).collect();
+            (13..=19).contains(&digits.len()) && luhn_ok(&digits)
+        })
 }
 
 fn luhn_ok(digits: &str) -> bool {
@@ -326,6 +321,8 @@ mod tests {
         let card_dashes = ["4111", "1111", "1111", "1111"].join("-");
         assert_eq!(classify_secret(&card_spaces), Some(SecretKind::PaymentCard));
         assert_eq!(classify_secret(&card_dashes), Some(SecretKind::PaymentCard));
+        // Scattered digits plus a stray dash must not concatenate into a card.
+        assert_eq!(classify_secret("order 4111 qty 1111-1111 ref 1111"), None);
     }
 
     #[test]

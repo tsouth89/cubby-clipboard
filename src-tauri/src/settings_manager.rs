@@ -13,10 +13,26 @@ pub struct SettingsManager {
 
 impl SettingsManager {
     pub async fn new(app: &AppHandle, db: &Database) -> Self {
-        // In portable mode settings live beside the executable with the rest of
-        // the data; otherwise they stay in the per-user AppData directory.
-        let base = crate::portable_data_dir().unwrap_or_else(|| app.path().app_data_dir().unwrap());
+        // Keep settings on the same data root as the database (including the
+        // debug `/dev` isolation from SOU-227 and portable mode).
+        let base = crate::get_data_dir();
         let path = base.join("settings.json");
+
+        // Older builds wrote settings under Tauri's identifier-based AppData
+        // folder. Copy once when the new path is empty so release users keep
+        // their preferences after the path alignment.
+        if !path.exists() {
+            if let Ok(legacy_base) = app.path().app_data_dir() {
+                let legacy = legacy_base.join("settings.json");
+                if legacy.exists() && legacy != path {
+                    if let Some(parent) = path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    let _ = fs::copy(&legacy, &path);
+                }
+            }
+        }
+
         let settings = if path.exists() {
             // Load from file
             match fs::read_to_string(&path) {
