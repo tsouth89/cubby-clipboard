@@ -2,6 +2,11 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
+## v1.1.1
+
+### Added
+- Portable version: a self-contained zip that keeps your history, settings, and images in a data folder next to the app, with nothing written to AppData or the Windows registry
+
 ## v1.1.0
 
 ### Added
