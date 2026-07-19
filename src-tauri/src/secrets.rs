@@ -324,14 +324,8 @@ mod tests {
         assert_eq!(classify_secret(&jwt), Some(SecretKind::Jwt));
         let card_spaces = ["4111", "1111", "1111", "1111"].join(" ");
         let card_dashes = ["4111", "1111", "1111", "1111"].join("-");
-        assert_eq!(
-            classify_secret(&card_spaces),
-            Some(SecretKind::PaymentCard)
-        );
-        assert_eq!(
-            classify_secret(&card_dashes),
-            Some(SecretKind::PaymentCard)
-        );
+        assert_eq!(classify_secret(&card_spaces), Some(SecretKind::PaymentCard));
+        assert_eq!(classify_secret(&card_dashes), Some(SecretKind::PaymentCard));
     }
 
     #[test]
