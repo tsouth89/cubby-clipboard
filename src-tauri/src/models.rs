@@ -28,6 +28,13 @@ pub struct AppSettings {
     // Skip clipboard content that the source app tags as sensitive (password
     // managers, etc.). Matches Win+V, which also hides these. On by default.
     pub skip_sensitive: bool,
+    // Skip text that matches high-confidence secret heuristics (tokens, keys,
+    // payment cards). Off by default (opt-in): heuristic sniffing can drop a
+    // clip the user meant to keep. Never logs matched content when enabled.
+    pub skip_likely_secrets: bool,
+    // True after the built-in password-manager ignore list has been seeded once.
+    // Clearing an entry in Settings must stick across restarts.
+    pub default_sensitive_apps_seeded: bool,
     pub ignored_apps: HashSet<String>,
 }
 
@@ -54,6 +61,12 @@ impl Default for AppSettings {
             has_completed_onboarding: false,
 
             skip_sensitive: true,
+            // Heuristic content-sniffing is opt-in: guessing wrong silently drops
+            // a clip the user deliberately copied, which erodes trust fast. The
+            // reliable protections (OS sensitive tag + seeded password-manager
+            // ignore list) stay on by default and cover the important cases.
+            skip_likely_secrets: false,
+            default_sensitive_apps_seeded: false,
             ignored_apps: HashSet::new(),
         }
     }
@@ -203,5 +216,39 @@ mod tests {
         assert!(settings.replace_win_v);
         assert_eq!(settings.remote_paste_mode, "copy_then_paste");
         assert_eq!(settings.density, "comfortable");
+    }
+
+    #[test]
+    fn secret_privacy_defaults_are_opt_in() {
+        // Omitted in an existing settings.json (upgrade path) and on a fresh
+        // install, heuristic secret sniffing and seeding must both default off
+        // so no clip is silently dropped and seeding runs at most once.
+        let migrated: AppSettings = serde_json::from_str("{}")
+            .expect("settings without the new fields should stay readable");
+        assert!(!migrated.skip_likely_secrets);
+        assert!(!migrated.default_sensitive_apps_seeded);
+
+        let fresh = AppSettings::default();
+        assert!(!fresh.skip_likely_secrets);
+        assert!(!fresh.default_sensitive_apps_seeded);
+
+        // The deterministic protection stays on regardless.
+        assert!(fresh.skip_sensitive);
+    }
+
+    #[test]
+    fn persisted_secret_privacy_values_survive_deserialization() {
+        // A user who opts in, or a machine that has already seeded, must keep
+        // those choices across restarts.
+        let settings: AppSettings = serde_json::from_str(
+            r#"{
+                "skip_likely_secrets": true,
+                "default_sensitive_apps_seeded": true
+            }"#,
+        )
+        .expect("explicitly persisted privacy flags should round-trip");
+
+        assert!(settings.skip_likely_secrets);
+        assert!(settings.default_sensitive_apps_seeded);
     }
 }

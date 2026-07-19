@@ -42,9 +42,12 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
     let mut new_settings: crate::models::AppSettings =
         serde_json::from_value(settings).map_err(|e| e.to_string())?;
 
-    // Preserve ignored_apps from current state (as frontend doesn't send it in this call)
+    // Preserve server-owned privacy list state. The frontend does not round-trip
+    // ignored apps or the one-time seed flag; trusting a missing/false seed flag
+    // would re-insert default password managers on the next startup.
     let current = manager.get();
     new_settings.ignored_apps = current.ignored_apps.clone();
+    new_settings.default_sensitive_apps_seeded = current.default_sensitive_apps_seeded;
 
     let shortcut_settings_changed = new_settings.hotkey != current.hotkey
         || new_settings.replace_win_v != current.replace_win_v;

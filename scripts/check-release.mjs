@@ -1,9 +1,27 @@
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const root = new URL('../', import.meta.url);
-const read = (path) => readFile(new URL(path, root), 'utf8');
+const rootDir = fileURLToPath(root);
+const read = (relativePath) => readFile(new URL(relativePath, root), 'utf8');
 
-const [packageText, tauriText, cargoText, changelog, releaseWorkflow, capabilityText, clipboardSource, cryptoSource, databaseSource, commandSource, clipCardSource] = await Promise.all([
+const [
+  packageText,
+  tauriText,
+  cargoText,
+  changelog,
+  releaseWorkflow,
+  capabilityText,
+  clipboardSource,
+  cryptoSource,
+  databaseSource,
+  commandSource,
+  clipCardSource,
+  secretsSource,
+  modelsSource,
+  securityDoc,
+] = await Promise.all([
   read('package.json'),
   read('src-tauri/tauri.conf.json'),
   read('src-tauri/Cargo.toml'),
@@ -15,6 +33,9 @@ const [packageText, tauriText, cargoText, changelog, releaseWorkflow, capability
   read('src-tauri/src/database.rs'),
   read('src-tauri/src/commands.rs'),
   read('frontend/src/components/ClipCard.tsx'),
+  read('src-tauri/src/secrets.rs'),
+  read('src-tauri/src/models.rs'),
+  read('SECURITY.md'),
 ]);
 
 const packageVersion = JSON.parse(packageText).version;
@@ -116,6 +137,60 @@ for (const clipboardFormatGate of [
 for (const sensitiveLogFragment of ['Detected self-paste for hash', 'full_path: {:?}', 'path match): {}']) {
   if (clipboardSource.includes(sensitiveLogFragment)) {
     throw new Error(`Clipboard source contains privacy-sensitive production logging: ${sensitiveLogFragment}`);
+  }
+}
+
+const secretGates = [
+  [secretsSource, 'classify_secret'],
+  [secretsSource, 'DEFAULT_SENSITIVE_APP_EXES'],
+  [modelsSource, 'skip_likely_secrets'],
+  [modelsSource, 'default_sensitive_apps_seeded'],
+  [clipboardSource, 'settings.skip_likely_secrets'],
+  [clipboardSource, 'crate::secrets::classify_secret'],
+];
+for (const [source, gate] of secretGates) {
+  if (!source.includes(gate)) {
+    throw new Error(`Secret-aware privacy release gate is missing: ${gate}`);
+  }
+}
+
+if (!securityDoc.includes('RUSTSEC-2023-0071')) {
+  throw new Error('SECURITY.md must document the reviewed RSA advisory waiver');
+}
+
+const reviewed = securityDoc.match(/^- Reviewed:\s*(\d{4}-\d{2}-\d{2})\s*$/m)?.[1];
+const nextReview = securityDoc.match(/^- Next review:\s*(\d{4}-\d{2}-\d{2})\b/m)?.[1];
+const today = new Date().toISOString().slice(0, 10);
+
+if (!reviewed || !nextReview || nextReview < today) {
+  throw new Error(
+    'SECURITY.md must contain current reviewed and next-review dates for the RSA waiver',
+  );
+}
+
+async function collectFrontendSources(dir) {
+  const entries = await readdir(dir, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await collectFrontendSources(fullPath)));
+      continue;
+    }
+    if (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx')) {
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
+
+const frontendFiles = await collectFrontendSources(path.join(rootDir, 'frontend', 'src'));
+for (const filePath of frontendFiles) {
+  const source = await readFile(filePath, 'utf8');
+  if (source.includes('dangerouslySetInnerHTML')) {
+    throw new Error(
+      `Frontend must not use dangerouslySetInnerHTML (${path.relative(rootDir, filePath)})`
+    );
   }
 }
 

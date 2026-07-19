@@ -1,9 +1,10 @@
 use crate::database::Database;
 use crate::models::AppSettings;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use tauri::AppHandle;
+#[cfg(not(debug_assertions))]
 use tauri::Manager;
 
 pub struct SettingsManager {
@@ -13,30 +14,93 @@ pub struct SettingsManager {
 
 impl SettingsManager {
     pub async fn new(app: &AppHandle, db: &Database) -> Self {
-        // In portable mode settings live beside the executable with the rest of
-        // the data; otherwise they stay in the per-user AppData directory.
-        let base = crate::portable_data_dir().unwrap_or_else(|| app.path().app_data_dir().unwrap());
+        // Keep settings on the same data root as the database (including the
+        // debug `/dev` isolation from SOU-227 and portable mode).
+        let base = crate::get_data_dir();
         let path = base.join("settings.json");
-        let settings = if path.exists() {
-            // Load from file
-            match fs::read_to_string(&path) {
+        let load_path = Self::resolve_settings_load_path(app, &base, &path);
+
+        let settings = if load_path.exists() {
+            match fs::read_to_string(&load_path) {
                 Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
                 Err(_) => AppSettings::default(),
             }
         } else {
-            // Migrate from SQLite or use default
+            // One-shot import from the old SQLite settings tables. After the
+            // first successful JSON write, settings.json is the sole source.
             Self::migrate_from_sqlite(db).await
         };
 
-        // Ensure we save it once immediately if migrating, so file exists
+        let mut settings = settings;
+        let seeded_defaults = Self::seed_default_sensitive_apps(&mut settings);
+
+        // Ensure we save it once immediately if migrating or seeding, so the
+        // file exists and the one-time password-manager ignore list sticks.
         let manager = Self {
             file_path: path,
             settings: RwLock::new(settings.clone()),
         };
-        if !manager.file_path.exists() {
-            let _ = manager.save(settings);
+        if seeded_defaults || !manager.file_path.exists() {
+            if let Err(error) = manager.save(settings) {
+                log::error!("SETTINGS: Failed to persist settings: {error}");
+            }
         }
         manager
+    }
+
+    /// Prefer the canonical settings path. In release builds, migrate once from
+    /// the legacy Tauri identifier-based AppData file. Never copy release
+    /// preferences into the debug `/dev` tree.
+    fn resolve_settings_load_path(app: &AppHandle, base: &Path, path: &Path) -> PathBuf {
+        if path.exists() {
+            return path.to_path_buf();
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            let _ = (app, base);
+            path.to_path_buf()
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            let Ok(legacy_base) = app.path().app_data_dir() else {
+                return path.to_path_buf();
+            };
+            let legacy = legacy_base.join("settings.json");
+            if !legacy.exists() || legacy == path {
+                return path.to_path_buf();
+            }
+
+            match fs::create_dir_all(base).and_then(|_| {
+                fs::copy(&legacy, path)?;
+                Ok(())
+            }) {
+                Ok(()) => path.to_path_buf(),
+                Err(error) => {
+                    log::warn!(
+                        "SETTINGS: Could not migrate legacy settings to {}: {error}. Loading legacy file in place.",
+                        path.display()
+                    );
+                    legacy
+                }
+            }
+        }
+    }
+
+    /// Insert the built-in password-manager executables the first time settings
+    /// load. Returns true when the settings object was mutated and should be
+    /// persisted. Users can remove any entry afterward; seeding will not run
+    /// again once `default_sensitive_apps_seeded` is true.
+    fn seed_default_sensitive_apps(settings: &mut AppSettings) -> bool {
+        if settings.default_sensitive_apps_seeded {
+            return false;
+        }
+        for exe in crate::secrets::DEFAULT_SENSITIVE_APP_EXES {
+            settings.ignored_apps.insert((*exe).to_string());
+        }
+        settings.default_sensitive_apps_seeded = true;
+        true
     }
 
     async fn migrate_from_sqlite(db: &Database) -> AppSettings {
