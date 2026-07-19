@@ -2,6 +2,14 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
+## v1.2.1
+
+### Fixed
+- Cubby now opens at the top of your history, showing your most recent copy, instead of wherever you had last scrolled
+
+### Changed
+- Lower peak memory use when recognizing text in very large screenshots
+
 ## v1.2.0
 
 ### Added
