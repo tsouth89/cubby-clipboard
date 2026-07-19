@@ -422,13 +422,17 @@ async fn process_clipboard_snapshot(
     }
     let clip_hash = calculate_hash(&hash_material);
 
-    // Check ignore self-paste
+    // Ignore our own clipboard writes. When a clip is pasted or reused from
+    // Cubby, the paste path sets this ignore hash and already performed the
+    // intended move-to-top bump. Re-capturing our own write here would relabel
+    // the clip's source app (to Cubby) and re-bump its timestamp, which is what
+    // made reused clips collapse to "1 second ago" with a "Cubby Clipboard"
+    // source, so skip processing it entirely.
     {
         let mut lock = IGNORE_HASH.lock();
-        if let Some(ignore_hash) = lock.take() {
-            if ignore_hash == clip_hash {
-                log::info!("CLIPBOARD: Detected self-paste; proceeding to update timestamp");
-            }
+        if lock.take().as_deref() == Some(clip_hash.as_str()) {
+            log::info!("CLIPBOARD: Ignoring self-paste (own clipboard write)");
+            return;
         }
     }
 

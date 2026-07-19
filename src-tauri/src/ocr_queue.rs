@@ -310,7 +310,10 @@ async fn claim_next(pool: &SqlitePool) -> Result<Option<OcrJob>, String> {
           AND clips.ocr_text IS NULL
           AND clips.ocr_status IN ('pending', 'retry')
           AND (clips.ocr_next_retry_at IS NULL OR clips.ocr_next_retry_at <= CURRENT_TIMESTAMP)
-        ORDER BY clips.created_at ASC, clips.id ASC
+        -- Newest first: a just-copied screenshot should become searchable right
+        -- away rather than waiting behind the entire historical backlog (e.g.
+        -- after a one-time reprocess re-queues every existing image).
+        ORDER BY clips.created_at DESC, clips.id DESC
         LIMIT 1
         "#,
     )
@@ -666,7 +669,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queue_claims_oldest_pending_image_first() {
+    async fn queue_claims_newest_pending_image_first() {
         let database = test_database().await;
         insert_image(&database, "newer", Some("pending")).await;
         insert_image(&database, "older", Some("pending")).await;
@@ -683,7 +686,7 @@ mod tests {
             .await
             .expect("claim should succeed")
             .expect("job should be claimed");
-        assert_eq!(job.clip_uuid, "older");
+        assert_eq!(job.clip_uuid, "newer");
     }
 
     #[test]
