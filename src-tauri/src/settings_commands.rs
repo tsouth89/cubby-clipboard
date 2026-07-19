@@ -9,8 +9,17 @@ pub async fn get_settings(app: AppHandle) -> Result<serde_json::Value, String> {
     let settings = manager.get();
     let mut value = serde_json::to_value(&settings).map_err(|e| e.to_string())?;
 
+    // Portable mode never touches the registry, so autostart is unavailable.
+    let portable = crate::portable_data_dir().is_some();
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("is_portable".to_string(), serde_json::json!(portable));
+        if portable {
+            obj.insert("startup_with_windows".to_string(), serde_json::json!(false));
+        }
+    }
+
     #[cfg(not(feature = "app-store"))]
-    {
+    if !portable {
         use tauri_plugin_autostart::ManagerExt;
         if let Ok(is_enabled) = app.autolaunch().is_enabled() {
             if let Some(obj) = value.as_object_mut() {
@@ -110,8 +119,9 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
         }
     }
 
+    // Portable mode must not write to the registry, so skip autostart entirely.
     #[cfg(not(feature = "app-store"))]
-    {
+    if crate::portable_data_dir().is_none() {
         use tauri_plugin_autostart::ManagerExt;
         // Check if startup changed
         let startup = new_settings.startup_with_windows;

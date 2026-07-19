@@ -619,10 +619,32 @@ pub fn animate_window_hide(
     });
 }
 
+/// Portable data directory, or None for a normal installed run.
+///
+/// Cubby runs in portable mode when a `portable.txt` marker sits next to the
+/// executable (the portable download ships one). In that mode every piece of
+/// state (database, images, `storage.key`, settings) lives in `<exe_dir>/data`,
+/// so nothing is written to AppData or the registry. History stays encrypted
+/// with the machine's Windows account key, so a portable copy is fully portable
+/// on the same PC/account; carried to a different account it starts fresh.
+pub fn portable_data_dir() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    if dir.join("portable.txt").exists() {
+        Some(dir.join("data"))
+    } else {
+        None
+    }
+}
+
 fn get_data_dir() -> std::path::PathBuf {
     #[cfg(debug_assertions)]
     if let Some(path) = std::env::var_os("CUBBY_DATA_DIR") {
         return std::path::PathBuf::from(path);
+    }
+
+    if let Some(portable) = portable_data_dir() {
+        return portable;
     }
 
     let current_dir = std::env::current_dir().unwrap_or(std::path::PathBuf::from("."));

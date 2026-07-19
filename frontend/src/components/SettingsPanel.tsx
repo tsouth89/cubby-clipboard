@@ -636,14 +636,17 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                           {t('settings.startupWithWindows')}
                         </span>
                         <p className="text-xs text-muted-foreground">
-                          {t('settings.startupWithWindowsDesc')}
+                          {settings.is_portable
+                            ? t('settings.startupWithWindowsPortable')
+                            : t('settings.startupWithWindowsDesc')}
                         </p>
                       </div>
                       <button
+                        disabled={settings.is_portable}
                         onClick={() =>
                           updateSetting('startup_with_windows', !settings.startup_with_windows)
                         }
-                        className={`h-6 w-11 rounded-full transition-colors ${settings.startup_with_windows ? 'bg-primary' : 'bg-accent'}`}
+                        className={`h-6 w-11 rounded-full transition-colors ${settings.startup_with_windows ? 'bg-primary' : 'bg-accent'} ${settings.is_portable ? 'cursor-not-allowed opacity-40' : ''}`}
                       >
                         <div
                           className={`h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${settings.startup_with_windows ? 'translate-x-5' : 'translate-x-0.5'}`}
