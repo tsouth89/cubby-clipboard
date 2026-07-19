@@ -24,7 +24,7 @@ Windows Clipboard History is convenient, but its short memory makes it hard to d
 
 | Built for everyday use | Private by design |
 | --- | --- |
-| Persistent, searchable clipboard history | No account, cloud sync, ads, or desktop analytics |
+| Persistent history with fast text and screenshot search | No account, cloud sync, ads, or desktop analytics |
 | Text, HTML, RTF, images, and file lists | AES-256-GCM encryption for stored clipboard payloads |
 | Pinning, folders, filters, and per-app context | Encryption key protected for the current Windows user |
 | Keyboard-first navigation and paste | Ignored-app and sensitive-content controls |
@@ -49,6 +49,7 @@ The app checks for signed updates at startup and every 30 minutes while it is ru
 | `Ctrl+F` | Focus search |
 | `Up` / `Down` | Move through clips |
 | `Enter` | Paste the selected clip |
+| `Shift+Enter` | Paste as plain text, or paste recognized text from an image |
 | `P` | Pin or unpin the selected clip |
 | `Delete` | Delete the selected clip |
 | `Escape` | Clear search or close Cubby |

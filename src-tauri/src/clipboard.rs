@@ -753,7 +753,7 @@ async fn process_clipboard_snapshot(
 
     *LAST_STABLE_HASH.lock() = Some(clip_hash.clone());
 
-    match crate::commands::enforce_retention_in_pool(
+    let retention_deleted = match crate::commands::enforce_retention_in_pool(
         pool,
         settings.max_items,
         settings.auto_delete_days,
@@ -768,8 +768,19 @@ async fn process_clipboard_snapshot(
                     deleted
                 );
             }
+            deleted
         }
-        Err(error) => log::error!("CLIPBOARD: Retention maintenance failed: {}", error),
+        Err(error) => {
+            log::error!("CLIPBOARD: Retention maintenance failed: {}", error);
+            0
+        }
+    };
+
+    if retention_deleted > 0 {
+        db.search_index.invalidate();
+    } else {
+        db.search_index
+            .upsert(&emitted_id, clip_type, &clip_content, &clip_preview, None);
     }
 
     let emit_started = std::time::Instant::now();

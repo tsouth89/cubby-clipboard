@@ -14,7 +14,6 @@ pub struct AppSettings {
     pub auto_delete_days: i64,
     pub hotkey: String,
     pub replace_win_v: bool,
-    pub auto_paste: bool,
     pub remote_paste_mode: String,
     pub ignore_ghost_clips: bool,
     pub startup_with_windows: bool,
@@ -42,7 +41,6 @@ impl Default for AppSettings {
             auto_delete_days: 30,
             hotkey: "Win+Alt+V".to_string(),
             replace_win_v: true,
-            auto_paste: false,
             remote_paste_mode: "copy_then_paste".to_string(),
             ignore_ghost_clips: false,
             startup_with_windows: false,
@@ -153,6 +151,7 @@ pub struct ClipboardItem {
     pub source_app: Option<String>,
     pub source_icon: Option<String>,
     pub metadata: Option<String>,
+    pub has_ocr_text: bool,
     pub ocr_match: Option<OcrMatch>,
 }
 

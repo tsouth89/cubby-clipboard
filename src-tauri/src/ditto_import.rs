@@ -364,6 +364,7 @@ mod tests {
             pool,
             crypto: Arc::new(CryptoManager::ephemeral()),
             image_dir: std::env::temp_dir().join(format!("cubby-ditto-test-{}", Uuid::new_v4())),
+            search_index: Arc::new(crate::search_index::SearchIndex::default()),
         };
 
         // Synthetic Ditto source DB (temp file; the importer opens it read-only).

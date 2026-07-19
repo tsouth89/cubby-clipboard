@@ -24,6 +24,7 @@ mod models;
 mod ocr;
 mod ocr_queue;
 pub mod paste_engine;
+mod search_index;
 mod settings_commands;
 mod settings_manager;
 mod shortcuts;
@@ -60,6 +61,16 @@ pub fn run_app() {
     });
 
     let db_arc = Arc::new(db);
+    let search_db = db_arc.clone();
+    rt.spawn(async move {
+        if let Err(error) = search_db
+            .search_index
+            .ensure_ready(&search_db.pool, &search_db.crypto)
+            .await
+        {
+            log::error!("SEARCH: Could not build the in-memory index: {error}");
+        }
+    });
 
     let mut log_builder = tauri_plugin_log::Builder::default()
         .format(|out, message, record| {
@@ -367,6 +378,10 @@ pub fn run_app() {
                     Ok((deleted, image_paths)) => {
                         commands::remove_clip_image_files(&db_for_migration.image_dir, image_paths);
                         if deleted > 0 {
+                            // The eager index build can race ahead of retention; drop the
+                            // deleted clips' decrypted documents so they don't linger in
+                            // memory. The next search rebuilds without them.
+                            db_for_migration.search_index.invalidate();
                             log::info!("STARTUP: Retention removed {} expired or overflow items", deleted);
                         }
                     }
@@ -386,12 +401,11 @@ pub fn run_app() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::ping,
             commands::get_clips,
-            commands::get_clip,
-            commands::get_clip_detail,
             commands::paste_clip,
             commands::copy_clip,
+            commands::paste_ocr_text,
+            commands::copy_ocr_text,
             commands::delete_clip,
             commands::toggle_clip_pin,
             commands::move_to_folder,
@@ -404,24 +418,18 @@ pub fn run_app() {
             settings_commands::get_settings,
             settings_commands::save_settings,
             settings_commands::complete_onboarding,
-            commands::hide_window,
             commands::get_clipboard_history_size,
-            commands::clear_clipboard_history,
             commands::clear_unpinned_clips,
             commands::clear_all_clips,
             commands::remove_duplicate_clips,
-            commands::register_global_shortcut,
-            commands::show_window,
             commands::import_from_ditto,
             settings_commands::add_ignored_app,
             settings_commands::remove_ignored_app,
             settings_commands::get_ignored_apps,
             commands::pick_file,
             commands::pick_ditto_database,
-            commands::get_layout_config,
             commands::get_paste_context,
             commands::get_system_accent_color,
-            commands::test_log,
             commands::focus_window,
             commands::refresh_window,
             ocr_queue::get_ocr_queue_status,

@@ -39,6 +39,7 @@ enum OcrFailureKind {
     Timeout,
     Canceled,
     Decode,
+    ResourceLimit,
     MissingImage,
     Engine,
 }
@@ -50,6 +51,7 @@ impl OcrFailureKind {
             Self::Timeout => "timeout",
             Self::Canceled => "canceled",
             Self::Decode => "decode",
+            Self::ResourceLimit => "resource_limit",
             Self::MissingImage => "missing_image",
             Self::Engine => "engine",
         }
@@ -64,6 +66,13 @@ pub fn init(db: Arc<Database>) {
     if STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
+
+    let reprocess_db = db.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = reprocess_existing_for_linebreaks(&reprocess_db).await {
+            log::warn!("OCR: one-time line-break reprocess could not run: {error}");
+        }
+    });
 
     tauri::async_runtime::spawn(async move {
         loop {
@@ -97,6 +106,64 @@ pub async fn enqueue(db: &Database, clip_uuid: &str) -> Result<(), String> {
     .map_err(|error| error.to_string())?;
 
     WORK_AVAILABLE.notify_one();
+    Ok(())
+}
+
+/// One-time reprocess of images OCR'd before the line-break-preserving text
+/// assembly (see `ocr::recognize_png`). Their stored `ocr_text` is a single
+/// flattened blob; clear it and re-enter them into the durable queue so it is
+/// rebuilt with real line breaks. Guarded by a settings flag so it runs once.
+/// The image bytes are untouched; the "recognized text" affordance and OCR
+/// search for those images simply return once each has been reprocessed.
+pub async fn reprocess_existing_for_linebreaks(db: &Database) -> Result<(), String> {
+    const FLAG: &str = "ocr_linebreak_reprocess_v1";
+
+    let already_done: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
+            .bind(FLAG)
+            .fetch_optional(&db.pool)
+            .await
+            .map_err(|error| error.to_string())?;
+    if already_done.as_deref() == Some("true") {
+        return Ok(());
+    }
+
+    let reset = sqlx::query(
+        r#"
+        UPDATE clips
+        SET ocr_text = NULL,
+            ocr_status = 'pending',
+            ocr_attempts = 0,
+            ocr_next_retry_at = NULL,
+            ocr_error_kind = NULL
+        WHERE clip_type = 'image'
+          AND is_deleted = 0
+          AND ocr_text IS NOT NULL
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO settings (key, value) VALUES (?, 'true')
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        "#,
+    )
+    .bind(FLAG)
+    .execute(&db.pool)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    let count = reset.rows_affected();
+    if count > 0 {
+        // The cleared documents must leave the in-memory search index; the queue
+        // repopulates each one's text as it finishes.
+        db.search_index.invalidate();
+        WORK_AVAILABLE.notify_one();
+        log::info!("OCR: reprocessing {count} existing images with improved line handling");
+    }
     Ok(())
 }
 
@@ -395,6 +462,7 @@ async fn mark_completed(db: &Database, clip_uuid: &str, text: &str) -> Result<()
     .execute(&db.pool)
     .await
     .map_err(|error| error.to_string())?;
+    db.search_index.update_ocr(clip_uuid, text.trim());
     Ok(())
 }
 
@@ -468,6 +536,11 @@ fn classify_failure(error: &str) -> OcrFailureKind {
         OcrFailureKind::Timeout
     } else if normalized.contains("canceled") {
         OcrFailureKind::Canceled
+    } else if normalized.contains("safe ocr limit")
+        || normalized.contains("too large for safe ocr")
+        || normalized.contains("within safe limits")
+    {
+        OcrFailureKind::ResourceLimit
     } else if normalized.contains("decode") || normalized.contains("decrypted") {
         OcrFailureKind::Decode
     } else if normalized.contains("missing") || normalized.contains("unreadable") {
@@ -481,7 +554,7 @@ fn classify_failure(error: &str) -> OcrFailureKind {
 mod tests {
     use super::{
         claim_next, classify_failure, load_paused, mark_completed, recover_processing_jobs,
-        retry_delay_seconds, OcrFailureKind,
+        reprocess_existing_for_linebreaks, retry_delay_seconds, OcrFailureKind,
     };
     use crate::crypto::CryptoManager;
     use crate::database::Database;
@@ -498,6 +571,7 @@ mod tests {
             pool,
             crypto: Arc::new(CryptoManager::ephemeral()),
             image_dir: std::env::temp_dir().join(format!("cubby-ocr-{}", uuid::Uuid::new_v4())),
+            search_index: Arc::new(crate::search_index::SearchIndex::default()),
         };
         database.migrate().await.expect("migration should succeed");
         database
@@ -626,9 +700,58 @@ mod tests {
             classify_failure("stored image is missing or unreadable"),
             OcrFailureKind::MissingImage
         );
+        assert_eq!(
+            classify_failure("screenshot dimensions 10000x10000 exceed safe OCR limits"),
+            OcrFailureKind::ResourceLimit
+        );
         assert_eq!(retry_delay_seconds(1), 30);
         assert_eq!(retry_delay_seconds(2), 60);
         assert_eq!(retry_delay_seconds(3), 120);
+    }
+
+    #[tokio::test]
+    async fn linebreak_reprocess_clears_text_once_and_requeues() {
+        let database = test_database().await;
+        insert_image(&database, "old", Some("completed")).await;
+        let encrypted = database.crypto.encrypt_text("flat blob").unwrap();
+        sqlx::query("UPDATE clips SET ocr_text = ? WHERE uuid = 'old'")
+            .bind(encrypted)
+            .execute(&database.pool)
+            .await
+            .expect("seed ocr text");
+
+        reprocess_existing_for_linebreaks(&database)
+            .await
+            .expect("reprocess should run");
+
+        let text: Option<String> =
+            sqlx::query_scalar("SELECT ocr_text FROM clips WHERE uuid = 'old'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        let status: String = sqlx::query_scalar("SELECT ocr_status FROM clips WHERE uuid = 'old'")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert!(text.is_none());
+        assert_eq!(status, "pending");
+
+        // Second run is a no-op: freshly reprocessed text must be preserved.
+        let fresh = database.crypto.encrypt_text("line one\nline two").unwrap();
+        sqlx::query("UPDATE clips SET ocr_text = ?, ocr_status = 'completed' WHERE uuid = 'old'")
+            .bind(fresh)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        reprocess_existing_for_linebreaks(&database)
+            .await
+            .expect("reprocess should be idempotent");
+        let preserved: Option<String> =
+            sqlx::query_scalar("SELECT ocr_text FROM clips WHERE uuid = 'old'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert!(preserved.is_some());
     }
 
     #[tokio::test]

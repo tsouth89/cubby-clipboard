@@ -27,6 +27,10 @@ fn clip_to_list_item(clip: &Clip) -> ClipboardItem {
         source_app: clip.source_app.clone(),
         source_icon: clip.source_icon.clone(),
         metadata: clip.metadata.clone(),
+        has_ocr_text: clip
+            .ocr_text
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty()),
         ocr_match: None,
     }
 }
@@ -159,30 +163,10 @@ fn decrypt_clip_fields(db: &Database, clip: &mut Clip) -> Result<(), String> {
     db.crypto.decrypt_optional_text(&mut clip.source_icon)?;
     db.crypto.decrypt_optional_text(&mut clip.metadata)?;
     // OCR text is auxiliary; never let a bad value block loading the clip.
-    let _ = db.crypto.decrypt_optional_text(&mut clip.ocr_text);
-    Ok(())
-}
-
-fn clip_to_detail_item(clip: &Clip, full_image_content: Option<&[u8]>) -> ClipboardItem {
-    let content_str = if clip.clip_type == "image" {
-        BASE64.encode(full_image_content.unwrap_or(&clip.content))
-    } else {
-        String::from_utf8_lossy(&clip.content).to_string()
-    };
-
-    ClipboardItem {
-        id: clip.uuid.clone(),
-        clip_type: clip.clip_type.clone(),
-        content: content_str,
-        preview: clip.text_preview.clone(),
-        folder_id: clip.folder_id.map(|id| id.to_string()),
-        is_pinned: clip.is_pinned,
-        created_at: clip.created_at.to_rfc3339(),
-        source_app: clip.source_app.clone(),
-        source_icon: clip.source_icon.clone(),
-        metadata: clip.metadata.clone(),
-        ocr_match: None,
+    if db.crypto.decrypt_optional_text(&mut clip.ocr_text).is_err() {
+        clip.ocr_text = None;
     }
+    Ok(())
 }
 
 async fn cleanup_orphan_clip_image_files(
@@ -645,43 +629,6 @@ pub async fn get_clips(
     Ok(items)
 }
 
-#[tauri::command]
-pub async fn get_clip(
-    id: String,
-    db: tauri::State<'_, Arc<Database>>,
-) -> Result<ClipboardItem, String> {
-    let pool = &db.pool;
-
-    let clip: Option<Clip> = sqlx::query_as(r#"SELECT * FROM clips WHERE uuid = ?"#)
-        .bind(&id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    match clip {
-        Some(mut clip) => {
-            if clip.clip_type == "image" {
-                let full = load_full_image_content(&db, &mut clip).await?;
-                decrypt_clip_fields(&db, &mut clip)?;
-                Ok(clip_to_detail_item(&clip, Some(&full)))
-            } else {
-                decrypt_clip_fields(&db, &mut clip)?;
-                Ok(clip_to_detail_item(&clip, None))
-            }
-        }
-        None => Err("Clip not found".to_string()),
-    }
-}
-
-// TODO(xueshi) get_clip is same as get_clip_detail???
-#[tauri::command]
-pub async fn get_clip_detail(
-    id: String,
-    db: tauri::State<'_, Arc<Database>>,
-) -> Result<ClipboardItem, String> {
-    get_clip(id, db).await
-}
-
 fn restore_hash_material(
     clip: &Clip,
     full_image: Option<&[u8]>,
@@ -800,6 +747,71 @@ async fn restore_clip(
     }
 }
 
+async fn load_recognized_text(db: &Database, id: &str) -> Result<String, String> {
+    let encrypted: Option<String> = sqlx::query_scalar(
+        "SELECT ocr_text FROM clips WHERE uuid = ? AND is_deleted = 0 AND clip_type = 'image'",
+    )
+    .bind(id)
+    .fetch_optional(&db.pool)
+    .await
+    .map_err(|error| error.to_string())?
+    .flatten();
+
+    let text = encrypted
+        .map(|value| db.crypto.decrypt_text(&value))
+        .transpose()?
+        .ok_or_else(|| "Recognized text is not available for this image".to_string())?;
+    if text.trim().is_empty() {
+        return Err("Recognized text is not available for this image".to_string());
+    }
+    Ok(text)
+}
+
+async fn restore_recognized_text(
+    id: &str,
+    should_paste: bool,
+    window: &tauri::WebviewWindow,
+    db: &Database,
+) -> Result<(), String> {
+    let text = load_recognized_text(db, id).await?;
+    let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
+    let mut hash_material = b"text\0".to_vec();
+    hash_material.extend_from_slice(text.as_bytes());
+    crate::clipboard::set_ignore_hash(crate::clipboard::calculate_hash(&hash_material));
+    ClipboardContext::new()
+        .and_then(|context| context.set(vec![ClipboardContent::Text(text.clone())]))
+        .map_err(|error| format!("Failed to copy recognized text: {error}"))?;
+
+    let _ = sqlx::query("UPDATE clips SET created_at = CURRENT_TIMESTAMP WHERE uuid = ?")
+        .bind(id)
+        .execute(&db.pool)
+        .await;
+    let _ = window.emit("clipboard-write", &text);
+
+    if should_paste {
+        let remote_paste_mode = window
+            .state::<Arc<crate::settings_manager::SettingsManager>>()
+            .get()
+            .remote_paste_mode;
+        crate::animate_window_hide(
+            window,
+            Some(Box::new(move || {
+                let strategy = crate::paste_engine::previous_paste_strategy();
+                crate::restore_previous_foreground_window();
+                if !crate::paste_engine::should_auto_paste_with_mode(strategy, &remote_paste_mode) {
+                    log::info!("PASTE: Recognized text is ready; waiting for physical Ctrl+V");
+                    return;
+                }
+                std::thread::sleep(crate::paste_engine::paste_settle_delay(strategy));
+                crate::paste_engine::send_paste_input(strategy);
+            })),
+        );
+    } else {
+        crate::animate_window_hide(window, None);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn paste_clip(
     id: String,
@@ -818,6 +830,24 @@ pub async fn copy_clip(
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<(), String> {
     restore_clip(&id, plain_text, false, &window, db.inner()).await
+}
+
+#[tauri::command]
+pub async fn paste_ocr_text(
+    id: String,
+    window: tauri::WebviewWindow,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<(), String> {
+    restore_recognized_text(&id, true, &window, db.inner()).await
+}
+
+#[tauri::command]
+pub async fn copy_ocr_text(
+    id: String,
+    window: tauri::WebviewWindow,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<(), String> {
+    restore_recognized_text(&id, false, &window, db.inner()).await
 }
 
 #[tauri::command]
@@ -851,6 +881,7 @@ pub async fn delete_clip(
             .await
             .map_err(|e| e.to_string())?;
     }
+    db.search_index.remove(&id);
     Ok(())
 }
 
@@ -1008,10 +1039,18 @@ pub async fn search_clips(
     offset: i64,
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<Vec<ClipboardItem>, String> {
+    search_clips_in_database(query, filter_id, limit, offset, db.inner()).await
+}
+
+async fn search_clips_in_database(
+    query: String,
+    filter_id: Option<String>,
+    limit: i64,
+    offset: i64,
+    db: &Database,
+) -> Result<Vec<ClipboardItem>, String> {
     let pool = &db.pool;
     let started = Instant::now();
-
-    let normalized_query = query.to_lowercase();
     let requested_offset = offset.max(0) as usize;
     let requested_limit = limit.max(0) as usize;
     if requested_limit == 0 {
@@ -1024,77 +1063,70 @@ pub async fn search_clips(
         },
         None => None,
     };
-    let batch_size = requested_limit.saturating_mul(4).clamp(100, 500) as i64;
-    let mut database_offset = 0_i64;
-    let mut matched = 0_usize;
-    let mut sql_ms = 0_u128;
-    let mut clips = Vec::with_capacity(requested_limit);
+    let index_started = Instant::now();
+    db.search_index.ensure_ready(pool, &db.crypto).await?;
+    let candidates = db.search_index.matches(&query);
+    let index_ms = index_started.elapsed().as_millis();
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    'batches: loop {
-        let sql_started = Instant::now();
-        let mut batch: Vec<Clip> = if let Some(folder_id) = folder_id {
-            sqlx::query_as(
-                r#"
-                    SELECT * FROM clips
-                    WHERE is_deleted = 0 AND folder_id = ?
-                    ORDER BY is_pinned DESC, created_at DESC
-                    LIMIT ? OFFSET ?
-                "#,
-            )
-            .bind(folder_id)
-            .bind(batch_size)
-            .bind(database_offset)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| e.to_string())?
-        } else {
-            sqlx::query_as(
-                r#"
-                    SELECT * FROM clips
-                    WHERE is_deleted = 0
-                    ORDER BY is_pinned DESC, created_at DESC
-                    LIMIT ? OFFSET ?
-                "#,
-            )
-            .bind(batch_size)
-            .bind(database_offset)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| e.to_string())?
-        };
-        sql_ms += sql_started.elapsed().as_millis();
-        let batch_len = batch.len();
-        if batch_len == 0 {
-            break;
-        }
+    // Ordering, pinning, folder filtering, and pagination remain authoritative
+    // in SQLite. Only UUIDs are scanned here; encrypted payloads are fetched and
+    // decrypted for the final result page.
+    let sql_started = Instant::now();
+    let ordered_ids: Vec<String> = if let Some(folder_id) = folder_id {
+        sqlx::query_scalar(
+            r#"
+            SELECT uuid FROM clips
+            WHERE is_deleted = 0 AND folder_id = ?
+            ORDER BY is_pinned DESC, created_at DESC
+            "#,
+        )
+        .bind(folder_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| error.to_string())?
+    } else {
+        sqlx::query_scalar(
+            r#"
+            SELECT uuid FROM clips
+            WHERE is_deleted = 0
+            ORDER BY is_pinned DESC, created_at DESC
+            "#,
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|error| error.to_string())?
+    };
+    let selected_ids = ordered_ids
+        .into_iter()
+        .filter(|id| candidates.contains(id))
+        .skip(requested_offset)
+        .take(requested_limit)
+        .collect::<Vec<_>>();
+    if selected_ids.is_empty() {
+        return Ok(Vec::new());
+    }
 
-        for mut clip in batch.drain(..) {
-            decrypt_clip_fields(&db, &mut clip)?;
-            let is_match = String::from_utf8_lossy(&clip.content)
-                .to_lowercase()
-                .contains(&normalized_query)
-                || clip.text_preview.to_lowercase().contains(&normalized_query)
-                || clip
-                    .ocr_text
-                    .as_deref()
-                    .is_some_and(|text| text.to_lowercase().contains(&normalized_query));
-            if !is_match {
-                continue;
-            }
-            if matched < requested_offset {
-                matched += 1;
-                continue;
-            }
-            clips.push(clip);
-            if clips.len() == requested_limit {
-                break 'batches;
-            }
-        }
-
-        database_offset += batch_len as i64;
-        if batch_len < batch_size as usize {
-            break;
-        }
+    let placeholders = std::iter::repeat_n("?", selected_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let selected_sql = format!(
+        "SELECT * FROM clips WHERE is_deleted = 0 AND uuid IN ({placeholders}) \
+         ORDER BY is_pinned DESC, created_at DESC"
+    );
+    let mut selected_query = sqlx::query_as::<_, Clip>(&selected_sql);
+    for id in &selected_ids {
+        selected_query = selected_query.bind(id);
+    }
+    let mut clips = selected_query
+        .fetch_all(pool)
+        .await
+        .map_err(|error| error.to_string())?;
+    let sql_ms = sql_started.elapsed().as_millis();
+    for clip in &mut clips {
+        decrypt_clip_fields(db, clip)?;
     }
 
     let image_rows = clips
@@ -1110,10 +1142,12 @@ pub async fn search_clips(
     let map_ms = map_started.elapsed().as_millis();
     let total_ms = started.elapsed().as_millis();
     log::info!(
-        "[perf][search_clips] sql_ms={} map_ms={} total_ms={} rows={} images={} raw_bytes={} filter_id={:?} offset={} limit={}",
+        "[perf][search_clips] index_ms={} sql_ms={} map_ms={} total_ms={} candidates={} rows={} images={} raw_bytes={} filter_id={:?} offset={} limit={}",
+        index_ms,
         sql_ms,
         map_ms,
         total_ms,
+        candidates.len(),
         clips.len(),
         image_rows,
         raw_bytes,
@@ -1168,26 +1202,6 @@ pub async fn get_folders(db: tauri::State<'_, Arc<Database>>) -> Result<Vec<Fold
 }
 
 #[tauri::command]
-pub fn hide_window(window: tauri::WebviewWindow) -> Result<(), String> {
-    window.hide().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn ping() -> Result<String, String> {
-    Ok("pong".to_string())
-}
-
-#[tauri::command]
-pub fn test_log() -> Result<String, String> {
-    log::trace!("[TEST] Trace level log");
-    log::debug!("[TEST] Debug level log");
-    log::info!("[TEST] Info level log");
-    log::warn!("[TEST] Warn level log");
-    log::error!("[TEST] Error level log");
-    Ok("Logs emitted - check console".to_string())
-}
-
-#[tauri::command]
 pub async fn get_clipboard_history_size(
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<i64, String> {
@@ -1199,18 +1213,6 @@ pub async fn get_clipboard_history_size(
             .await
             .map_err(|e| e.to_string())?;
     Ok(count)
-}
-
-#[tauri::command]
-pub async fn clear_clipboard_history(db: tauri::State<'_, Arc<Database>>) -> Result<(), String> {
-    let pool = &db.pool;
-
-    sqlx::query(r#"DELETE FROM clips WHERE is_deleted = 1"#)
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    cleanup_orphan_clip_image_files(pool, &db.image_dir).await?;
-    Ok(())
 }
 
 async fn clear_clips_in_pool(
@@ -1353,6 +1355,9 @@ pub(crate) fn remove_clip_image_files(image_dir: &std::path::Path, image_paths: 
 pub async fn clear_unpinned_clips(db: tauri::State<'_, Arc<Database>>) -> Result<u64, String> {
     let (deleted, image_paths) = clear_clips_in_pool(&db.pool, true).await?;
     remove_clip_image_files(&db.image_dir, image_paths);
+    if deleted > 0 {
+        db.search_index.invalidate();
+    }
     Ok(deleted)
 }
 
@@ -1360,6 +1365,7 @@ pub async fn clear_unpinned_clips(db: tauri::State<'_, Arc<Database>>) -> Result
 pub async fn clear_all_clips(db: tauri::State<'_, Arc<Database>>) -> Result<(), String> {
     let (_, image_paths) = clear_clips_in_pool(&db.pool, false).await?;
     remove_clip_image_files(&db.image_dir, image_paths);
+    db.search_index.invalidate();
     Ok(())
 }
 
@@ -1383,15 +1389,11 @@ pub async fn remove_duplicate_clips(db: tauri::State<'_, Arc<Database>>) -> Resu
 
     cleanup_orphan_clip_image_files(pool, &db.image_dir).await?;
 
-    Ok(result.rows_affected() as i64)
-}
+    if result.rows_affected() > 0 {
+        db.search_index.invalidate();
+    }
 
-#[tauri::command]
-pub async fn register_global_shortcut(
-    hotkey: String,
-    window: tauri::WebviewWindow,
-) -> Result<(), String> {
-    crate::shortcuts::register_standard_shortcut(window.app_handle(), &hotkey)
+    Ok(result.rows_affected() as i64)
 }
 
 #[tauri::command]
@@ -1428,19 +1430,13 @@ pub async fn focus_window(app: AppHandle, label: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn show_window(window: tauri::WebviewWindow) -> Result<(), String> {
-    crate::position_window_near_cursor(&window);
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn pick_file(app: AppHandle) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let file_path = app
         .dialog()
         .file()
-        .add_filter("Executables", &["exe", "app"])
+        .add_filter("Executables", &["exe"])
         .blocking_pick_file();
 
     match file_path {
@@ -1465,13 +1461,6 @@ pub async fn pick_ditto_database(app: AppHandle) -> Result<String, String> {
         Some(path) => Ok(path.to_string()),
         None => Err("No file selected".to_string()),
     }
-}
-
-#[tauri::command]
-pub fn get_layout_config() -> serde_json::Value {
-    serde_json::json!({
-        "window_height": crate::constants::WINDOW_HEIGHT,
-    })
 }
 
 #[tauri::command]
@@ -1512,15 +1501,20 @@ pub async fn import_from_ditto(
     dry_run: bool,
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<crate::ditto_import::DittoImportResult, String> {
-    crate::ditto_import::import_from_ditto(&db, &db_path, dry_run).await
+    let result = crate::ditto_import::import_from_ditto(&db, &db_path, dry_run).await?;
+    if !dry_run && result.imported > 0 {
+        db.search_index.invalidate();
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore,
-        enforce_retention_in_pool, migrate_clip_format_model, migrate_encrypted_storage,
-        remove_clip_image_files, restore_hash_material, toggle_clip_pin_in_pool, ClipboardContent,
+        enforce_retention_in_pool, load_recognized_text, migrate_clip_format_model,
+        migrate_encrypted_storage, remove_clip_image_files, restore_hash_material,
+        search_clips_in_database, toggle_clip_pin_in_pool, ClipboardContent,
         OCR_SNIPPET_CHAR_LIMIT,
     };
     use crate::clipboard::CapturedFormat;
@@ -1543,9 +1537,137 @@ mod tests {
             pool,
             crypto: Arc::new(crate::crypto::CryptoManager::ephemeral()),
             image_dir: std::env::temp_dir().join(format!("cubby-test-{}", uuid::Uuid::new_v4())),
+            search_index: Arc::new(crate::search_index::SearchIndex::default()),
         };
         database.migrate().await.expect("migration should succeed");
         database
+    }
+
+    struct SearchFixture<'a> {
+        id: &'a str,
+        clip_type: &'a str,
+        content: &'a str,
+        preview: &'a str,
+        ocr: Option<&'a str>,
+        folder_id: Option<i64>,
+        pinned: bool,
+        created_at: &'a str,
+    }
+
+    async fn insert_search_clip(database: &Database, fixture: SearchFixture<'_>) {
+        let encrypted_content = database.crypto.encrypt(fixture.content.as_bytes()).unwrap();
+        let encrypted_preview = database.crypto.encrypt_text(fixture.preview).unwrap();
+        let encrypted_ocr = fixture
+            .ocr
+            .map(|text| database.crypto.encrypt_text(text).unwrap());
+        sqlx::query(
+            r#"
+            INSERT INTO clips (
+                uuid, clip_type, content, text_preview, content_hash,
+                folder_id, is_pinned, created_at, ocr_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(fixture.id)
+        .bind(fixture.clip_type)
+        .bind(encrypted_content)
+        .bind(encrypted_preview)
+        .bind(format!("hash-{}", fixture.id))
+        .bind(fixture.folder_id)
+        .bind(fixture.pinned)
+        .bind(fixture.created_at)
+        .bind(encrypted_ocr)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn indexed_search_preserves_order_filters_pagination_and_encryption() {
+        let database = test_database().await;
+        let folder_id = sqlx::query("INSERT INTO folders (name) VALUES ('Receipts')")
+            .execute(&database.pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+        insert_search_clip(
+            &database,
+            SearchFixture {
+                id: "text-result",
+                clip_type: "text",
+                content: "Alpha release confirmation",
+                preview: "Alpha release confirmation",
+                ocr: None,
+                folder_id: Some(folder_id),
+                pinned: false,
+                created_at: "2026-01-01 00:00:00",
+            },
+        )
+        .await;
+        insert_search_clip(
+            &database,
+            SearchFixture {
+                id: "ocr-result",
+                clip_type: "image",
+                content: "",
+                preview: "Screenshot",
+                ocr: Some("Alpha receipt 8372"),
+                folder_id: None,
+                pinned: true,
+                created_at: "2026-01-02 00:00:00",
+            },
+        )
+        .await;
+        insert_search_clip(
+            &database,
+            SearchFixture {
+                id: "unrelated",
+                clip_type: "text",
+                content: "Beta notes",
+                preview: "Beta notes",
+                ocr: None,
+                folder_id: None,
+                pinned: false,
+                created_at: "2026-01-03 00:00:00",
+            },
+        )
+        .await;
+
+        let first = search_clips_in_database("ALPHA".into(), None, 1, 0, &database)
+            .await
+            .unwrap();
+        assert_eq!(first[0].id, "ocr-result");
+        assert!(first[0].ocr_match.is_some());
+        assert!(first[0].has_ocr_text);
+        assert_eq!(
+            load_recognized_text(&database, "ocr-result").await.unwrap(),
+            "Alpha receipt 8372"
+        );
+
+        let second = search_clips_in_database("alpha".into(), None, 1, 1, &database)
+            .await
+            .unwrap();
+        assert_eq!(second[0].id, "text-result");
+
+        let folder = search_clips_in_database(
+            "alpha".into(),
+            Some(folder_id.to_string()),
+            10,
+            0,
+            &database,
+        )
+        .await
+        .unwrap();
+        assert_eq!(folder.len(), 1);
+        assert_eq!(folder[0].id, "text-result");
+
+        let persisted_search_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE lower(name) LIKE '%search%' OR lower(sql) LIKE '%fts%'",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(persisted_search_tables, 0);
     }
 
     #[test]
