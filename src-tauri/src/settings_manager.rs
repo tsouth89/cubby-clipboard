@@ -1,7 +1,7 @@
 use crate::database::Database;
 use crate::models::AppSettings;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use tauri::AppHandle;
 #[cfg(not(debug_assertions))]
@@ -51,36 +51,32 @@ impl SettingsManager {
     /// Prefer the canonical settings path. In release builds, migrate once from
     /// the legacy Tauri identifier-based AppData file. Never copy release
     /// preferences into the debug `/dev` tree.
-    fn resolve_settings_load_path(
-        app: &AppHandle,
-        base: &std::path::Path,
-        path: &PathBuf,
-    ) -> PathBuf {
+    fn resolve_settings_load_path(app: &AppHandle, base: &Path, path: &Path) -> PathBuf {
         if path.exists() {
-            return path.clone();
+            return path.to_path_buf();
         }
 
         #[cfg(debug_assertions)]
         {
             let _ = (app, base);
-            return path.clone();
+            path.to_path_buf()
         }
 
         #[cfg(not(debug_assertions))]
         {
             let Ok(legacy_base) = app.path().app_data_dir() else {
-                return path.clone();
+                return path.to_path_buf();
             };
             let legacy = legacy_base.join("settings.json");
-            if !legacy.exists() || legacy == *path {
-                return path.clone();
+            if !legacy.exists() || legacy == path {
+                return path.to_path_buf();
             }
 
             match fs::create_dir_all(base).and_then(|_| {
                 fs::copy(&legacy, path)?;
                 Ok(())
             }) {
-                Ok(()) => path.clone(),
+                Ok(()) => path.to_path_buf(),
                 Err(error) => {
                     log::warn!(
                         "SETTINGS: Could not migrate legacy settings to {}: {error}. Loading legacy file in place.",
