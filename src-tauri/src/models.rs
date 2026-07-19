@@ -37,7 +37,10 @@ impl Default for AppSettings {
             theme: "system".to_string(),
             mica_effect: "solid".to_string(),
             language: "en".to_string(),
-            max_items: 1000,
+            // 0 = no item-count cap; retention is driven by age (auto_delete_days)
+            // so "keep history for N days" means exactly that. Pinned items are
+            // always kept regardless.
+            max_items: 0,
             auto_delete_days: 30,
             hotkey: "Win+Alt+V".to_string(),
             replace_win_v: true,

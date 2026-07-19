@@ -6,6 +6,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 
 ### Added
 - Redesigned Settings, reorganized into General, Privacy, Folders, and About sections with cleaner grouped cards
+- Choose how long Cubby keeps your history under Privacy, from a week up to forever, with a storage-used readout; pinned items are always kept
 
 ### Changed
 - Search and filters now clear each time Cubby opens, so you always start on your full, most-recent history

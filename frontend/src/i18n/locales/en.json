@@ -160,7 +160,17 @@
     "privacyPolicy": "Privacy policy",
     "openSourceTitle": "Free and open source.",
     "openSourceNote": "Cubby is GPL-3.0, a fork of PastePaw. © 2026 SouthForge AI.",
-    "folderItemCount": "{{count}} items"
+    "folderItemCount": "{{count}} items",
+    "historyRetention": "History retention",
+    "keepHistoryFor": "Keep history for",
+    "retention7": "7 days",
+    "retention30": "30 days",
+    "retention90": "90 days",
+    "retention365": "1 year",
+    "retentionForever": "Forever",
+    "retentionForeverWarning": "Cubby keeps everything you copy, including screenshots, until you clear it. This can use noticeable disk space over time.",
+    "pinnedAlwaysKept": "Pinned items are always kept.",
+    "storageUsed": "Storage used"
   },
   "notifications": {
     "clipDeleted": "Clip deleted",
