@@ -2,6 +2,18 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
+## v1.1.0
+
+### Added
+- Copy or paste the text recognized inside a screenshot by right-clicking an image result or pressing Shift+Enter
+- Search now finds words inside your screenshots and shows where they matched
+
+### Changed
+- Recognized screenshot text keeps its line breaks now, instead of running together
+- Your existing screenshots are re-scanned in the background so their recognized text improves too
+- Screenshot text recognition runs as a durable background task that resumes after a restart
+- Faster clipboard search that keeps your unencrypted text out of the database
+
 ## v1.0.2
 
 ### Fixed
