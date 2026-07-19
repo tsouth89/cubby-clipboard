@@ -24,7 +24,7 @@ Windows Clipboard History is convenient, but its short memory makes it hard to d
 
 ## Search inside your screenshots
 
-Copy a screenshot and Cubby reads the text inside it using the built-in Windows OCR engine — fully on your PC, no cloud and no extra downloads. Weeks later, search for a word you remember seeing (an error message, an address, a confirmation code) and the screenshot turns up in your history. Press `Shift+Enter` on an image to paste just the recognized text.
+Copy a screenshot and Cubby reads the text inside it using the built-in Windows OCR engine, fully on your PC with no cloud and no extra downloads. Weeks later, search for a word you remember seeing (an error message, an address, a confirmation code) and the screenshot turns up in your history. Press `Shift+Enter` on an image to paste just the recognized text.
 
 | Built for everyday use | Private by design |
 | --- | --- |
