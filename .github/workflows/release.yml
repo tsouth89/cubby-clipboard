@@ -136,6 +136,21 @@ jobs:
           echo "$BODY" >> "$GITHUB_OUTPUT"
           echo "$DELIMITER" >> "$GITHUB_OUTPUT"
 
+      - name: Remove previous test-build drafts
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list -R "${{ github.repository }}" --limit 50 \
+            --json tagName,isDraft,name \
+            --jq '.[] | select(.isDraft and (.name | test("test build"))) | .tagName' \
+          | while read -r tag; do
+              if [ -n "$tag" ]; then
+                echo "Deleting stale test-build draft: $tag"
+                gh release delete "$tag" -R "${{ github.repository }}" --yes || true
+              fi
+            done
+
       - name: Create release
         id: release
         uses: softprops/action-gh-release@v3
