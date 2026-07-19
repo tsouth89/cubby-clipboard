@@ -13,7 +13,10 @@ pub struct SettingsManager {
 
 impl SettingsManager {
     pub async fn new(app: &AppHandle, db: &Database) -> Self {
-        let path = app.path().app_data_dir().unwrap().join("settings.json");
+        // In portable mode settings live beside the executable with the rest of
+        // the data; otherwise they stay in the per-user AppData directory.
+        let base = crate::portable_data_dir().unwrap_or_else(|| app.path().app_data_dir().unwrap());
+        let path = base.join("settings.json");
         let settings = if path.exists() {
             // Load from file
             match fs::read_to_string(&path) {

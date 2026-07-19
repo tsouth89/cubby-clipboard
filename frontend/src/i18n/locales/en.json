@@ -83,6 +83,7 @@
     "floatAboveTaskbarDesc": "Show the window on top of the taskbar",
     "startupWithWindows": "Startup with Windows",
     "startupWithWindowsDesc": "Automatically start when Windows boots",
+    "startupWithWindowsPortable": "Not available in the portable version (it never touches the registry).",
     "roundCorners": "Rounded Corners",
     "roundCornersDesc": "Use rounded corners for the Cubby flyout.",
     "ignoreGhostClips": "Ignore Ghost Clips",
