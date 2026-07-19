@@ -5,7 +5,7 @@ use sqlx::{Row, SqlitePool};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Notify;
 
 const MAX_ATTEMPTS: i64 = 3;
@@ -62,7 +62,7 @@ impl OcrFailureKind {
     }
 }
 
-pub fn init(db: Arc<Database>) {
+pub fn init(app: AppHandle, db: Arc<Database>) {
     if STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -76,7 +76,7 @@ pub fn init(db: Arc<Database>) {
 
     tauri::async_runtime::spawn(async move {
         loop {
-            if let Err(error) = run_worker(db.clone()).await {
+            if let Err(error) = run_worker(app.clone(), db.clone()).await {
                 // A transient database failure must not permanently strand the
                 // queue until the next app restart. Keep one bounded supervisor
                 // alive and restart the worker after a short delay.
@@ -167,7 +167,7 @@ pub async fn reprocess_existing_for_linebreaks(db: &Database) -> Result<(), Stri
     Ok(())
 }
 
-async fn run_worker(db: Arc<Database>) -> Result<(), String> {
+async fn run_worker(app: AppHandle, db: Arc<Database>) -> Result<(), String> {
     PAUSED.store(load_paused(&db.pool).await?, Ordering::SeqCst);
     recover_processing_jobs(&db.pool).await?;
     loop {
@@ -180,7 +180,7 @@ async fn run_worker(db: Arc<Database>) -> Result<(), String> {
         }
 
         if let Some(job) = claim_next(&db.pool).await? {
-            process_job(&db, job).await?;
+            process_job(&app, &db, job).await?;
             continue;
         }
 
@@ -376,7 +376,7 @@ async fn claim_next(pool: &SqlitePool) -> Result<Option<OcrJob>, String> {
     Ok(Some(job))
 }
 
-async fn process_job(db: &Database, job: OcrJob) -> Result<(), String> {
+async fn process_job(app: &AppHandle, db: &Database, job: OcrJob) -> Result<(), String> {
     let crypto = db.crypto.clone();
     let image_dir = db.image_dir.clone();
     let file_path = job.file_path.clone();
@@ -388,7 +388,15 @@ async fn process_job(db: &Database, job: OcrJob) -> Result<(), String> {
     .await;
 
     match result {
-        Ok(Ok(text)) => mark_completed(db, &job.clip_uuid, &text).await?,
+        Ok(Ok(text)) => {
+            let has_text = !text.trim().is_empty();
+            mark_completed(db, &job.clip_uuid, &text).await?;
+            if has_text {
+                // Let the open flyout surface this clip's "paste text" option
+                // right away instead of only after the list is next reloaded.
+                let _ = app.emit("ocr-completed", &job.clip_uuid);
+            }
+        }
         Ok(Err(error)) => {
             let kind = classify_failure(&error);
             mark_failed(db, &job, kind).await?;
