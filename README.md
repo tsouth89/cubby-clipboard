@@ -8,6 +8,7 @@
   [![CI](https://github.com/tsouth89/cubby-clipboard/actions/workflows/ci.yml/badge.svg)](https://github.com/tsouth89/cubby-clipboard/actions/workflows/ci.yml)
   [![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white)](https://cubbyclipboard.com/start.html)
   [![GPL-3.0](https://img.shields.io/github/license/tsouth89/cubby-clipboard)](LICENSE)
+  [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/Xsn27MxdBA)
 
   [Download](https://github.com/tsouth89/cubby-clipboard/releases/latest) · [Getting started](https://cubbyclipboard.com/start.html) · [Website](https://cubbyclipboard.com) · [Report an issue](https://github.com/tsouth89/cubby-clipboard/issues)
 </div>
