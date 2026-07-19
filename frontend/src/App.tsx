@@ -141,6 +141,10 @@ function App() {
         setSearchQuery('');
         setContentFilter('all');
         setSelectedFolder(null);
+        // Reset selection and scroll the list back to the top, so reopening
+        // always shows your most-recent copy instead of wherever you'd scrolled.
+        setSelectedClipId(null);
+        setClipListResetToken((prev) => prev + 1);
         // Dismiss any transient overlays so reopening lands on the clean list.
         setContextMenu(null);
         setClearRequest(null);
