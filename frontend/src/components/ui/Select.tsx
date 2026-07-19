@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, type CSSProperties } from 'react';
+import { createPortal } from 'react-dom';
 import { ChevronDown, Check } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -26,23 +27,60 @@ export function Select({
   disabled,
 }: SelectProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
   const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   const selectedOption = options.find((opt) => opt.value === value);
 
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
-        setIsOpen(false);
-      }
-    };
+  // Position the menu against the trigger in viewport coordinates. The menu is
+  // portaled to <body>, so it is never clipped by an ancestor's overflow (the
+  // settings cards use overflow-hidden and the panel is a scroll container).
+  const updatePosition = () => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    setMenuStyle({
+      position: 'fixed',
+      left: rect.left,
+      top: rect.bottom + 4,
+      width: rect.width,
+    });
+  };
 
-    if (isOpen) {
-      document.addEventListener('mousedown', handleClickOutside);
-    }
+  useLayoutEffect(() => {
+    if (isOpen) updatePosition();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (containerRef.current?.contains(target)) return;
+      if (menuRef.current?.contains(target)) return;
+      setIsOpen(false);
+    };
+    // The menu is fixed-positioned, so close it if an ancestor or the page
+    // scrolls (it would otherwise detach from the trigger). Ignore scrolls that
+    // originate inside the menu's own option list so it stays open while paging
+    // through long lists.
+    const handleScroll = (event: Event) => {
+      if (menuRef.current?.contains(event.target as Node)) return;
+      setIsOpen(false);
+    };
+    const close = () => setIsOpen(false);
+
+    document.addEventListener('mousedown', handleClickOutside);
+    window.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('resize', close);
 
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('resize', close);
     };
   }, [isOpen]);
 
@@ -54,6 +92,7 @@ export function Select({
   return (
     <div className={twMerge('relative w-full', className)} ref={containerRef}>
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => !disabled && setIsOpen(!isOpen)}
         disabled={disabled}
@@ -75,30 +114,36 @@ export function Select({
         />
       </button>
 
-      {isOpen && (
-        <div className="animate-in fade-in-0 zoom-in-95 absolute left-0 top-full z-50 mt-1 w-full overflow-hidden rounded-lg border border-border bg-popover text-popover-foreground shadow-md duration-100">
-          <div className="max-h-60 overflow-y-auto py-1">
-            {options.map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                onClick={() => handleSelect(option.value)}
-                className={clsx(
-                  'relative flex w-full cursor-default select-none items-center py-1.5 pl-3 pr-8 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground',
-                  option.value === value && 'bg-accent/50 font-medium text-accent-foreground'
-                )}
-              >
-                <span className="truncate">{option.label}</span>
-                {option.value === value && (
-                  <span className="absolute right-2 flex h-3.5 w-3.5 items-center justify-center">
-                    <Check size={14} className="text-primary" />
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+      {isOpen &&
+        createPortal(
+          <div
+            ref={menuRef}
+            style={menuStyle}
+            className="animate-in fade-in-0 zoom-in-95 z-[100] overflow-hidden rounded-lg border border-border bg-popover text-popover-foreground shadow-md duration-100"
+          >
+            <div className="max-h-60 overflow-y-auto py-1">
+              {options.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => handleSelect(option.value)}
+                  className={clsx(
+                    'relative flex w-full cursor-default select-none items-center py-1.5 pl-3 pr-8 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground',
+                    option.value === value && 'bg-accent/50 font-medium text-accent-foreground'
+                  )}
+                >
+                  <span className="truncate">{option.label}</span>
+                  {option.value === value && (
+                    <span className="absolute right-2 flex h-3.5 w-3.5 items-center justify-center">
+                      <Check size={14} className="text-primary" />
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
   );
 }
