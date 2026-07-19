@@ -235,6 +235,11 @@ function App() {
               .reduce((sum, item) => sum + (item.content?.length ?? 0), 0)
           : 0;
 
+        // A newer load supersedes this one (e.g. the reset when the flyout
+        // closes starts an unfiltered load while a filtered one is in flight).
+        // Discard the stale result so it can't overwrite the current view.
+        if (perfId !== loadPerfIdRef.current) return;
+
         if (append) {
           setClips((prev) => {
             return [...prev, ...data];
@@ -269,11 +274,12 @@ function App() {
           });
         }
       } catch (error) {
+        if (perfId !== loadPerfIdRef.current) return;
         console.error('Failed to load clips:', error);
         setLoadError(true);
         setHasMore(false);
       } finally {
-        setIsLoading(false);
+        if (perfId === loadPerfIdRef.current) setIsLoading(false);
       }
     },
     [clips.length]

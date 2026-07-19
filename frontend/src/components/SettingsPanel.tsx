@@ -1188,7 +1188,9 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                                     <span className="flex-1 text-sm font-medium">
                                       {folder.name}
                                       <span className="ml-2 text-xs font-normal text-muted-foreground">
-                                        {folder.item_count} items
+                                        {t('settings.folderItemCount', {
+                                          count: folder.item_count,
+                                        })}
                                       </span>
                                     </span>
                                     <button

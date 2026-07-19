@@ -430,7 +430,11 @@ async fn process_clipboard_snapshot(
     // source, so skip processing it entirely.
     {
         let mut lock = IGNORE_HASH.lock();
-        if lock.take().as_deref() == Some(clip_hash.as_str()) {
+        if lock.as_deref() == Some(clip_hash.as_str()) {
+            // Only consume the marker on a match. Clearing it for an
+            // intermediate, non-matching snapshot would lose it before our own
+            // write arrives, letting the self-paste be persisted after all.
+            lock.take();
             log::info!("CLIPBOARD: Ignoring self-paste (own clipboard write)");
             return;
         }

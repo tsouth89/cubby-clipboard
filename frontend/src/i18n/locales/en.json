@@ -159,7 +159,8 @@
     "sourceCode": "Source code on GitHub",
     "privacyPolicy": "Privacy policy",
     "openSourceTitle": "Free and open source.",
-    "openSourceNote": "Cubby is GPL-3.0, a fork of PastePaw. © 2026 SouthForge AI."
+    "openSourceNote": "Cubby is GPL-3.0, a fork of PastePaw. © 2026 SouthForge AI.",
+    "folderItemCount": "{{count}} items"
   },
   "notifications": {
     "clipDeleted": "Clip deleted",
