@@ -131,6 +131,23 @@ function App() {
     return () => window.removeEventListener('focus', refreshPasteContext);
   }, [refreshPasteContext]);
 
+  // Clear the search and any active filters whenever the flyout closes, so each
+  // time Cubby opens it starts fresh instead of showing a stale, filtered list.
+  // The window hides on blur, so focus loss is the reliable "closed" signal for
+  // every dismissal path (Esc, click-away, and post-paste hide).
+  useEffect(() => {
+    const unlisten = appWindow.onFocusChanged(({ payload: focused }) => {
+      if (!focused) {
+        setSearchQuery('');
+        setContentFilter('all');
+        setSelectedFolder(null);
+      }
+    });
+    return () => {
+      unlisten.then((dispose) => dispose()).catch(() => undefined);
+    };
+  }, [appWindow]);
+
   const openSettings = useCallback(async () => {
     // Check if settings window already exists
     const existingWin = await WebviewWindow.getByLabel('settings');
@@ -218,6 +235,11 @@ function App() {
               .reduce((sum, item) => sum + (item.content?.length ?? 0), 0)
           : 0;
 
+        // A newer load supersedes this one (e.g. the reset when the flyout
+        // closes starts an unfiltered load while a filtered one is in flight).
+        // Discard the stale result so it can't overwrite the current view.
+        if (perfId !== loadPerfIdRef.current) return;
+
         if (append) {
           setClips((prev) => {
             return [...prev, ...data];
@@ -252,11 +274,12 @@ function App() {
           });
         }
       } catch (error) {
+        if (perfId !== loadPerfIdRef.current) return;
         console.error('Failed to load clips:', error);
         setLoadError(true);
         setHasMore(false);
       } finally {
-        setIsLoading(false);
+        if (perfId === loadPerfIdRef.current) setIsLoading(false);
       }
     },
     [clips.length]
