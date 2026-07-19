@@ -61,11 +61,9 @@ impl SettingsManager {
             settings.language = v;
         }
 
-        if let Some(v) = get_val(pool, "max_items").await {
-            if let Ok(i) = v.parse() {
-                settings.max_items = i;
-            }
-        }
+        // Retention is time-only. Ignore any persisted item cap (legacy installs
+        // may carry a nonzero max_items from before this was exposed) so the age
+        // window is the sole lever; max_items stays 0 = no count cap.
         if let Some(v) = get_val(pool, "auto_delete_days").await {
             if let Ok(i) = v.parse() {
                 settings.auto_delete_days = i;

@@ -394,7 +394,12 @@ async fn process_job(app: &AppHandle, db: &Database, job: OcrJob) -> Result<(), 
             if has_text {
                 // Let the open flyout surface this clip's "paste text" option
                 // right away instead of only after the list is next reloaded.
-                let _ = app.emit("ocr-completed", &job.clip_uuid);
+                if let Err(error) = app.emit("ocr-completed", &job.clip_uuid) {
+                    log::warn!(
+                        "OCR: could not emit ocr-completed for {}: {error}",
+                        job.clip_uuid
+                    );
+                }
             }
         }
         Ok(Err(error)) => {

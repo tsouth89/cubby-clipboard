@@ -375,14 +375,32 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     return () => window.clearInterval(ocrStatusTimer);
   }, []);
 
-  const handleRetentionChange = async (value: string) => {
-    await updateSettings({ auto_delete_days: Number(value), max_items: 0 });
-    try {
-      await invoke('apply_retention');
-      await loadStorageUsage();
-    } catch (error) {
-      console.error('Failed to apply retention:', error);
-    }
+  const retentionGenRef = useRef(0);
+  const handleRetentionChange = (value: string) => {
+    const updates: Partial<Settings> = { auto_delete_days: Number(value), max_items: 0 };
+    const generation = ++retentionGenRef.current;
+    settingsSaveQueue.current = settingsSaveQueue.current
+      .catch(() => undefined)
+      .then(async () => {
+        const newSettings = { ...settingsRef.current, ...updates };
+        try {
+          await invoke('save_settings', { settings: newSettings });
+          settingsRef.current = newSettings;
+          setSettings(newSettings);
+          await emit('settings-changed', newSettings);
+          // Prune only for the latest selection, and only after its save has
+          // persisted, so a rapid change can't prune with an intermediate value.
+          if (generation === retentionGenRef.current) {
+            await invoke('apply_retention');
+          }
+          await loadStorageUsage();
+          toast.success('Settings updated');
+        } catch (error) {
+          console.error('Failed to update retention:', error);
+          toast.error(String(error));
+        }
+      });
+    return settingsSaveQueue.current;
   };
 
   const handleOcrPauseToggle = async () => {

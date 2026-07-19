@@ -1277,22 +1277,27 @@ pub async fn get_storage_usage(
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<StorageUsage, String> {
     let pool = &db.pool;
-    let items: i64 =
-        sqlx::query_scalar(r#"SELECT COUNT(*) FROM clips WHERE is_deleted = 0"#)
-            .fetch_one(pool)
-            .await
-            .map_err(|error| error.to_string())?;
+    let items: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM clips WHERE is_deleted = 0"#)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| error.to_string())?;
     let content_bytes: i64 = sqlx::query_scalar(
         r#"SELECT COALESCE(SUM(LENGTH(content)), 0) FROM clips WHERE is_deleted = 0"#,
     )
     .fetch_one(pool)
     .await
     .map_err(|error| error.to_string())?;
-    let image_bytes: i64 =
-        sqlx::query_scalar(r#"SELECT COALESCE(SUM(file_size), 0) FROM clip_images"#)
-            .fetch_one(pool)
-            .await
-            .map_err(|error| error.to_string())?;
+    let image_bytes: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(SUM(clip_images.file_size), 0)
+        FROM clip_images
+        JOIN clips ON clips.uuid = clip_images.clip_uuid
+        WHERE clips.is_deleted = 0
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|error| error.to_string())?;
     Ok(StorageUsage {
         items,
         bytes: content_bytes + image_bytes,
