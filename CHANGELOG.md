@@ -2,6 +2,19 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
+## v1.2.0
+
+### Added
+- Redesigned Settings, reorganized into General, Privacy, Folders, and About sections with cleaner grouped cards
+
+### Changed
+- Search and filters now clear each time Cubby opens, so you always start on your full, most-recent history
+- Newly copied screenshots have their text recognized first, so you can search a screenshot right after copying it
+- Updated the app and tray icons to the current Cubby mark
+
+### Fixed
+- Reusing a clip no longer re-labels it as copied from "Cubby Clipboard" or resets its timestamp to just now
+
 ## v1.1.1
 
 ### Added
