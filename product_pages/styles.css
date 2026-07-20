@@ -54,6 +54,8 @@ h1 span { color: #607075; font-weight: 600; }
 .button-primary:hover { background: var(--blue-dark); }
 .button-secondary { border-color: #c9cac5; background: rgba(255,255,255,.55); color: var(--ink); }
 .button-secondary:hover { border-color: #a9aba6; background: var(--white); }
+.star-count { padding: 2px 9px; border-radius: 999px; background: rgba(96,112,117,.14); color: #536064; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.star-count[hidden] { display: none; }
 .release-note { margin: 14px 0 0; color: #768084; font-size: 13px; }
 
 .product-stage { position: relative; min-height: 560px; display: grid; align-items: center; }
