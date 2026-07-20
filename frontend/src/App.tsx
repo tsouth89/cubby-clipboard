@@ -19,15 +19,19 @@ import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
 import { generateDemoClips } from './debug/demoData';
 
+const assetCaptureEnabled = import.meta.env.DEV && import.meta.env.VITE_CUBBY_ASSET_CAPTURE === '1';
+
 function App() {
-  const [clips, setClips] = useState<AppClipboardItem[]>([]);
+  const [clips, setClips] = useState<AppClipboardItem[]>(() =>
+    assetCaptureEnabled ? generateDemoClips().map((clip) => ({ ...clip, ocr_match: null })) : []
+  );
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [contentFilter, setContentFilter] = useState<ContentFilter>('all');
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [clipListResetToken, setClipListResetToken] = useState(0);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(!assetCaptureEnabled);
   const [loadError, setLoadError] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [theme, setTheme] = useState('system');
@@ -86,6 +90,29 @@ function App() {
     (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
   useEffect(() => {
+    if (assetCaptureEnabled) {
+      setTheme('dark');
+      setSettings({
+        max_items: 500,
+        auto_delete_days: 0,
+        startup_with_windows: false,
+        show_in_taskbar: false,
+        hotkey: 'Win+V',
+        replace_win_v: true,
+        theme: 'dark',
+        mica_effect: 'clear',
+        round_corners: true,
+        float_above_taskbar: true,
+        density: 'comfortable',
+        remote_paste_mode: 'copy_then_paste',
+        ignore_ghost_clips: true,
+        skip_sensitive: true,
+        skip_likely_secrets: false,
+        has_completed_onboarding: true,
+      });
+      return;
+    }
+
     invoke<Settings>('get_settings')
       .then((s) => {
         setTheme(s.theme);
@@ -122,6 +149,10 @@ function App() {
   }, []);
 
   const refreshPasteContext = useCallback(() => {
+    if (assetCaptureEnabled) {
+      setPasteContext({ target_kind: 'standard', remote_paste_mode: 'copy_then_paste' });
+      return;
+    }
     invoke<PasteContext>('get_paste_context').then(setPasteContext).catch(console.error);
   }, []);
 
@@ -212,7 +243,27 @@ function App() {
 
         let data: AppClipboardItem[];
 
-        if (searchQuery.trim()) {
+        if (assetCaptureEnabled) {
+          const query = searchQuery.trim().toLocaleLowerCase();
+          data = generateDemoClips()
+            .filter((clip) => {
+              if (!query) return true;
+              const searchable = [
+                clip.content,
+                clip.preview,
+                clip.ocr_match?.before,
+                clip.ocr_match?.matched,
+                clip.ocr_match?.after,
+              ]
+                .filter(Boolean)
+                .join(' ')
+                .toLocaleLowerCase();
+              return searchable.includes(query);
+            })
+            .map((clip) => ({ ...clip, ocr_match: query ? clip.ocr_match : null }));
+          invokeStart = performance.now();
+          invokeEnd = invokeStart;
+        } else if (searchQuery.trim()) {
           if (perfLogEnabled) invokeStart = performance.now();
           data = await invoke<AppClipboardItem[]>('search_clips', {
             query: searchQuery,
@@ -295,6 +346,10 @@ function App() {
   );
 
   const loadFolders = useCallback(async () => {
+    if (assetCaptureEnabled) {
+      setFolders([]);
+      return;
+    }
     try {
       const data = await invoke<FolderItem[]>('get_folders');
 
@@ -333,6 +388,10 @@ function App() {
   const [totalClipCount, setTotalClipCount] = useState(0);
 
   const refreshTotalCount = useCallback(async () => {
+    if (assetCaptureEnabled) {
+      setTotalClipCount(generateDemoClips().length);
+      return;
+    }
     try {
       const count = await invoke<number>('get_clipboard_history_size');
       setTotalClipCount(count);
@@ -344,6 +403,37 @@ function App() {
   useEffect(() => {
     refreshTotalCount();
   }, [refreshTotalCount]);
+
+  useEffect(() => {
+    if (!assetCaptureEnabled) return;
+
+    const query = 'clipboard service unavailable';
+    const timers: number[] = [];
+    let typingTimer: number | null = null;
+
+    const runSearch = () => {
+      setSearchQuery('');
+      const input = document.querySelector<HTMLInputElement>('[data-el="search-input"]');
+      input?.focus();
+      let index = 0;
+      typingTimer = window.setInterval(() => {
+        index += 1;
+        setSearchQuery(query.slice(0, index));
+        if (index >= query.length && typingTimer !== null) {
+          window.clearInterval(typingTimer);
+          typingTimer = null;
+          timers.push(window.setTimeout(runSearch, 2800));
+        }
+      }, 72);
+    };
+
+    timers.push(window.setTimeout(runSearch, 1800));
+
+    return () => {
+      timers.forEach(window.clearTimeout);
+      if (typingTimer !== null) window.clearInterval(typingTimer);
+    };
+  }, []);
 
   useEffect(() => {
     const unlistenClipboard = listen('clipboard-change', () => {

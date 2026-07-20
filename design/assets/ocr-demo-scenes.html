@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cubby OCR demo scenes</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
+        --paper: #f7f5ef;
+        --ink: #1d2528;
+        --muted: #66757b;
+        --blue: #0878c9;
+        --teal: #177c78;
+        --dark: #10191c;
+      }
+
+      * { box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; margin: 0; overflow: hidden; }
+      @media (max-width: 1919px) { html, body { overflow-x: auto; overflow-y: hidden; } }
+      body { background: var(--paper); color: var(--ink); }
+
+      .scene {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at 79% 48%, rgba(8, 120, 201, 0.12), transparent 24%),
+          radial-gradient(circle at 88% 28%, rgba(23, 124, 120, 0.09), transparent 17%),
+          var(--paper);
+      }
+
+      .topbar {
+        position: absolute;
+        left: 96px;
+        right: 96px;
+        top: 58px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .brand { display: flex; align-items: center; gap: 14px; font-weight: 720; font-size: 25px; }
+      .mark {
+        width: 42px;
+        height: 42px;
+        background: url("../../product_pages/brand-mark.svg") center / contain no-repeat;
+        filter: drop-shadow(0 8px 12px rgba(8, 120, 201, 0.18));
+      }
+
+      .privacy {
+        color: var(--teal);
+        font-size: 16px;
+        font-weight: 650;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .copy {
+        position: absolute;
+        left: 110px;
+        top: 250px;
+        width: 660px;
+      }
+      .eyebrow { color: var(--teal); font-size: 17px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; }
+      h1 { margin: 22px 0 24px; font-size: 82px; line-height: 0.98; letter-spacing: -0.055em; }
+      .sub { width: 590px; color: var(--muted); font-size: 28px; line-height: 1.45; }
+      .hint { margin-top: 38px; display: inline-flex; align-items: center; gap: 12px; padding: 14px 18px; border: 1px solid #d6d8d3; border-radius: 13px; background: rgba(255,255,255,.65); color: #425159; font-size: 19px; }
+      .hint-dot { width: 10px; height: 10px; border-radius: 50%; background: #21b883; box-shadow: 0 0 0 5px rgba(33,184,131,.12); }
+
+      .shot {
+        position: absolute;
+        right: 110px;
+        top: 225px;
+        width: 860px;
+        height: 560px;
+        border-radius: 28px;
+        background: linear-gradient(145deg, #16273b, #263d5b);
+        box-shadow: 0 36px 90px rgba(28, 43, 50, 0.22);
+        overflow: hidden;
+      }
+      .shot::before { content:""; position:absolute; width:340px; height:340px; right:-80px; top:-120px; border-radius:50%; background:rgba(255,255,255,.055); }
+
+      .dialog {
+        position: absolute;
+        left: 138px;
+        top: 100px;
+        width: 585px;
+        height: 360px;
+        border-radius: 15px;
+        background: #f7f7f8;
+        box-shadow: 0 26px 60px rgba(0,0,0,.38);
+        color: #202124;
+      }
+      .dialog-title { height: 68px; padding: 24px 28px; border-bottom: 1px solid #d9dadd; font-size: 19px; font-weight: 650; }
+      .dialog-body { display: flex; gap: 24px; padding: 36px 34px; }
+      .info { flex: 0 0 auto; display:grid; place-items:center; width:56px; height:56px; border-radius:50%; background:#1677d2; color:white; font-size:33px; font-weight:700; }
+      .dialog-copy strong { display:block; margin: 2px 0 12px; font-size: 22px; }
+      .dialog-copy p { margin: 0 0 7px; color:#51555a; font-size:17px; }
+      .code { margin-top: 15px !important; color:#73767b !important; font-size:14px !important; }
+      .close { position:absolute; right:30px; bottom:24px; padding:10px 27px; border-radius:6px; background:var(--blue); color:white; font-weight:650; }
+
+      .search-copy { top: 290px; width: 720px; }
+      .search-copy h1 { font-size: 76px; }
+      .app-stage { position:absolute; right:135px; top:175px; width:680px; height:810px; border-radius:30px; background:#11191c; box-shadow:0 38px 95px rgba(24,38,45,.27); }
+
+      .pasted {
+        position: absolute;
+        right: 108px;
+        top: 205px;
+        width: 900px;
+        height: 655px;
+        border-radius: 24px;
+        background: white;
+        border: 1px solid #dedfd9;
+        box-shadow: 0 32px 85px rgba(27, 42, 49, .18);
+        overflow: hidden;
+      }
+      .docbar { height: 64px; display:flex; align-items:center; padding:0 24px; background:#f0f1ef; border-bottom:1px solid #dbddd8; color:#4b555a; font-size:17px; }
+      .pasted .shot { position:absolute; left:72px; right:auto; top:108px; width:756px; height:438px; border-radius:14px; box-shadow:none; }
+      .pasted .dialog { transform: scale(.78); transform-origin: top left; left:110px; top:55px; }
+      .success { position:absolute; right:38px; bottom:28px; padding:14px 19px; border-radius:12px; background:#152126; color:white; font-size:16px; box-shadow:0 14px 35px rgba(0,0,0,.24); }
+      .success b { color:#55d1a2; }
+      .later { background: var(--dark); color: white; display:grid; place-items:center; text-align:center; }
+      .later .topbar { opacity:.78; }
+      .later .brand { color:white; }
+      .later-card { margin-top:20px; }
+      .later-line { width:78px; height:5px; margin:0 auto 31px; border-radius:99px; background:linear-gradient(90deg,var(--blue),#27afa5); }
+      .later h1 { margin:0; font-size:62px; letter-spacing:-.035em; }
+      .later p { margin:18px 0 0; color:#aebbc0; font-size:22px; }
+    </style>
+  </head>
+  <body>
+    <div class="scene" id="scene">
+      <div class="topbar">
+        <div class="brand"><span class="mark"></span><span>cubby</span></div>
+        <div class="privacy">Local by design</div>
+      </div>
+    </div>
+    <script>
+      const scene = new URLSearchParams(location.search).get('scene') || 'intro';
+      const root = document.querySelector('#scene');
+      const errorShot = `
+        <div class="shot">
+          <div class="dialog">
+            <div class="dialog-title">Cubby Clipboard</div>
+            <div class="dialog-body"><div class="info">i</div><div class="dialog-copy">
+              <strong>Clipboard service unavailable</strong>
+              <p>Cubby could not read the Windows clipboard.</p>
+              <p>Restart the clipboard service and try again.</p>
+              <p class="code">Error code: CUBBY-0X800401D0</p>
+            </div></div><div class="close">Close</div>
+          </div>
+        </div>`;
+
+      if (scene === 'later') {
+        root.classList.add('later');
+        root.insertAdjacentHTML('beforeend', `<div class="later-card"><div class="later-line"></div><h1>Two weeks later</h1><p>You only remember three words.</p></div>`);
+      } else if (scene === 'og') {
+        root.insertAdjacentHTML('beforeend', `
+          <section class="copy search-copy"><div class="eyebrow">Cubby for Windows 11</div><h1>Search your<br>screenshots<br>like text.</h1>
+          <div class="sub">Private clipboard history with local OCR. No account required.</div></section>
+          <div class="app-stage"></div>`);
+      } else if (scene === 'intro') {
+        root.insertAdjacentHTML('beforeend', `
+          <section class="copy"><div class="eyebrow">Copy it once</div><h1>That screenshot?<br>Saved.</h1>
+          <div class="sub">Cubby keeps the image and quietly makes every word inside it searchable.</div>
+          <div class="hint"><span class="hint-dot"></span>Screenshot saved to Cubby · Stored locally</div></section>${errorShot}`);
+      } else if (scene === 'search') {
+        root.insertAdjacentHTML('beforeend', `
+          <section class="copy search-copy"><div class="eyebrow">Two weeks later</div><h1>Type what<br>you remember.</h1>
+          <div class="sub">Cubby searches the words inside your screenshots, not just their filenames.</div></section>
+          <div class="app-stage"></div>`);
+      } else {
+        root.insertAdjacentHTML('beforeend', `
+          <section class="copy"><div class="eyebrow">Found in seconds</div><h1>Press Enter.<br>Paste it back.</h1>
+          <div class="sub">No folders to remember. No cloud account. Just the thing you copied when you need it again.</div></section>
+          <div class="pasted"><div class="docbar">Project notes · Screenshot pasted from Cubby</div>${errorShot}
+          <div class="success"><b>✓ Pasted</b> from your local history</div></div>`);
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, initial-scale=1" />
+    <title>Cubby launch stills</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
+        --paper: #f7f5ef;
+        --ink: #1d2528;
+        --muted: #65747a;
+        --line: #dadbd5;
+        --blue: #0878c9;
+        --teal: #177c78;
+        --dark: #11191c;
+        --panel: #20282b;
+        --panel-2: #2a3336;
+        --soft-blue: #e6f3fb;
+      }
+
+      * { box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; margin: 0; overflow: hidden; }
+      @media (max-width: 1919px) { html, body { overflow-x: auto; overflow-y: hidden; } }
+      body { background: var(--paper); color: var(--ink); }
+      .scene {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at 80% 48%, rgba(8, 120, 201, .11), transparent 26%),
+          radial-gradient(circle at 91% 23%, rgba(23, 124, 120, .08), transparent 17%),
+          var(--paper);
+      }
+      .topbar { position: absolute; left: 96px; right: 96px; top: 56px; display: flex; align-items: center; justify-content: space-between; }
+      .brand { display: flex; align-items: center; gap: 14px; font-size: 25px; font-weight: 720; }
+      .mark { width: 42px; height: 42px; background: url("../../product_pages/brand-mark.svg") center / contain no-repeat; filter: drop-shadow(0 8px 12px rgba(8,120,201,.18)); }
+      .privacy { color: var(--teal); font-size: 16px; font-weight: 680; letter-spacing: .08em; text-transform: uppercase; }
+      .copy { position: absolute; left: 110px; top: 265px; width: 650px; }
+      .eyebrow { color: var(--teal); font-size: 17px; font-weight: 720; letter-spacing: .12em; text-transform: uppercase; }
+      h1 { margin: 22px 0 24px; font-size: 78px; line-height: .99; letter-spacing: -.052em; }
+      .sub { width: 600px; color: var(--muted); font-size: 27px; line-height: 1.45; }
+      .proof { display: flex; gap: 12px; margin-top: 34px; flex-wrap: wrap; }
+      .pill { padding: 11px 15px; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,.62); color: #45545a; font-size: 16px; font-weight: 620; }
+      .pill.good { border-color: #b9ddd0; background: #eef9f5; color: #176b55; }
+
+      .flyout { position: absolute; right: 130px; top: 160px; width: 690px; height: 790px; padding: 14px; border: 1px solid rgba(255,255,255,.1); border-radius: 24px; background: var(--dark); color: white; box-shadow: 0 38px 95px rgba(24,38,45,.28); }
+      .search { display:flex; align-items:center; gap:12px; height:58px; padding:0 17px; border:1px solid rgba(255,255,255,.11); border-radius:12px; background:rgba(255,255,255,.055); color:#aab6bb; font-size:16px; }
+      .search b { color:#dbe5e8; font-weight:500; }
+      .controls { display:flex; align-items:center; height:54px; gap:26px; padding:0 10px; color:#96a5aa; font-size:15px; }
+      .controls strong { height:54px; display:flex; align-items:center; border-bottom:3px solid #1597e5; color:white; }
+      .folder-select { margin-left:auto; display:flex; align-items:center; gap:9px; padding:8px 12px; border-radius:8px; background:rgba(255,255,255,.07); color:#d9e3e6; }
+      .card { position:relative; display:flex; gap:14px; min-height:116px; margin-top:10px; padding:15px 16px; border:1px solid rgba(255,255,255,.06); border-radius:13px; background:rgba(255,255,255,.04); }
+      .card.selected { border-color:rgba(255,255,255,.13); background:rgba(255,255,255,.095); }
+      .card.selected::before { content:""; position:absolute; left:-1px; top:14px; bottom:14px; width:4px; border-radius:0 4px 4px 0; background:#1597e5; }
+      .appicon { flex:0 0 auto; display:grid; place-items:center; width:38px; height:38px; border:1px solid rgba(255,255,255,.08); border-radius:10px; background:#172124; color:#59b8eb; font-weight:700; }
+      .card-copy { min-width:0; flex:1; }
+      .card-title { display:flex; align-items:center; gap:9px; color:#f1f5f6; font-size:17px; font-weight:680; }
+      .card-text { margin-top:9px; color:#e2eaec; font-size:15px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .meta { margin-top:9px; color:#829397; font-size:13px; }
+      .folder-tag { display:inline-flex; align-items:center; margin-left:8px; padding:3px 8px; border-radius:999px; background:rgba(21,151,229,.13); color:#7bc8f2; font-size:12px; font-weight:650; }
+      .footer { position:absolute; left:20px; right:20px; bottom:15px; display:flex; justify-content:space-between; color:#78898e; font-size:12px; }
+
+      .settings { position:absolute; right:100px; top:145px; width:900px; height:820px; overflow:hidden; border:1px solid #d9dcd8; border-radius:24px; background:#fbfbfa; box-shadow:0 38px 95px rgba(24,38,45,.22); }
+      .settings-title { height:70px; display:flex; align-items:center; padding:0 28px; border-bottom:1px solid #e1e2de; font-size:21px; font-weight:680; }
+      .settings-body { display:grid; grid-template-columns:190px 1fr; height:750px; }
+      .sidebar { padding:24px 18px; border-right:1px solid #e1e2de; background:#f2f2ef; }
+      .nav { margin-bottom:7px; padding:12px 14px; border-radius:9px; color:#68747a; font-size:15px; }
+      .nav.active { background:#e2eef5; color:#076fae; font-weight:670; }
+      .settings-content { padding:27px 34px; overflow:hidden; }
+      .settings-content h2 { margin:0 0 7px; font-size:26px; letter-spacing:-.02em; }
+      .settings-content > p { margin:0 0 22px; color:#718087; font-size:15px; }
+      .section-label { margin:20px 0 9px; color:#6d7b80; font-size:13px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
+      .setting { display:flex; align-items:center; justify-content:space-between; gap:25px; min-height:77px; padding:15px 17px; border:1px solid #e0e2de; background:white; }
+      .setting:first-of-type { border-radius:12px 12px 0 0; }
+      .setting.last { border-radius:0 0 12px 12px; }
+      .setting strong { display:block; margin-bottom:5px; font-size:15px; }
+      .setting small { display:block; color:#78868b; font-size:13px; line-height:1.35; }
+      .toggle { position:relative; flex:0 0 auto; width:47px; height:26px; border-radius:999px; background:#0c8ad4; }
+      .toggle::after { content:""; position:absolute; right:3px; top:3px; width:20px; height:20px; border-radius:50%; background:white; box-shadow:0 2px 6px rgba(0,0,0,.25); }
+      .local-badge { display:flex; align-items:center; gap:8px; padding:9px 12px; border-radius:999px; background:#e9f7f1; color:#176b55; font-size:13px; font-weight:700; }
+      .app-list { padding:14px 17px 16px; border:1px solid #e0e2de; border-top:0; border-radius:0 0 12px 12px; background:white; }
+      .ignored { display:flex; justify-content:space-between; padding:9px 12px; border-radius:8px; background:#f2f4f2; color:#4f5c61; font:13px Consolas, monospace; }
+      .ignored + .ignored { margin-top:7px; }
+      .callout { margin-top:18px; display:flex; gap:12px; padding:14px 16px; border-radius:12px; background:#eaf5fb; color:#275c78; font-size:13px; line-height:1.45; }
+
+      .split { position:absolute; right:95px; top:175px; width:930px; height:730px; }
+      .winv { position:absolute; left:0; top:96px; width:390px; height:500px; padding:18px; border-radius:18px; background:#edf0f2; color:#1f292d; box-shadow:0 24px 65px rgba(40,53,58,.18); }
+      .winv h3, .cubby-side h3 { margin:0 0 16px; font-size:19px; }
+      .win-search { padding:12px 14px; border:1px solid #d4d9dc; border-radius:9px; background:white; color:#849196; font-size:13px; }
+      .win-card { margin-top:10px; padding:14px; border-radius:9px; background:white; font-size:14px; box-shadow:0 2px 8px rgba(0,0,0,.04); }
+      .win-card small { display:block; margin-top:6px; color:#8a969a; }
+      .limit { position:absolute; left:18px; right:18px; bottom:18px; padding:11px; border-radius:9px; background:#e2e6e8; color:#66757b; text-align:center; font-size:12px; }
+      .arrow { position:absolute; left:402px; top:324px; width:94px; color:#0b82c9; font-size:43px; font-weight:300; text-align:center; }
+      .cubby-side { position:absolute; right:0; top:0; width:430px; height:690px; padding:18px; border-radius:20px; background:var(--dark); color:white; box-shadow:0 32px 85px rgba(24,38,45,.27); }
+      .mini-card { margin-top:10px; padding:14px; border:1px solid rgba(255,255,255,.06); border-radius:10px; background:rgba(255,255,255,.05); }
+      .mini-card.selected { border-color:rgba(255,255,255,.14); background:rgba(255,255,255,.1); }
+      .mini-card strong { font-size:14px; }
+      .mini-card p { margin:6px 0 0; color:#b9c6ca; font-size:12px; }
+      .ocr-line { margin-top:10px; padding:8px 10px; border-radius:7px; background:rgba(8,120,201,.14); color:#a8dfff; font-size:11px; }
+      .ocr-line mark { background:#157ec0; color:white; }
+      .compare-note { position:absolute; bottom:0; left:0; width:390px; color:#64737a; font-size:14px; line-height:1.45; }
+
+      .comparison { background:var(--paper); padding:58px 78px; }
+      .comparison .topbar { position:static; }
+      .comparison h1 { margin:42px 0 12px; font-size:56px; }
+      .comparison .intro { color:var(--muted); font-size:20px; }
+      .table { margin-top:34px; overflow:hidden; border:1px solid var(--line); border-radius:18px; background:white; }
+      .row { display:grid; grid-template-columns:310px repeat(4, 1fr); min-height:83px; border-top:1px solid #e4e5e1; }
+      .row:first-child { border-top:0; background:#eef1ef; }
+      .cell { display:flex; align-items:center; padding:16px 20px; border-left:1px solid #e4e5e1; color:#45545a; font-size:16px; line-height:1.25; }
+      .cell:first-child { border-left:0; color:#233034; font-weight:680; }
+      .head { flex-direction:column; align-items:flex-start; justify-content:center; color:#1e2a2e; font-size:18px; font-weight:720; }
+      .head small { margin-top:3px; color:#77858a; font-size:11px; font-weight:580; }
+      .head.cubby { background:#e6f3fb; color:#056ea9; }
+      .yes { color:#16745b; font-weight:700; }
+      .no { color:#7f8a8e; }
+      .partial { color:#9a6814; font-weight:650; }
+      .footnote { display:flex; justify-content:space-between; margin-top:17px; color:#718087; font-size:13px; }
+      .footnote strong { color:#435258; }
+    </style>
+  </head>
+  <body>
+    <div class="scene" id="scene">
+      <div class="topbar"><div class="brand"><span class="mark"></span><span>cubby</span></div><div class="privacy">Built for Windows 11</div></div>
+    </div>
+    <script>
+      const scene = new URLSearchParams(location.search).get('scene') || 'folders';
+      const root = document.querySelector('#scene');
+      const flyout = `
+        <div class="flyout">
+          <div class="search">⌕ <b>Search clipboard history</b></div>
+          <div class="controls"><strong>All</strong><span>Text</span><span>Images</span><span>Files</span><span class="folder-select">⌄ Project Cubby</span><span>＋</span></div>
+          <div class="card selected"><div class="appicon">C</div><div class="card-copy"><div class="card-title">Launch checklist <span class="folder-tag">Project Cubby</span></div><div class="card-text">Finalize Store screenshots, README, and release notes</div><div class="meta">Notepad · Text · 2 minutes ago</div></div></div>
+          <div class="card"><div class="appicon">›_</div><div class="card-copy"><div class="card-title">pnpm run build <span class="folder-tag">Project Cubby</span></div><div class="card-text">git status && pnpm build && cargo check</div><div class="meta">Windows Terminal · Code · 18 minutes ago</div></div></div>
+          <div class="card"><div class="appicon">▧</div><div class="card-copy"><div class="card-title">Store hero draft <span class="folder-tag">Project Cubby</span></div><div class="card-text">1920×1080 · 248 KB</div><div class="meta">Snipping Tool · Image · 36 minutes ago</div></div></div>
+          <div class="card"><div class="appicon">e</div><div class="card-copy"><div class="card-title">Release announcement</div><div class="card-text">Cubby remembers the things Windows forgets.</div><div class="meta">Microsoft Edge · Text · 1 hour ago</div></div></div>
+          <div class="footer"><span>48 items in Project Cubby</span><span>Enter Paste &nbsp; Esc Close</span></div>
+        </div>`;
+
+      if (scene === 'folders') {
+        root.insertAdjacentHTML('beforeend', `<section class="copy"><div class="eyebrow">Organize what matters</div><h1>Keep projects<br>together.</h1><div class="sub">Move clips into folders, then filter the flyout without leaving your keyboard-first workflow.</div><div class="proof"><span class="pill good">Persistent folders</span><span class="pill">Text, images, and files</span></div></section>${flyout}`);
+      } else if (scene === 'privacy') {
+        root.insertAdjacentHTML('beforeend', `
+          <section class="copy"><div class="eyebrow">Local by design</div><h1>Your history.<br>Your rules.</h1><div class="sub">Cubby encrypts history on this PC and gives you practical controls for sensitive clips and ignored apps.</div><div class="proof"><span class="pill good">Encrypted locally</span><span class="pill good">No account</span><span class="pill good">No desktop analytics</span></div></section>
+          <div class="settings"><div class="settings-title">Cubby Settings</div><div class="settings-body"><aside class="sidebar"><div class="nav active">General</div><div class="nav">Folders</div><div class="nav">About</div></aside><main class="settings-content"><h2>Privacy &amp; behavior</h2><p>Choose what Cubby remembers on this PC.</p><div class="section-label">Local history</div><div class="setting"><div><strong>Clipboard history</strong><small>Encrypted locally in Cubby's database on this computer.</small></div><span class="local-badge">● AES-256-GCM</span></div><div class="setting"><div><strong>Skip sensitive content</strong><small>Ignore clipboard content marked as sensitive by supported apps.</small></div><span class="toggle"></span></div><div class="setting last"><div><strong>Ignore temporary clipboard items</strong><small>Skip transient and ghost clipboard formats.</small></div><span class="toggle"></span></div><div class="section-label">Privacy exceptions</div><div class="setting"><div><strong>Ignored Applications</strong><small>Don't capture clipboard content copied from these apps.</small></div><span class="pill">＋ Add app</span></div><div class="app-list"><div class="ignored"><span>1Password.exe</span><span>×</span></div><div class="ignored"><span>KeePassXC.exe</span><span>×</span></div></div><div class="callout"><strong>Privacy note</strong><span>Cubby's desktop app sends no product analytics. Website analytics are separate from clipboard history.</span></div></main></div></div>`);
+      } else if (scene === 'winv') {
+        root.insertAdjacentHTML('beforeend', `
+          <section class="copy"><div class="eyebrow">A familiar shortcut</div><h1>Win+V, with<br>a memory.</h1><div class="sub">Keep the shortcut you already know. Gain searchable history, OCR, folders, and clips that survive a restart.</div><div class="proof"><span class="pill good">Opens with Win+V</span><span class="pill">No account required</span></div></section>
+          <div class="split"><div class="winv"><h3>Windows clipboard history</h3><div class="win-search">Clipboard</div><div class="win-card">Project handoff notes<small>Text</small></div><div class="win-card">Screenshot<small>Image</small></div><div class="win-card">Meeting follow-up<small>Text</small></div><div class="limit">25 entries · Unpinned items clear on restart</div></div><div class="arrow">→</div><div class="cubby-side"><h3>Cubby</h3><div class="search">⌕ <b>clipboard service</b></div><div class="controls"><strong>All</strong><span>Text</span><span>Images</span><span class="folder-select">All folders</span></div><div class="mini-card selected"><strong>Clipboard service unavailable</strong><p>Screenshot · 14 days ago</p><div class="ocr-line"><mark>Clipboard service unavailable</mark> · Restart the service…</div></div><div class="mini-card"><strong>Project handoff notes</strong><p>Text · 22 minutes ago</p></div><div class="mini-card"><strong>Launch checklist</strong><p>Project Cubby · Pinned</p></div><div class="footer"><span>500 items</span><span>Enter Paste</span></div></div><div class="compare-note"><strong>Win+V still wins at:</strong> being built into Windows with nothing to install. Cubby is for people who need their clipboard to remember more.</div></div>`);
+      } else if (scene === 'comparison') {
+        root.classList.add('comparison');
+        root.innerHTML = `<div class="topbar"><div class="brand"><span class="mark"></span><span>cubby</span></div><div class="privacy">An honest comparison</div></div><h1>Which clipboard fits your Windows workflow?</h1><div class="intro">Four good tools, optimized for different jobs. No invented checkmarks.</div><div class="table">
+          <div class="row"><div class="cell"></div><div class="cell head cubby">Cubby<small>Focused Windows clipboard</small></div><div class="cell head">Windows Win+V<small>Built into Windows 11</small></div><div class="cell head">Ditto<small>Mature power-user tool</small></div><div class="cell head">Raycast<small>All-in-one launcher</small></div></div>
+          <div class="row"><div class="cell">Default shortcut</div><div class="cell yes">Win+V</div><div class="cell yes">Win+V</div><div class="cell">Ctrl+\`</div><div class="cell">Custom hotkey</div></div>
+          <div class="row"><div class="cell">Unpinned history after restart</div><div class="cell yes">Yes</div><div class="cell partial">No · pinned only</div><div class="cell yes">Yes</div><div class="cell yes">Yes</div></div>
+          <div class="row"><div class="cell">Search text inside images</div><div class="cell yes">Yes · local OCR</div><div class="cell no">No built-in OCR</div><div class="cell no">Not advertised</div><div class="cell yes">Yes · optional OCR</div></div>
+          <div class="row"><div class="cell">Account required</div><div class="cell yes">No</div><div class="cell yes">No for local use</div><div class="cell yes">No</div><div class="cell yes">No</div></div>
+          <div class="row"><div class="cell">Open source</div><div class="cell yes">Yes · GPL-3.0</div><div class="cell no">No</div><div class="cell yes">Yes · GPL-3.0</div><div class="cell no">No</div></div>
+          <div class="row"><div class="cell">Where it shines</div><div class="cell">Native Windows 11 clipboard replacement</div><div class="cell">Zero-install basics and optional device sync</div><div class="cell">Portable builds and deep power-user workflows</div><div class="cell">Clipboard inside a broader productivity launcher</div></div>
+        </div><div class="footnote"><span>Checked July 2026 against vendor documentation. “Not advertised” means no built-in OCR claim was found.</span><strong>cubbyclip.com</strong></div>`;
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,4 @@
+Website and download: https://cubbyclip.com
+Source code: https://github.com/tsouth89/cubby-clipboard
+Releases: https://github.com/tsouth89/cubby-clipboard/releases
+Support: https://github.com/tsouth89/cubby-clipboard/issues
