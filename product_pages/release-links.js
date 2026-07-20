@@ -71,28 +71,80 @@
     return null;
   };
 
-  const cachedRelease = readCache();
-  if (cachedRelease) {
-    applyRelease(cachedRelease);
-    return;
-  }
+  const resolveRelease = () => {
+    const cachedRelease = readCache();
+    if (cachedRelease) {
+      applyRelease(cachedRelease);
+      return;
+    }
 
-  fetch(releasesApi, { headers: { Accept: "application/vnd.github+json" } })
-    .then((response) => {
-      if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
-      return response.json();
-    })
-    .then(selectLatestRelease)
-    .then((release) => {
-      if (!release) return;
-      applyRelease(release);
-      try {
-        localStorage.setItem(cacheKey, JSON.stringify({ savedAt: Date.now(), release }));
-      } catch {
-        // The resolved link still works when storage is unavailable.
-      }
-    })
-    .catch(() => {
-      // Keep the releases-page fallback if GitHub is unavailable or rate-limited.
+    fetch(releasesApi, { headers: { Accept: "application/vnd.github+json" } })
+      .then((response) => {
+        if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
+        return response.json();
+      })
+      .then(selectLatestRelease)
+      .then((release) => {
+        if (!release) return;
+        applyRelease(release);
+        try {
+          localStorage.setItem(cacheKey, JSON.stringify({ savedAt: Date.now(), release }));
+        } catch {
+          // The resolved link still works when storage is unavailable.
+        }
+      })
+      .catch(() => {
+        // Keep the releases-page fallback if GitHub is unavailable or rate-limited.
+      });
+  };
+
+  // The star count only renders once it is social proof rather than an
+  // admission of obscurity; below the threshold the button stays a plain CTA.
+  const repoApi = "https://api.github.com/repos/tsouth89/cubby-clipboard";
+  const starCacheKey = "cubby-star-count-v1";
+  const minStarsToShow = 75;
+
+  const applyStars = (count) => {
+    if (!Number.isFinite(count) || count < minStarsToShow) return;
+    const formatted =
+      count >= 1000 ? `${(count / 1000).toFixed(1).replace(/\.0$/, "")}k` : `${count}`;
+    document.querySelectorAll("[data-star-count]").forEach((el) => {
+      el.textContent = formatted;
+      el.hidden = false;
     });
+  };
+
+  const resolveStars = () => {
+    try {
+      const cached = JSON.parse(localStorage.getItem(starCacheKey));
+      if (Date.now() - cached.savedAt < cacheLifetimeMs && Number.isFinite(cached.count)) {
+        applyStars(cached.count);
+        return;
+      }
+    } catch {
+      // Fall through to a fresh fetch.
+    }
+
+    fetch(repoApi, { headers: { Accept: "application/vnd.github+json" } })
+      .then((response) => {
+        if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
+        return response.json();
+      })
+      .then((repo) => {
+        const count = repo && repo.stargazers_count;
+        if (!Number.isFinite(count)) return;
+        applyStars(count);
+        try {
+          localStorage.setItem(starCacheKey, JSON.stringify({ savedAt: Date.now(), count }));
+        } catch {
+          // The button works fine without a count.
+        }
+      })
+      .catch(() => {
+        // The button works fine without a count.
+      });
+  };
+
+  resolveRelease();
+  resolveStars();
 })();
