@@ -25,11 +25,97 @@ function generateImage(label: string, color1: string, color2: string): string {
   return canvas.toDataURL('image/png');
 }
 
+function generateClipboardErrorScreenshot(): string {
+  const canvas = document.createElement('canvas');
+  canvas.width = 960;
+  canvas.height = 540;
+  const ctx = canvas.getContext('2d')!;
+
+  const background = ctx.createLinearGradient(0, 0, 960, 540);
+  background.addColorStop(0, '#142235');
+  background.addColorStop(1, '#263b58');
+  ctx.fillStyle = background;
+  ctx.fillRect(0, 0, 960, 540);
+
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.05)';
+  ctx.beginPath();
+  ctx.arc(790, 105, 175, 0, Math.PI * 2);
+  ctx.fill();
+
+  const x = 170;
+  const y = 118;
+  const width = 620;
+  const height = 304;
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.42)';
+  ctx.shadowBlur = 36;
+  ctx.shadowOffsetY = 18;
+  ctx.fillStyle = '#f7f7f8';
+  ctx.beginPath();
+  ctx.roundRect(x, y, width, height, 12);
+  ctx.fill();
+  ctx.shadowColor = 'transparent';
+
+  ctx.fillStyle = '#202124';
+  ctx.font = '600 19px "Segoe UI", sans-serif';
+  ctx.fillText('Cubby Clipboard', x + 26, y + 38);
+  ctx.fillStyle = '#d9dadd';
+  ctx.fillRect(x, y + 57, width, 1);
+
+  ctx.fillStyle = '#1677d2';
+  ctx.beginPath();
+  ctx.arc(x + 64, y + 137, 27, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '700 30px "Segoe UI", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('i', x + 64, y + 148);
+  ctx.textAlign = 'left';
+
+  ctx.fillStyle = '#202124';
+  ctx.font = '600 18px "Segoe UI", sans-serif';
+  ctx.fillText('Clipboard service unavailable', x + 112, y + 120);
+  ctx.fillStyle = '#4e5157';
+  ctx.font = '15px "Segoe UI", sans-serif';
+  ctx.fillText('Cubby could not read the Windows clipboard.', x + 112, y + 153);
+  ctx.fillText('Restart the clipboard service and try again.', x + 112, y + 178);
+  ctx.fillStyle = '#686b72';
+  ctx.font = '13px "Segoe UI", sans-serif';
+  ctx.fillText('Error code: CUBBY-0X800401D0', x + 112, y + 211);
+
+  ctx.fillStyle = '#0878c9';
+  ctx.beginPath();
+  ctx.roundRect(x + width - 118, y + height - 58, 88, 32, 5);
+  ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '600 14px "Segoe UI", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('Close', x + width - 74, y + height - 37);
+  ctx.textAlign = 'left';
+
+  return canvas.toDataURL('image/png');
+}
+
 export function generateDemoClips(): ClipboardItem[] {
   const now = new Date();
   const ago = (minutes: number) => new Date(now.getTime() - minutes * 60000).toISOString();
 
   return [
+    {
+      id: 'demo-ocr-error',
+      clip_type: 'image',
+      content: generateClipboardErrorScreenshot(),
+      preview: '',
+      folder_id: null,
+      created_at: ago(60 * 24 * 14),
+      source_app: 'SnippingTool.exe',
+      source_icon: null,
+      metadata: JSON.stringify({ width: 960, height: 540, size_bytes: 128420 }),
+      ocr_match: {
+        before: '',
+        matched: 'Clipboard service unavailable',
+        after: ' · Restart the clipboard service and try again.',
+      },
+    },
     {
       id: 'demo-1',
       clip_type: 'text',
@@ -191,5 +277,9 @@ export function generateDemoClips(): ClipboardItem[] {
       source_icon: null,
       metadata: JSON.stringify({ size_bytes: 92160 }),
     },
-  ].map((clip) => ({ ...clip, is_pinned: false, ocr_match: null }));
+  ].map((clip) => ({
+    ...clip,
+    is_pinned: false,
+    ocr_match: 'ocr_match' in clip && clip.ocr_match ? clip.ocr_match : null,
+  }));
 }

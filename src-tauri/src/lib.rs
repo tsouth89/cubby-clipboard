@@ -163,6 +163,9 @@ pub fn run_app() {
                     });
                 }
                 tauri::WindowEvent::Focused(false) => {
+                    if asset_capture_enabled() {
+                        return;
+                    }
                     let label = window.label();
                     // Only auto-hide the main window
                     if label != "main" {
@@ -390,10 +393,14 @@ pub fn run_app() {
                 }
             });
 
+            // Asset capture sessions open immediately and drive their staged UI from
+            // the frontend. Debug builds only; see asset_capture_enabled().
+            let asset_capture = asset_capture_enabled();
+
             // First launch: surface the flyout so the welcome overlay is visible.
             // Otherwise Cubby starts hidden in the tray and a new user has no idea
             // it's running or how to open it.
-            if !manager.get().has_completed_onboarding {
+            if asset_capture || !manager.get().has_completed_onboarding {
                 if let Some(win) = app_handle.get_webview_window("main") {
                     crate::position_window_near_cursor(&win);
                 }
@@ -558,7 +565,9 @@ pub fn animate_window_show(window: &tauri::WebviewWindow, anchor: ShowAnchor) {
                 }
             }
 
-            watch_for_outside_click(window.clone(), show_generation);
+            if !asset_capture_enabled() {
+                watch_for_outside_click(window.clone(), show_generation);
+            }
         }
         IS_ANIMATING.store(false, Ordering::SeqCst);
     });
@@ -638,6 +647,25 @@ pub fn portable_data_dir() -> Option<std::path::PathBuf> {
     } else {
         None
     }
+}
+
+/// True while the local asset-capture tooling is driving the UI, which needs the
+/// flyout to stay open instead of auto-hiding on blur.
+///
+/// Debug builds only. A release build must never let an environment variable
+/// disable auto-hide or the outside-click watcher, so this compiles to a
+/// constant `false` there and the call sites optimize away. Matches the
+/// frontend gate (`VITE_CUBBY_ASSET_CAPTURE === '1'`) exactly: presence alone is
+/// not enough, or `VITE_CUBBY_ASSET_CAPTURE=0` would enable the Rust half while
+/// the frontend half stayed off.
+#[cfg(debug_assertions)]
+fn asset_capture_enabled() -> bool {
+    std::env::var("VITE_CUBBY_ASSET_CAPTURE").is_ok_and(|value| value == "1")
+}
+
+#[cfg(not(debug_assertions))]
+fn asset_capture_enabled() -> bool {
+    false
 }
 
 pub(crate) fn get_data_dir() -> std::path::PathBuf {
