@@ -186,16 +186,20 @@ git worktree add ../.worktrees/sou-123-fix -b codex/sou-123-fix
 
 When the work has landed, remove the worktree and prune, then delete the directory:
 
-```bash
+```powershell
 git worktree remove ../.worktrees/sou-123-fix
 git worktree prune
-rm -rf ../.worktrees/sou-123-fix   # Windows leaves an empty tree behind
+Remove-Item -Recurse -Force ../.worktrees/sou-123-fix
 ```
 
-On Windows `git worktree remove` deletes the files but leaves the empty directory tree in place, so the explicit `rm -rf` is required. Skipping it is what accumulates empty skeleton directories.
+The last line is PowerShell, the default shell here. In Git Bash or WSL use `rm -rf ../.worktrees/sou-123-fix` instead.
+
+On Windows `git worktree remove` deletes the files but leaves the empty directory tree in place, so that explicit delete is required. Skipping it is what accumulates empty skeleton directories.
 
 This repo squash-merges every PR, so a branch's commits never become ancestors of `main`. Do not use `git merge-base --is-ancestor` or `git log main..branch` to decide whether work has landed — both report merged work as unmerged. Check the branch's merged PR instead:
 
 ```bash
-gh pr list --state merged --limit 40 --json number,headRefName,title
+gh pr list --state merged --head <branch> --json number,headRefName,title
 ```
+
+Filter by `--head`. Listing merged PRs and scanning the results can page past the one you care about and report a merged branch as unmerged, which is the mistake this note exists to prevent.
