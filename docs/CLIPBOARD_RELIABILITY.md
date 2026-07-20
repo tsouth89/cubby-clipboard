@@ -14,6 +14,9 @@ Clipboard capture is Cubby's primary product promise. A polished history UI is n
 - Avoid recording Cubby's own clipboard writes as duplicate history entries.
 - Continue capturing after sleep, unlock, explorer restart, remote-session reconnect, and clipboard-owner failure.
 - Record local diagnostics for failed captures without collecting clipboard content or sending telemetry.
+- Keep a supervised native listener that restarts on failure instead of exiting the process thread silently.
+- Detect silent listener death with a clipboard-sequence watchdog (recreate when the sequence advances but no `WM_CLIPBOARDUPDATE` arrives for several seconds).
+- Expose lightweight capture health via `get_clipboard_capture_status` (state, restart count, last error) without clipboard payloads.
 
 ## Format baseline
 

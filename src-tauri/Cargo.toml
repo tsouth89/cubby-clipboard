@@ -39,7 +39,7 @@ window-vibrancy = { git = "https://github.com/XueshiQiao/window-vibrancy.git" }
 dark-light = "2.0.0"
 tauri-plugin-dialog = "2"
 clipboard-rs = "0.2"
-clipboard-win = "5.4.1"
+clipboard-win = { version = "5.4.1", features = ["monitor"] }
 
 
 [target.'cfg(target_os = "windows")'.dependencies]

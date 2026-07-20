@@ -444,7 +444,8 @@ pub fn run_app() {
             commands::refresh_window,
             ocr_queue::get_ocr_queue_status,
             ocr_queue::set_ocr_queue_paused,
-            ocr_queue::retry_failed_ocr
+            ocr_queue::retry_failed_ocr,
+            clipboard::get_clipboard_capture_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

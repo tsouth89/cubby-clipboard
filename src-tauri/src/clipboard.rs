@@ -8,12 +8,15 @@ use clipboard_rs::{Clipboard, ClipboardContext};
 #[cfg(target_os = "windows")]
 use clipboard_win::Monitor;
 use once_cell::sync::Lazy;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 #[cfg(target_os = "windows")]
 use std::ffi::OsStr;
 #[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStrExt;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::MAX_PATH;
@@ -34,7 +37,6 @@ use windows::Win32::System::ProcessStatus::{GetModuleBaseNameW, GetModuleFileNam
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 #[cfg(target_os = "windows")]
-#[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::{
     SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_USEFILEATTRIBUTES,
 };
@@ -53,9 +55,93 @@ static LAST_STABLE_HASH: Lazy<parking_lot::Mutex<Option<String>>> =
 pub static CLIPBOARD_SYNC: Lazy<Arc<tokio::sync::Mutex<()>>> =
     Lazy::new(|| Arc::new(tokio::sync::Mutex::new(())));
 
+/// Capture-listener health (SOU-218). Values are diagnostics only — never clipboard content.
+///
+/// Defaults:
+/// - restart forever with capped exponential backoff (500ms → 30s)
+/// - sequence watchdog every 2s; force restart after 5s of missed advances
+/// - no user-facing toast (logs + `get_clipboard_capture_status` only)
+const CAPTURE_STATE_STOPPED: u8 = 0;
+const CAPTURE_STATE_LISTENING: u8 = 1;
+const CAPTURE_STATE_RESTARTING: u8 = 2;
+const INITIAL_LISTENER_BACKOFF: Duration = Duration::from_millis(500);
+const MAX_LISTENER_BACKOFF: Duration = Duration::from_secs(30);
+const WATCHDOG_INTERVAL: Duration = Duration::from_secs(2);
+const STALE_LISTENER_AFTER: Duration = Duration::from_secs(5);
+
+static CAPTURE_STATE: AtomicU8 = AtomicU8::new(CAPTURE_STATE_STOPPED);
+static LAST_CLIPBOARD_EVENT_UNIX_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_HANDLED_SEQUENCE: AtomicU32 = AtomicU32::new(0);
+static LISTENER_RESTART_COUNT: AtomicU64 = AtomicU64::new(0);
+static LAST_CAPTURE_ERROR: Lazy<parking_lot::Mutex<Option<String>>> =
+    Lazy::new(|| parking_lot::Mutex::new(None));
+#[cfg(target_os = "windows")]
+static LISTENER_SHUTDOWN: Lazy<parking_lot::Mutex<Option<clipboard_win::monitor::Shutdown>>> =
+    Lazy::new(|| parking_lot::Mutex::new(None));
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClipboardCaptureStatus {
+    pub state: String,
+    pub listening: bool,
+    pub restart_count: u64,
+    pub last_event_unix_ms: u64,
+    pub last_handled_sequence: u32,
+    pub last_error: Option<String>,
+}
+
 pub fn set_ignore_hash(hash: String) {
     let mut lock = IGNORE_HASH.lock();
     *lock = Some(hash);
+}
+
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn capture_state_name(state: u8) -> &'static str {
+    match state {
+        CAPTURE_STATE_LISTENING => "listening",
+        CAPTURE_STATE_RESTARTING => "restarting",
+        _ => "stopped",
+    }
+}
+
+fn set_capture_state(state: u8) {
+    CAPTURE_STATE.store(state, Ordering::SeqCst);
+}
+
+fn record_capture_error(message: impl Into<String>) {
+    let message = message.into();
+    log::error!("CLIPBOARD: {message}");
+    *LAST_CAPTURE_ERROR.lock() = Some(message);
+}
+
+fn note_clipboard_event(sequence: u32) {
+    LAST_HANDLED_SEQUENCE.store(sequence, Ordering::SeqCst);
+    LAST_CLIPBOARD_EVENT_UNIX_MS.store(unix_now_ms(), Ordering::SeqCst);
+}
+
+fn next_listener_backoff(current: Duration) -> Duration {
+    current
+        .checked_mul(2)
+        .unwrap_or(MAX_LISTENER_BACKOFF)
+        .min(MAX_LISTENER_BACKOFF)
+}
+
+#[tauri::command]
+pub fn get_clipboard_capture_status() -> ClipboardCaptureStatus {
+    let state = CAPTURE_STATE.load(Ordering::SeqCst);
+    ClipboardCaptureStatus {
+        state: capture_state_name(state).to_string(),
+        listening: state == CAPTURE_STATE_LISTENING,
+        restart_count: LISTENER_RESTART_COUNT.load(Ordering::SeqCst),
+        last_event_unix_ms: LAST_CLIPBOARD_EVENT_UNIX_MS.load(Ordering::SeqCst),
+        last_handled_sequence: LAST_HANDLED_SEQUENCE.load(Ordering::SeqCst),
+        last_error: LAST_CAPTURE_ERROR.lock().clone(),
+    }
 }
 
 pub fn init(app: &AppHandle, db: Arc<Database>) {
@@ -154,23 +240,83 @@ pub(crate) struct CapturedFormat {
 }
 
 #[cfg(target_os = "windows")]
-fn run_native_listener(snapshot_tx: tokio::sync::mpsc::UnboundedSender<ClipboardSnapshot>) {
-    let mut monitor = match Monitor::new() {
-        Ok(monitor) => monitor,
-        Err(error) => {
-            log::error!("CLIPBOARD: Failed to create native listener: {}", error);
-            return;
-        }
-    };
+enum ListenerSessionExit {
+    /// Snapshot consumer dropped — app is shutting down; do not restart.
+    ConsumerGone,
+    /// Watchdog or explicit shutdown asked us to recreate the monitor.
+    RestartRequested,
+    /// Win32 / monitor failure; recreate after backoff.
+    Failed(String),
+}
 
-    log::info!("CLIPBOARD: Native WM_CLIPBOARDUPDATE listener started");
+#[cfg(target_os = "windows")]
+fn request_listener_restart(reason: &str) {
+    log::warn!("CLIPBOARD: Requesting listener restart ({reason})");
+    if let Some(shutdown) = LISTENER_SHUTDOWN.lock().take() {
+        drop(shutdown);
+    }
+}
 
+#[cfg(target_os = "windows")]
+fn spawn_listener_watchdog() {
+    static WATCHDOG_STARTED: AtomicU8 = AtomicU8::new(0);
+    if WATCHDOG_STARTED.swap(1, Ordering::SeqCst) != 0 {
+        return;
+    }
+
+    if let Err(error) = std::thread::Builder::new()
+        .name("cubby-clipboard-watchdog".to_string())
+        .spawn(|| {
+            loop {
+                std::thread::sleep(WATCHDOG_INTERVAL);
+                if CAPTURE_STATE.load(Ordering::SeqCst) != CAPTURE_STATE_LISTENING {
+                    continue;
+                }
+
+                let current_sequence = unsafe {
+                    windows::Win32::System::DataExchange::GetClipboardSequenceNumber()
+                };
+                let handled = LAST_HANDLED_SEQUENCE.load(Ordering::SeqCst);
+                if current_sequence == handled {
+                    continue;
+                }
+
+                let last_event_ms = LAST_CLIPBOARD_EVENT_UNIX_MS.load(Ordering::SeqCst);
+                let now_ms = unix_now_ms();
+                let stale_for_ms = now_ms.saturating_sub(last_event_ms);
+                if stale_for_ms < STALE_LISTENER_AFTER.as_millis() as u64 {
+                    continue;
+                }
+
+                // Sequence advanced without a WM_CLIPBOARDUPDATE reaching us —
+                // typical after sleep/resume or Explorer restarts when the listener
+                // HWND is still "alive" but no longer receiving updates.
+                request_listener_restart(&format!(
+                    "watchdog: sequence {current_sequence} ahead of handled {handled} for {stale_for_ms}ms"
+                ));
+            }
+        })
+    {
+        log::error!("CLIPBOARD: Failed to start listener watchdog: {error}");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn run_listener_session(
+    monitor: &mut Monitor,
+    snapshot_tx: &tokio::sync::mpsc::UnboundedSender<ClipboardSnapshot>,
+) -> ListenerSessionExit {
     loop {
         match monitor.recv() {
             Ok(true) => {
                 let started = std::time::Instant::now();
                 let sequence =
                     unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
+                // Always mark the notification as seen, even when the payload is
+                // unsupported — otherwise the watchdog would treat ignored formats
+                // as a silent listener death.
+                note_clipboard_event(sequence);
+
                 let source_app_identity = get_clipboard_owner_identity();
                 let sensitive = clipboard_marked_sensitive();
 
@@ -185,8 +331,7 @@ fn run_native_listener(snapshot_tx: tokio::sync::mpsc::UnboundedSender<Clipboard
                     };
 
                     if snapshot_tx.send(snapshot).is_err() {
-                        log::error!("CLIPBOARD: Snapshot consumer stopped");
-                        return;
+                        return ListenerSessionExit::ConsumerGone;
                     }
                 } else {
                     log::debug!(
@@ -195,20 +340,83 @@ fn run_native_listener(snapshot_tx: tokio::sync::mpsc::UnboundedSender<Clipboard
                     );
                 }
             }
-            Ok(false) => {
-                log::warn!("CLIPBOARD: Native listener received shutdown");
+            Ok(false) => return ListenerSessionExit::RestartRequested,
+            Err(error) => return ListenerSessionExit::Failed(error.to_string()),
+        }
+    }
+}
+
+/// Supervise the native clipboard listener so capture never silently stops.
+///
+/// Tradeoffs (SOU-218):
+/// - Forever-restart + capped backoff prefers availability over giving up.
+/// - Watchdog recreates the monitor when the clipboard sequence advances but no
+///   event arrives for [`STALE_LISTENER_AFTER`]. That can miss copies for up to
+///   ~5–7s after a silent death (sleep/Explorer), but avoids power-session Win32
+///   surface area and toast spam.
+/// - Consumer channel close stops the supervisor (process teardown).
+#[cfg(target_os = "windows")]
+fn run_native_listener(snapshot_tx: tokio::sync::mpsc::UnboundedSender<ClipboardSnapshot>) {
+    spawn_listener_watchdog();
+
+    let mut backoff = INITIAL_LISTENER_BACKOFF;
+    loop {
+        set_capture_state(CAPTURE_STATE_RESTARTING);
+
+        let mut monitor = match Monitor::new() {
+            Ok(monitor) => monitor,
+            Err(error) => {
+                record_capture_error(format!("failed to create native listener: {error}"));
+                std::thread::sleep(backoff);
+                backoff = next_listener_backoff(backoff);
+                continue;
+            }
+        };
+
+        {
+            let mut slot = LISTENER_SHUTDOWN.lock();
+            *slot = Some(monitor.shutdown_channel());
+        }
+
+        let current_sequence =
+            unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
+        note_clipboard_event(current_sequence);
+        set_capture_state(CAPTURE_STATE_LISTENING);
+        log::info!("CLIPBOARD: Native WM_CLIPBOARDUPDATE listener started");
+
+        let exit = run_listener_session(&mut monitor, &snapshot_tx);
+        *LISTENER_SHUTDOWN.lock() = None;
+        drop(monitor);
+
+        match exit {
+            ListenerSessionExit::ConsumerGone => {
+                record_capture_error("snapshot consumer stopped; capture supervisor exiting");
+                set_capture_state(CAPTURE_STATE_STOPPED);
                 return;
             }
-            Err(error) => {
-                log::error!("CLIPBOARD: Native listener failed: {}", error);
-                return;
+            ListenerSessionExit::RestartRequested => {
+                LISTENER_RESTART_COUNT.fetch_add(1, Ordering::SeqCst);
+                log::warn!("CLIPBOARD: Listener session ended; recreating after short delay");
+                // Watchdog-driven restarts should be quick; keep a small floor so we
+                // do not tight-loop if shutdown races.
+                std::thread::sleep(INITIAL_LISTENER_BACKOFF);
+                backoff = INITIAL_LISTENER_BACKOFF;
+            }
+            ListenerSessionExit::Failed(error) => {
+                LISTENER_RESTART_COUNT.fetch_add(1, Ordering::SeqCst);
+                record_capture_error(format!("native listener failed: {error}"));
+                std::thread::sleep(backoff);
+                backoff = next_listener_backoff(backoff);
             }
         }
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn run_native_listener(_snapshot_tx: tokio::sync::mpsc::UnboundedSender<ClipboardSnapshot>) {}
+fn run_native_listener(_snapshot_tx: tokio::sync::mpsc::UnboundedSender<ClipboardSnapshot>) {
+    set_capture_state(CAPTURE_STATE_STOPPED);
+    record_capture_error("clipboard capture requires Windows");
+}
 
 fn materialize_clipboard_content() -> Option<(CapturedContent, Vec<CapturedFormat>)> {
     const ATTEMPTS: u32 = 10;
@@ -1249,7 +1457,12 @@ unsafe fn extract_icon(path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{calculate_hash, capture_text, clipboard_retry_delay, CapturedContent};
+    use super::{
+        calculate_hash, capture_state_name, capture_text, clipboard_retry_delay,
+        next_listener_backoff, CapturedContent, CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING,
+        CAPTURE_STATE_STOPPED,
+    };
+    use std::time::Duration;
 
     #[test]
     fn capture_text_preserves_exact_whitespace() {
@@ -1284,5 +1497,28 @@ mod tests {
 
         assert_eq!(delays, vec![1, 2, 4, 8, 16, 32, 64, 64, 64, 64]);
         assert_eq!(delays.iter().sum::<u128>(), 319);
+    }
+
+    #[test]
+    fn listener_restart_backoff_doubles_and_caps() {
+        assert_eq!(
+            next_listener_backoff(Duration::from_millis(500)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            next_listener_backoff(Duration::from_secs(16)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            next_listener_backoff(Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn capture_state_names_are_stable_for_diagnostics() {
+        assert_eq!(capture_state_name(CAPTURE_STATE_LISTENING), "listening");
+        assert_eq!(capture_state_name(CAPTURE_STATE_RESTARTING), "restarting");
+        assert_eq!(capture_state_name(CAPTURE_STATE_STOPPED), "stopped");
     }
 }
