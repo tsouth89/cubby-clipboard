@@ -276,6 +276,30 @@ jobs:
         run: |
           gh release upload "$env:TAG" "${{ steps.installer.outputs.name }}.sig" --clobber
 
+      - name: Publish Microsoft Store installer to Cloudflare R2
+        if: github.event_name != 'workflow_dispatch'
+        shell: pwsh
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
+        run: |
+          foreach ($name in @(
+            "CLOUDFLARE_API_TOKEN",
+            "CLOUDFLARE_ACCOUNT_ID",
+            "CLOUDFLARE_R2_BUCKET"
+          )) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "The release environment is missing $name."
+            }
+          }
+
+          ./scripts/publish-store-installer.ps1 `
+            -Version "${{ needs.create-release.outputs.version }}" `
+            -Architecture "${{ matrix.arch }}" `
+            -InstallerPath "${{ steps.installer.outputs.path }}" `
+            -BucketName $env:CLOUDFLARE_R2_BUCKET
+
       - name: Assemble the portable package
         if: matrix.arch == 'x64'
         id: portable

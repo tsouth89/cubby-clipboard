@@ -1,5 +1,21 @@
 # Cubby Clipboard release checklist
 
+## Microsoft Store packages
+
+Versioned Microsoft Store installers are served without redirects from
+`https://downloads.cubbyclipboard.com/releases/v<version>/`. The `release`
+environment must define:
+
+- variable `CLOUDFLARE_ACCOUNT_ID`;
+- variable `CLOUDFLARE_R2_BUCKET` (`cubby-downloads`); and
+- secret `CLOUDFLARE_R2_API_TOKEN`, scoped to the Cubby bucket with R2 object
+  write access.
+
+Tag releases upload and verify both signed installers automatically. To backfill
+an existing GitHub release, run the `Publish Microsoft Store packages` workflow
+with its version tag. Submit the resulting immutable x64 and ARM64 URLs to
+Microsoft Partner Center.
+
 ## Automated gate
 
 Run from the repository root on Windows:
