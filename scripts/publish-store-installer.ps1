@@ -27,6 +27,39 @@ $objectPrefix = "releases/v$Version"
 $localHash = (Get-FileHash -LiteralPath $resolvedInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $hashPath = Join-Path ([System.IO.Path]::GetTempPath()) "$hashName-$([guid]::NewGuid().ToString('N')).txt"
 
+function Assert-R2ObjectDoesNotExist {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ObjectName
+    )
+
+    $objectUrl = "$($DownloadOrigin.TrimEnd('/'))/$objectPrefix/$ObjectName"
+    $probePath = Join-Path ([System.IO.Path]::GetTempPath()) "cubby-r2-probe-$([guid]::NewGuid().ToString('N'))"
+    try {
+        $statusCode = & curl.exe `
+            --silent `
+            --show-error `
+            --location `
+            --max-redirs 0 `
+            --connect-timeout 10 `
+            --max-time 60 `
+            --output $probePath `
+            --write-out "%{http_code}" `
+            $objectUrl
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not check whether $objectUrl already exists."
+        }
+        if ($statusCode -eq "200") {
+            throw "Refusing to overwrite immutable release object: $objectUrl"
+        }
+        if ($statusCode -ne "404") {
+            throw "Unexpected HTTP $statusCode while checking $objectUrl."
+        }
+    } finally {
+        Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Publish-R2Object {
     param(
         [Parameter(Mandatory = $true)]
@@ -42,6 +75,7 @@ function Publish-R2Object {
         [string]$CacheControl
     )
 
+    Assert-R2ObjectDoesNotExist -ObjectName $ObjectName
     $objectPath = "$BucketName/$objectPrefix/$ObjectName"
     & npx --yes "wrangler@$WranglerVersion" r2 object put $objectPath `
         "--file=$Path" `

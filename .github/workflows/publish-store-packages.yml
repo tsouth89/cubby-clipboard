@@ -41,6 +41,18 @@ jobs:
             throw "Failed to download signed installers from $env:RELEASE_TAG."
           }
 
+          $expectedSignerSubject = "CN=Brandon South, O=Brandon South, L=Wilmore, S=ky, C=US"
+          foreach ($architecture in @("x64", "arm64")) {
+            $installerPath = "release-assets/Cubby.Clipboard_${version}_${architecture}-setup.exe"
+            $signature = Get-AuthenticodeSignature -LiteralPath $installerPath
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+              throw "$architecture installer has an invalid Authenticode signature: $($signature.StatusMessage)"
+            }
+            if ($signature.SignerCertificate.Subject -ne $expectedSignerSubject) {
+              throw "$architecture installer signer is unexpected: $($signature.SignerCertificate.Subject)"
+            }
+          }
+
           "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Publish x64 installer
