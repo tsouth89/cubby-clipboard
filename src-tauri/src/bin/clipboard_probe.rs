@@ -7,7 +7,7 @@ fn main() {
 #[cfg(target_os = "windows")]
 mod windows_probe {
     use clipboard_rs::common::RustImage;
-    use clipboard_rs::{Clipboard, ClipboardContext};
+    use clipboard_rs::{Clipboard, ClipboardContent, ClipboardContext};
     use serde::Serialize;
     use sha2::{Digest, Sha256};
     use std::collections::HashSet;
@@ -32,6 +32,12 @@ mod windows_probe {
 
     const TIMER_ID: usize = 1;
     const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
+    const RICH_TEXT_FORMAT: &str = "Rich Text Format";
+    const HTML_FORMAT: &str = "HTML Format";
+    const BINARY_FORMAT: &str = "Cubby Probe Binary";
+    const RICH_MARKER: &str = "CUBBY-FIXTURE-RICH\r\n  exact whitespace  ";
+    const FILES_MARKER: &str = "CUBBY-FIXTURE-FILES";
+    const BINARY_MARKER: &str = "CUBBY-FIXTURE-BINARY";
 
     static STATE: OnceLock<Mutex<ProbeState>> = OnceLock::new();
 
@@ -43,6 +49,7 @@ mod windows_probe {
         timeout_seconds: u64,
         expect_text: Option<usize>,
         expect_items: Option<usize>,
+        fixtures: bool,
         writer: bool,
     }
 
@@ -55,6 +62,10 @@ mod windows_probe {
         observed_text: HashSet<String>,
         expected_items: Option<usize>,
         observed_items: HashSet<String>,
+        expected_fixtures: Option<HashSet<String>>,
+        observed_fixtures: HashSet<String>,
+        passed_fixtures: HashSet<String>,
+        fixture_failures: Vec<String>,
         events: usize,
         read_failures: usize,
         timed_out: bool,
@@ -78,6 +89,9 @@ mod windows_probe {
         image_read_error: Option<String>,
         marker: Option<String>,
         read_error: Option<String>,
+        fixture: Option<String>,
+        fixture_passed: Option<bool>,
+        fixture_error: Option<String>,
     }
 
     struct ImageSnapshot {
@@ -89,6 +103,10 @@ mod windows_probe {
     pub fn run() {
         let config = parse_args();
         if config.writer {
+            if config.fixtures {
+                run_fixture_writer();
+                return;
+            }
             run_burst_writer(
                 config
                     .burst_count
@@ -104,6 +122,12 @@ mod windows_probe {
                 .map(|index| burst_marker(index, count))
                 .collect::<HashSet<_>>()
         });
+        let expected_fixtures = config.fixtures.then(|| {
+            ["rich", "files", "binary"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<HashSet<_>>()
+        });
 
         STATE
             .set(Mutex::new(ProbeState {
@@ -114,6 +138,10 @@ mod windows_probe {
                 observed_text: HashSet::new(),
                 expected_items: config.expect_items,
                 observed_items: HashSet::new(),
+                expected_fixtures,
+                observed_fixtures: HashSet::new(),
+                passed_fixtures: HashSet::new(),
+                fixture_failures: Vec::new(),
                 events: 0,
                 read_failures: 0,
                 timed_out: false,
@@ -144,6 +172,8 @@ mod windows_probe {
                 "event": "ready",
                 "mode": if config.burst_count.is_some() {
                     "burst"
+                } else if config.fixtures {
+                    "fixtures"
                 } else if config.expect_text.is_some() {
                     "remote_text"
                 } else if config.expect_items.is_some() {
@@ -161,6 +191,9 @@ mod windows_probe {
         let mut writer = config
             .burst_count
             .map(|count| spawn_burst_writer(count, config.interval_ms, config.contention_ms));
+        if config.fixtures {
+            writer = Some(spawn_fixture_writer());
+        }
 
         unsafe {
             let mut message = MSG::default();
@@ -184,18 +217,26 @@ mod windows_probe {
         let observed_text_count = state.observed_text.len();
         let expected_item_count = state.expected_items.unwrap_or(0);
         let observed_item_count = state.observed_items.len();
+        let expected_fixture_count = state.expected_fixtures.as_ref().map_or(0, HashSet::len);
+        let observed_fixture_count = state.observed_fixtures.len();
+        let passed_fixture_count = state.passed_fixtures.len();
         let burst_passed = state.expected.is_none() || observed_count == expected_count;
         let text_passed =
             state.expected_text.is_none() || observed_text_count >= expected_text_count;
         let items_passed =
             state.expected_items.is_none() || observed_item_count >= expected_item_count;
+        let fixtures_passed = state.expected_fixtures.is_none()
+            || (observed_fixture_count == expected_fixture_count
+                && passed_fixture_count == expected_fixture_count);
         let has_expectations = state.expected.is_some()
             || state.expected_text.is_some()
-            || state.expected_items.is_some();
+            || state.expected_items.is_some()
+            || state.expected_fixtures.is_some();
         let passed = (!has_expectations || !state.timed_out)
             && burst_passed
             && text_passed
             && items_passed
+            && fixtures_passed
             && state.read_failures == 0;
 
         println!(
@@ -211,6 +252,10 @@ mod windows_probe {
                 "observed_distinct_text": observed_text_count,
                 "expected_distinct_items": expected_item_count,
                 "observed_distinct_items": observed_item_count,
+                "expected_fixtures": expected_fixture_count,
+                "observed_fixtures": observed_fixture_count,
+                "passed_fixtures": passed_fixture_count,
+                "fixture_failures": state.fixture_failures,
                 "timed_out": state.timed_out
             })
         );
@@ -227,6 +272,7 @@ mod windows_probe {
         let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
         let mut expect_text = None;
         let mut expect_items = None;
+        let mut fixtures = false;
         let mut writer = false;
         let mut args = env::args().skip(1);
 
@@ -248,10 +294,11 @@ mod windows_probe {
                 "--expect-items" => {
                     expect_items = Some(parse_value(&mut args, "--expect-items"));
                 }
+                "--fixtures" => fixtures = true,
                 "--writer" => writer = true,
                 "--help" | "-h" => {
                     println!(
-                        "Usage: clipboard_probe [--burst COUNT] [--interval-ms MS] [--contention-ms MS] [--expect-text COUNT] [--expect-items COUNT] [--timeout-seconds SECONDS]"
+                        "Usage: clipboard_probe [--burst COUNT | --fixtures] [--interval-ms MS] [--contention-ms MS] [--expect-text COUNT] [--expect-items COUNT] [--timeout-seconds SECONDS]"
                     );
                     std::process::exit(0);
                 }
@@ -262,6 +309,11 @@ mod windows_probe {
             }
         }
 
+        if fixtures && (burst_count.is_some() || expect_text.is_some() || expect_items.is_some()) {
+            eprintln!("--fixtures cannot be combined with burst or interactive expectations");
+            std::process::exit(1);
+        }
+
         Config {
             burst_count,
             interval_ms,
@@ -269,6 +321,7 @@ mod windows_probe {
             timeout_seconds,
             expect_text,
             expect_items,
+            fixtures,
             writer,
         }
     }
@@ -329,6 +382,134 @@ mod windows_probe {
 
             thread::sleep(Duration::from_millis(interval_ms));
         }
+    }
+
+    fn run_fixture_writer() {
+        thread::sleep(Duration::from_millis(250));
+        let clipboard = ClipboardContext::new().unwrap_or_else(|error| {
+            eprintln!("failed to create fixture clipboard context: {error}");
+            std::process::exit(1);
+        });
+
+        set_fixture(
+            &clipboard,
+            || {
+                vec![
+                    ClipboardContent::Text(RICH_MARKER.to_string()),
+                    ClipboardContent::Other(HTML_FORMAT.to_string(), cf_html_payload()),
+                    ClipboardContent::Other(
+                        RICH_TEXT_FORMAT.to_string(),
+                        fixture_rtf().as_bytes().to_vec(),
+                    ),
+                ]
+            },
+            "rich",
+        );
+
+        set_fixture(
+            &clipboard,
+            || {
+                vec![
+                    ClipboardContent::Text(FILES_MARKER.to_string()),
+                    ClipboardContent::Files(fixture_file_paths()),
+                ]
+            },
+            "files",
+        );
+
+        set_fixture(
+            &clipboard,
+            || {
+                vec![
+                    ClipboardContent::Text(BINARY_MARKER.to_string()),
+                    ClipboardContent::Other(BINARY_FORMAT.to_string(), fixture_binary()),
+                ]
+            },
+            "binary",
+        );
+    }
+
+    fn set_fixture(
+        clipboard: &ClipboardContext,
+        contents: impl Fn() -> Vec<ClipboardContent>,
+        name: &str,
+    ) {
+        for attempt in 0..10_u32 {
+            match clipboard.set(contents()) {
+                Ok(()) => {
+                    // Leave enough time for the listener's bounded read retries.
+                    // Clipboard owners and monitors can transiently contend even
+                    // after WM_CLIPBOARDUPDATE has been delivered.
+                    thread::sleep(Duration::from_millis(500));
+                    return;
+                }
+                Err(error) if attempt < 9 => {
+                    thread::sleep(Duration::from_millis(2_u64.pow(attempt.min(6))));
+                    if attempt == 8 {
+                        eprintln!("retrying fixture {name} after clipboard error: {error}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("failed to write fixture {name}: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
+    fn spawn_fixture_writer() -> Child {
+        Command::new(env::current_exe().expect("resolve clipboard probe executable"))
+            .args(["--writer", "--fixtures"])
+            .spawn()
+            .unwrap_or_else(|error| {
+                eprintln!("failed to start clipboard fixture writer process: {error}");
+                std::process::exit(1);
+            })
+    }
+
+    fn fixture_file_paths() -> Vec<String> {
+        vec![
+            r"C:\Cubby Probe\leading space.txt".to_string(),
+            r"C:\Cubby Probe\Unicode-文档.txt".to_string(),
+        ]
+    }
+
+    fn fixture_rtf() -> &'static str {
+        r"{\rtf1\ansi\deff0 {\b Cubby} rich text\line second line}"
+    }
+
+    fn fixture_binary() -> Vec<u8> {
+        vec![
+            0x00, 0x01, 0x7f, 0x80, 0xfe, 0xff, b'C', b'U', b'B', b'1', 0x00,
+        ]
+    }
+
+    fn cf_html_payload() -> Vec<u8> {
+        const START_MARKER: &str = "<!--StartFragment-->";
+        const END_MARKER: &str = "<!--EndFragment-->";
+        let fragment = fixture_html_fragment();
+        let body = format!("<html><body>{START_MARKER}{fragment}{END_MARKER}</body></html>");
+        let placeholder = "Version:0.9\r\nStartHTML:0000000000\r\nEndHTML:0000000000\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n";
+        let start_html = placeholder.len();
+        let end_html = start_html + body.len();
+        let start_fragment =
+            start_html + body.find(START_MARKER).expect("start marker") + START_MARKER.len();
+        let end_fragment = start_html + body.find(END_MARKER).expect("end marker");
+        format!(
+            "Version:0.9\r\nStartHTML:{start_html:010}\r\nEndHTML:{end_html:010}\r\nStartFragment:{start_fragment:010}\r\nEndFragment:{end_fragment:010}\r\n{body}"
+        )
+        .into_bytes()
+    }
+
+    fn fixture_html_fragment() -> &'static str {
+        "<p data-cubby=\"fixture\">Café &amp; 日本語</p>"
+    }
+
+    fn fixture_html_document() -> String {
+        format!(
+            "<html><body><!--StartFragment-->{}<!--EndFragment--></body></html>",
+            fixture_html_fragment()
+        )
     }
 
     fn hold_clipboard_open(contention_ms: u64) -> Result<(), String> {
@@ -464,6 +645,16 @@ mod windows_probe {
             .as_deref()
             .filter(|value| value.starts_with("CUBBY-PROBE-"))
             .map(str::to_owned);
+        let fixture_mode = STATE.get().is_some_and(|state| {
+            state
+                .lock()
+                .expect("state lock")
+                .expected_fixtures
+                .is_some()
+        });
+        let fixture_result = fixture_mode
+            .then(|| text.as_deref().and_then(validate_fixture))
+            .flatten();
         let text_sha256 = text.as_ref().map(|value| {
             let mut hasher = Sha256::new();
             hasher.update(value.as_bytes());
@@ -505,6 +696,14 @@ mod windows_probe {
                     .observed_items
                     .insert(format!("image:{}", image.sha256));
             }
+            if let Some((name, result)) = fixture_result.as_ref() {
+                state.observed_fixtures.insert((*name).to_string());
+                if let Err(error) = result {
+                    state.fixture_failures.push(format!("{name}: {error}"));
+                } else {
+                    state.passed_fixtures.insert((*name).to_string());
+                }
+            }
             let burst_complete = state
                 .expected
                 .as_ref()
@@ -515,7 +714,11 @@ mod windows_probe {
             let items_complete = state
                 .expected_items
                 .is_some_and(|expected| state.observed_items.len() >= expected);
-            should_quit = burst_complete || text_complete || items_complete;
+            let fixtures_complete = state
+                .expected_fixtures
+                .as_ref()
+                .is_some_and(|expected| expected.len() == state.observed_fixtures.len());
+            should_quit = burst_complete || text_complete || items_complete || fixtures_complete;
             state.started.elapsed().as_millis()
         } else {
             0
@@ -541,6 +744,11 @@ mod windows_probe {
             image_read_error: attempted_image_error,
             marker,
             read_error,
+            fixture: fixture_result.as_ref().map(|(name, _)| (*name).to_string()),
+            fixture_passed: fixture_result.as_ref().map(|(_, result)| result.is_ok()),
+            fixture_error: fixture_result
+                .as_ref()
+                .and_then(|(_, result)| result.as_ref().err().cloned()),
         };
         println!(
             "{}",
@@ -550,6 +758,79 @@ mod windows_probe {
         if should_quit {
             PostQuitMessage(0);
         }
+    }
+
+    fn validate_fixture(text: &str) -> Option<(&'static str, Result<(), String>)> {
+        let name = match text {
+            RICH_MARKER => "rich",
+            FILES_MARKER => "files",
+            BINARY_MARKER => "binary",
+            _ => return None,
+        };
+        Some((name, validate_fixture_payload(name)))
+    }
+
+    fn validate_fixture_payload(name: &str) -> Result<(), String> {
+        let mut last_error = None;
+        for attempt in 0..10_u32 {
+            match validate_fixture_payload_once(name) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt < 9 {
+                        thread::sleep(Duration::from_millis(2_u64.pow(attempt.min(6))));
+                    }
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| format!("fixture {name} validation failed")))
+    }
+
+    fn validate_fixture_payload_once(name: &str) -> Result<(), String> {
+        let clipboard = ClipboardContext::new().map_err(|error| error.to_string())?;
+        match name {
+            "rich" => {
+                assert_clipboard_buffer(&clipboard, HTML_FORMAT, &cf_html_payload())?;
+                assert_clipboard_buffer(&clipboard, RICH_TEXT_FORMAT, fixture_rtf().as_bytes())?;
+                let html = clipboard.get_html().map_err(|error| error.to_string())?;
+                if html != fixture_html_document() {
+                    return Err(format!("decoded HTML document differed: {html:?}"));
+                }
+                let rtf = clipboard
+                    .get_rich_text()
+                    .map_err(|error| error.to_string())?;
+                if rtf.as_bytes() != fixture_rtf().as_bytes() {
+                    return Err("RTF text differed".to_string());
+                }
+            }
+            "files" => {
+                let files = clipboard.get_files().map_err(|error| error.to_string())?;
+                if files != fixture_file_paths() {
+                    return Err(format!("file list differed: {files:?}"));
+                }
+            }
+            "binary" => assert_clipboard_buffer(&clipboard, BINARY_FORMAT, &fixture_binary())?,
+            _ => return Err(format!("unknown fixture {name}")),
+        }
+        Ok(())
+    }
+
+    fn assert_clipboard_buffer(
+        clipboard: &ClipboardContext,
+        format: &str,
+        expected: &[u8],
+    ) -> Result<(), String> {
+        let actual = clipboard
+            .get_buffer(format)
+            .map_err(|error| format!("failed to read {format}: {error}"))?;
+        if actual != expected {
+            return Err(format!(
+                "{format} bytes differed (expected {}, got {})",
+                expected.len(),
+                actual.len()
+            ));
+        }
+        Ok(())
     }
 
     unsafe fn read_formats_with_retry() -> (Vec<String>, Option<String>) {
@@ -666,6 +947,44 @@ mod windows_probe {
                     format!("FORMAT_{format}")
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{cf_html_payload, fixture_binary, fixture_html_fragment};
+
+        #[test]
+        fn cf_html_offsets_are_byte_accurate_for_unicode() {
+            let payload = cf_html_payload();
+            let payload_text = std::str::from_utf8(&payload).expect("UTF-8 CF_HTML payload");
+            let header = &payload_text[..payload_text.find("<html>").expect("HTML body")];
+            let read_offset = |label: &str| {
+                let start = header.find(label).expect("offset label") + label.len();
+                header[start..start + 10]
+                    .parse::<usize>()
+                    .expect("decimal offset")
+            };
+
+            let start_html = read_offset("StartHTML:");
+            let end_html = read_offset("EndHTML:");
+            let start_fragment = read_offset("StartFragment:");
+            let end_fragment = read_offset("EndFragment:");
+
+            assert_eq!(start_html, header.len());
+            assert_eq!(end_html, payload.len());
+            assert_eq!(
+                &payload[start_fragment..end_fragment],
+                fixture_html_fragment().as_bytes()
+            );
+        }
+
+        #[test]
+        fn binary_fixture_exercises_non_text_bytes() {
+            let bytes = fixture_binary();
+            assert!(bytes.contains(&0));
+            assert!(bytes.iter().any(|byte| *byte >= 0x80));
+            assert!(std::str::from_utf8(&bytes).is_err());
         }
     }
 }

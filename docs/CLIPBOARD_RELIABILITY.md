@@ -92,6 +92,25 @@ executes both rapid and intentionally contended bursts. Because Windows exposes
 one system clipboard per interactive session, this test replaces the current
 clipboard contents and should only be run when the keyboard is idle.
 
+Run `scripts/test-clipboard-formats.ps1` for the deterministic multi-format
+fixtures. A separate writer process publishes three atomic payloads and the
+listener verifies both decoded values and exact bytes:
+
+- Unicode text (including leading/trailing whitespace) with simultaneous CF_HTML
+  and RTF payloads
+- Unicode text with a multi-item `CF_HDROP` file list
+- Unicode text with an application-defined binary format containing embedded NUL
+  and high bytes
+
+Fixture validation retries transient auxiliary-format read contention with
+bounded exponential backoff. The writer retains each payload long enough for the
+complete retry window, so a retry cannot accidentally validate the next fixture.
+
+This suite proves the local Windows clipboard can materialize those payloads
+without normalization or format loss. Application-specific compatibility still
+belongs in the manual matrix below; passing the fixtures does not claim that
+Office, browsers, remote clients, or elevated targets have been validated.
+
 Production materialization uses the same bounded retry margin: ten attempts with
 exponential backoff capped at 64 ms, allowing up to 319 ms for a clipboard owner
 or synchronization client to release the clipboard.
