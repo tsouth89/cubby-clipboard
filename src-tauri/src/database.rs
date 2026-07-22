@@ -176,6 +176,15 @@ impl Database {
             "ALTER TABLE clips ADD COLUMN ocr_error_kind TEXT",
         )
         .await?;
+        // A screenshot whose full-resolution image was dropped at the retention
+        // cutoff (SOU-244). The encrypted thumbnail (clips.content) and ocr_text
+        // survive, so the clip stays browsable and searchable by its words; only
+        // the heavy clip_images blob is gone. 0 = full image still present.
+        add_column_if_missing(
+            &self.pool,
+            "ALTER TABLE clips ADD COLUMN full_image_expired INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
 
         // Existing images without OCR become durable background work. A process
         // that exited while a job was running leaves it as `processing`; reset

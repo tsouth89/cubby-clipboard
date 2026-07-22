@@ -32,10 +32,16 @@ fn clip_to_list_item(clip: &Clip) -> ClipboardItem {
             .as_deref()
             .is_some_and(|text| !text.trim().is_empty()),
         ocr_match: None,
+        image_expired: clip.full_image_expired,
     }
 }
 
 const OCR_SNIPPET_CHAR_LIMIT: usize = 96;
+
+/// Returned when a clip's full-resolution image was dropped by retention
+/// (SOU-244). Surfaced to the user when they try to paste/copy the full image.
+pub(crate) const IMAGE_EXPIRED_ERROR: &str =
+    "This screenshot's full image has expired. Only its recognized text remains.";
 
 fn find_case_insensitive(haystack: &str, needle: &str) -> Option<(usize, usize)> {
     let folded_needle = needle.to_lowercase();
@@ -420,6 +426,14 @@ async fn load_full_image_content(db: &Database, clip: &mut Clip) -> Result<Vec<u
     let pool = &db.pool;
     if clip.clip_type != "image" {
         return Err("Clip is not an image".to_string());
+    }
+
+    // Retention dropped the full-resolution blob (SOU-244); only the thumbnail
+    // and OCR text remain. Refuse rather than silently handing back the low-res
+    // thumbnail as if it were the original. The frontend also gates this, so
+    // this is the safety net for any direct paste/copy path.
+    if clip.full_image_expired {
+        return Err(IMAGE_EXPIRED_ERROR.to_string());
     }
 
     // 1. Try fetching from file path in DB
@@ -1316,89 +1330,196 @@ pub async fn apply_retention(
     let settings = settings_manager.get();
     let (deleted, image_paths) =
         enforce_retention_in_pool(&db.pool, settings.max_items, settings.auto_delete_days).await?;
+    // A preserve-only pass (SOU-244) drops image blobs without removing any
+    // clips, so `deleted` can be 0 while blobs were still freed and rows flagged
+    // expired. Refresh the flyout whenever anything changed so the new "text
+    // only" badges appear; only a real removal needs the search index rebuilt.
+    let blobs_removed = !image_paths.is_empty();
     remove_clip_image_files(&db.image_dir, image_paths);
     if deleted > 0 {
         db.search_index.invalidate();
+    }
+    if deleted > 0 || blobs_removed {
         let _ = app.emit("clipboard-change", ());
     }
     Ok(deleted)
 }
 
+/// Bind each id in a slice onto a sqlx query, regardless of its concrete type
+/// (`query`, `query_scalar`, ...), returning the fully-bound query.
+macro_rules! bind_all {
+    ($query:expr, $ids:expr) => {{
+        let mut query = $query;
+        for id in $ids {
+            query = query.bind(id);
+        }
+        query
+    }};
+}
+
+/// Enforce retention: sweep clips past the keep-for window (and any item-count
+/// overflow), plus anything the user soft-deleted.
+///
+/// SOU-244: an image clip that has recognized OCR text is *preserved* rather
+/// than deleted when it ages out. Its full-resolution blob (the disk-heavy
+/// `clip_images` row + `.cubby` file) is dropped, but the `clips` row keeps its
+/// encrypted thumbnail and `ocr_text`, and is flagged `full_image_expired = 1`
+/// so it stays browsable and searchable and is never re-swept by age/overflow.
+/// Everything else — text/files clips, textless images, and explicit
+/// soft-deletes — is still fully removed.
+///
+/// Returns `(rows_fully_deleted, disk_image_paths_to_unlink)`. Preserved images
+/// contribute their disk path (the file is unlinked) but not to the delete count.
 pub(crate) async fn enforce_retention_in_pool(
     pool: &SqlitePool,
     max_items: i64,
     auto_delete_days: i64,
 ) -> Result<(u64, Vec<String>), String> {
-    let candidate_query = r#"
+    // Images aged out by the keep-for window / overflow cap that still carry
+    // OCR text. These are preserved (blob dropped, row + thumbnail + text kept),
+    // not deleted. `full_image_expired = 0` keeps already-preserved clips out of
+    // this set so they're processed at most once.
+    let preserve_query = r#"
+        SELECT uuid FROM clips
+        WHERE is_pinned = 0
+          AND is_deleted = 0
+          AND clip_type = 'image'
+          AND full_image_expired = 0
+          AND ocr_status = 'completed'
+          AND ocr_text IS NOT NULL
+          AND (
+              (? > 0 AND created_at < datetime('now', '-' || ? || ' days'))
+              OR (? > 0 AND uuid IN (
+                  SELECT uuid FROM clips
+                  WHERE is_deleted = 0 AND is_pinned = 0
+                  ORDER BY created_at DESC
+                  LIMIT -1 OFFSET ?
+              ))
+          )
+    "#;
+
+    // Clips to remove entirely. Soft-deletes always qualify. Age/overflow
+    // sweeps skip clips already preserved by SOU-244 (`full_image_expired = 0`),
+    // so a preserved thumbnail is never later hard-deleted by the age branch;
+    // an explicit soft-delete of one still wipes it.
+    let delete_query = r#"
         SELECT uuid FROM clips
         WHERE is_pinned = 0 AND (
             is_deleted = 1
-            OR (? > 0 AND created_at < datetime('now', '-' || ? || ' days'))
-            OR (? > 0 AND uuid IN (
-                SELECT uuid FROM clips
-                WHERE is_deleted = 0 AND is_pinned = 0
-                ORDER BY created_at DESC
-                LIMIT -1 OFFSET ?
+            OR (full_image_expired = 0 AND (
+                (? > 0 AND created_at < datetime('now', '-' || ? || ' days'))
+                OR (? > 0 AND uuid IN (
+                    SELECT uuid FROM clips
+                    WHERE is_deleted = 0 AND is_pinned = 0
+                    ORDER BY created_at DESC
+                    LIMIT -1 OFFSET ?
+                ))
             ))
         )
     "#;
 
-    let candidates: Vec<String> = sqlx::query_scalar(candidate_query)
-        .bind(auto_delete_days)
-        .bind(auto_delete_days)
-        .bind(max_items)
-        .bind(max_items.max(0))
-        .fetch_all(pool)
-        .await
-        .map_err(|error| error.to_string())?;
-
-    if candidates.is_empty() {
-        return Ok((0, Vec::new()));
-    }
-
-    let placeholders = std::iter::repeat_n("?", candidates.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let select_paths =
-        format!("SELECT file_path FROM clip_images WHERE clip_uuid IN ({placeholders})");
-    let delete_images = format!("DELETE FROM clip_images WHERE clip_uuid IN ({placeholders})");
-    let delete_clips = format!("DELETE FROM clips WHERE uuid IN ({placeholders})");
-
     let mut transaction = pool.begin().await.map_err(|error| error.to_string())?;
-    let mut path_query = sqlx::query_scalar::<_, Option<String>>(&select_paths);
-    for id in &candidates {
-        path_query = path_query.bind(id);
-    }
-    let image_paths = path_query
-        .fetch_all(&mut *transaction)
-        .await
-        .map_err(|error| error.to_string())?;
 
-    let mut image_delete = sqlx::query(&delete_images);
-    for id in &candidates {
-        image_delete = image_delete.bind(id);
-    }
-    image_delete
-        .execute(&mut *transaction)
-        .await
-        .map_err(|error| error.to_string())?;
+    let preserve: Vec<String> = bind_retention(
+        sqlx::query_scalar(preserve_query),
+        max_items,
+        auto_delete_days,
+    )
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(|error| error.to_string())?;
 
-    let mut clip_delete = sqlx::query(&delete_clips);
-    for id in &candidates {
-        clip_delete = clip_delete.bind(id);
+    // Drop the full-resolution blobs of preserved images and flag the rows. Do
+    // this before selecting the delete set so the flag excludes them from the
+    // age/overflow branch below.
+    let mut preserved_paths: Vec<String> = Vec::new();
+    if !preserve.is_empty() {
+        let placeholders = placeholders(preserve.len());
+        let select_paths =
+            format!("SELECT file_path FROM clip_images WHERE clip_uuid IN ({placeholders})");
+        let delete_images = format!("DELETE FROM clip_images WHERE clip_uuid IN ({placeholders})");
+        let flag_clips =
+            format!("UPDATE clips SET full_image_expired = 1 WHERE uuid IN ({placeholders})");
+
+        let paths: Vec<Option<String>> = bind_all!(sqlx::query_scalar(&select_paths), &preserve)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(|error| error.to_string())?;
+        preserved_paths = paths.into_iter().flatten().collect();
+
+        bind_all!(sqlx::query(&delete_images), &preserve)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| error.to_string())?;
+        bind_all!(sqlx::query(&flag_clips), &preserve)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| error.to_string())?;
     }
-    let deleted = clip_delete
-        .execute(&mut *transaction)
-        .await
-        .map_err(|error| error.to_string())?
-        .rows_affected();
+
+    let candidates: Vec<String> = bind_retention(
+        sqlx::query_scalar(delete_query),
+        max_items,
+        auto_delete_days,
+    )
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    let mut deleted = 0u64;
+    let mut deleted_paths: Vec<String> = Vec::new();
+    if !candidates.is_empty() {
+        let placeholders = placeholders(candidates.len());
+        let select_paths =
+            format!("SELECT file_path FROM clip_images WHERE clip_uuid IN ({placeholders})");
+        let delete_images = format!("DELETE FROM clip_images WHERE clip_uuid IN ({placeholders})");
+        let delete_clips = format!("DELETE FROM clips WHERE uuid IN ({placeholders})");
+
+        let paths: Vec<Option<String>> = bind_all!(sqlx::query_scalar(&select_paths), &candidates)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(|error| error.to_string())?;
+        deleted_paths = paths.into_iter().flatten().collect();
+
+        bind_all!(sqlx::query(&delete_images), &candidates)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| error.to_string())?;
+        deleted = bind_all!(sqlx::query(&delete_clips), &candidates)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| error.to_string())?
+            .rows_affected();
+    }
 
     transaction
         .commit()
         .await
         .map_err(|error| error.to_string())?;
 
-    Ok((deleted, image_paths.into_iter().flatten().collect()))
+    // Preserved and deleted images both leave a disk blob to unlink.
+    deleted_paths.extend(preserved_paths);
+    Ok((deleted, deleted_paths))
+}
+
+fn placeholders(count: usize) -> String {
+    std::iter::repeat_n("?", count)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Bind the four retention parameters (age window twice, overflow cap twice) in
+/// the order the retention `WHERE` clauses expect.
+fn bind_retention<'q, O>(
+    query: sqlx::query::QueryScalar<'q, sqlx::Sqlite, O, sqlx::sqlite::SqliteArguments<'q>>,
+    max_items: i64,
+    auto_delete_days: i64,
+) -> sqlx::query::QueryScalar<'q, sqlx::Sqlite, O, sqlx::sqlite::SqliteArguments<'q>> {
+    query
+        .bind(auto_delete_days)
+        .bind(auto_delete_days)
+        .bind(max_items)
+        .bind(max_items.max(0))
 }
 
 pub(crate) fn remove_clip_image_files(image_dir: &std::path::Path, image_paths: Vec<String>) {
@@ -1990,6 +2111,7 @@ mod tests {
             source_icon: None,
             metadata: None,
             ocr_text: None,
+            full_image_expired: false,
             created_at: chrono::Utc::now(),
             last_accessed: chrono::Utc::now(),
         };
@@ -2184,5 +2306,160 @@ mod tests {
             .await
             .expect("remaining clips should load");
         assert_eq!(remaining, vec!["pinned", "recent-2", "recent-3"]);
+    }
+
+    /// Insert an aged image clip plus its `clip_images` blob row for the
+    /// SOU-244 retention tests.
+    async fn insert_aged_image(
+        database: &Database,
+        uuid: &str,
+        age_days: i64,
+        is_pinned: i64,
+        ocr_status: &str,
+        ocr_text: Option<&str>,
+    ) {
+        sqlx::query(
+            r#"
+            INSERT INTO clips
+                (uuid, clip_type, content, text_preview, content_hash, is_pinned,
+                 ocr_status, ocr_text, created_at)
+            VALUES (?, 'image', x'89504e47', '[Image]', ?, ?, ?, ?,
+                    datetime('now', '-' || ? || ' days'))
+            "#,
+        )
+        .bind(uuid)
+        .bind(format!("hash-{uuid}"))
+        .bind(is_pinned)
+        .bind(ocr_status)
+        .bind(ocr_text)
+        .bind(age_days)
+        .execute(&database.pool)
+        .await
+        .expect("image fixture should insert");
+
+        sqlx::query(
+            r#"
+            INSERT INTO clip_images
+                (clip_uuid, full_content, file_path, file_size, storage_kind, mime_type)
+            VALUES (?, x'', ?, 1024, 'file', 'image/png')
+            "#,
+        )
+        .bind(uuid)
+        .bind(format!("C:/images/{uuid}.cubby"))
+        .execute(&database.pool)
+        .await
+        .expect("clip_images fixture should insert");
+    }
+
+    async fn clip_uuids(database: &Database) -> Vec<String> {
+        sqlx::query_scalar("SELECT uuid FROM clips ORDER BY uuid")
+            .fetch_all(&database.pool)
+            .await
+            .expect("clips should load")
+    }
+
+    #[tokio::test]
+    async fn retention_preserves_ocr_images_and_drops_only_their_full_blob() {
+        let database = test_database().await;
+        // Aged past the 30-day window, with recognized text -> preserved.
+        insert_aged_image(&database, "ocr-old", 60, 0, "completed", Some("CUB1:text")).await;
+        // Aged out but no recognized text -> fully deleted (nothing to keep).
+        insert_aged_image(&database, "ocr-old-empty", 60, 0, "completed", None).await;
+        // Aged out but OCR never finished -> fully deleted.
+        insert_aged_image(&database, "pending-old", 60, 0, "pending", None).await;
+        // Recent image with text -> untouched (not past the window).
+        insert_aged_image(
+            &database,
+            "ocr-recent",
+            1,
+            0,
+            "completed",
+            Some("CUB1:text"),
+        )
+        .await;
+        // Pinned image, aged, with text -> untouched (pins are always kept whole).
+        insert_aged_image(
+            &database,
+            "ocr-pinned",
+            90,
+            1,
+            "completed",
+            Some("CUB1:text"),
+        )
+        .await;
+
+        // max_items = 0 isolates the age window; auto_delete_days = 30.
+        let (deleted, paths) = enforce_retention_in_pool(&database.pool, 0, 30)
+            .await
+            .expect("retention should succeed");
+
+        // Only the two textless aged images are hard-deleted.
+        assert_eq!(deleted, 2);
+        // Every dropped full-image blob (preserved + deleted) is returned for
+        // disk cleanup, including the preserved clip's file.
+        let mut paths = paths;
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "C:/images/ocr-old-empty.cubby",
+                "C:/images/ocr-old.cubby",
+                "C:/images/pending-old.cubby",
+            ]
+        );
+
+        // Rows kept: the preserved image plus the two untouched ones.
+        assert_eq!(
+            clip_uuids(&database).await,
+            vec!["ocr-old", "ocr-pinned", "ocr-recent"]
+        );
+
+        // The preserved image keeps its text but is flagged and stripped of its blob.
+        let (expired, ocr_text): (bool, Option<String>) =
+            sqlx::query_as("SELECT full_image_expired, ocr_text FROM clips WHERE uuid = 'ocr-old'")
+                .fetch_one(&database.pool)
+                .await
+                .expect("preserved clip should load");
+        assert!(expired, "aged OCR image should be flagged expired");
+        assert_eq!(ocr_text.as_deref(), Some("CUB1:text"));
+        let blob_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM clip_images WHERE clip_uuid = 'ocr-old'")
+                .fetch_one(&database.pool)
+                .await
+                .expect("blob count should load");
+        assert_eq!(blob_rows, 0, "preserved image's full blob should be gone");
+
+        // Untouched images keep both their row flag and their blob.
+        let untouched_blob: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM clip_images WHERE clip_uuid = 'ocr-recent'")
+                .fetch_one(&database.pool)
+                .await
+                .expect("blob count should load");
+        assert_eq!(untouched_blob, 1);
+
+        // Re-running retention is stable: the preserved clip is never re-swept.
+        let (deleted_again, paths_again) = enforce_retention_in_pool(&database.pool, 0, 30)
+            .await
+            .expect("second retention pass should succeed");
+        assert_eq!(deleted_again, 0);
+        assert!(paths_again.is_empty());
+        assert_eq!(
+            clip_uuids(&database).await,
+            vec!["ocr-old", "ocr-pinned", "ocr-recent"]
+        );
+
+        // Explicitly deleting a preserved clip still wipes it entirely.
+        sqlx::query("UPDATE clips SET is_deleted = 1 WHERE uuid = 'ocr-old'")
+            .execute(&database.pool)
+            .await
+            .expect("soft delete should apply");
+        let (deleted_explicit, _) = enforce_retention_in_pool(&database.pool, 0, 30)
+            .await
+            .expect("third retention pass should succeed");
+        assert_eq!(deleted_explicit, 1);
+        assert_eq!(
+            clip_uuids(&database).await,
+            vec!["ocr-pinned", "ocr-recent"]
+        );
     }
 }

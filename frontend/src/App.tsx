@@ -21,6 +21,12 @@ import { generateDemoClips } from './debug/demoData';
 
 const assetCaptureEnabled = import.meta.env.DEV && import.meta.env.VITE_CUBBY_ASSET_CAPTURE === '1';
 
+// Shown when the user tries to paste/copy the full image of a clip whose
+// full-resolution blob was dropped by retention (SOU-244). Its thumbnail and
+// recognized text remain, so the message points at what is still available.
+const IMAGE_EXPIRED_MESSAGE =
+  "This screenshot's full image expired. Only its recognized text remains.";
+
 function App() {
   const [clips, setClips] = useState<AppClipboardItem[]>(() =>
     assetCaptureEnabled ? generateDemoClips().map((clip) => ({ ...clip, ocr_match: null })) : []
@@ -492,6 +498,13 @@ function App() {
         const clip = clips.find((c) => c.id === clipId);
         if (!clip) return;
         if (plainText && clip.clip_type === 'image') return;
+        // The full-resolution image is gone (dropped by retention); its OCR text
+        // is still one keystroke away via "paste recognized text". Don't hand
+        // back the low-res thumbnail as if it were the original.
+        if (clip.clip_type === 'image' && clip.image_expired) {
+          toast.error(IMAGE_EXPIRED_MESSAGE);
+          return;
+        }
 
         await invoke('paste_clip', { id: clipId, plainText });
       } catch (error) {
@@ -508,6 +521,10 @@ function App() {
         const clip = clips.find((c) => c.id === clipId);
         if (!clip) return;
         if (plainText && clip.clip_type === 'image') return;
+        if (clip.clip_type === 'image' && clip.image_expired) {
+          toast.error(IMAGE_EXPIRED_MESSAGE);
+          return;
+        }
 
         await invoke('copy_clip', { id: clipId, plainText });
 
