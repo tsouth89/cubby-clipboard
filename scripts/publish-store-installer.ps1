@@ -27,13 +27,23 @@ $objectPrefix = "releases/v$Version"
 $localHash = (Get-FileHash -LiteralPath $resolvedInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $hashPath = Join-Path ([System.IO.Path]::GetTempPath()) "$hashName-$([guid]::NewGuid().ToString('N')).txt"
 
-function Assert-R2ObjectDoesNotExist {
+function Test-R2ObjectRequiresUpload {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$ObjectName
+        [string]$ObjectName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Path
     )
 
-    $objectUrl = "$($DownloadOrigin.TrimEnd('/'))/$objectPrefix/$ObjectName"
+    $accountId = $env:CLOUDFLARE_ACCOUNT_ID
+    $apiToken = $env:CLOUDFLARE_API_TOKEN
+    if ([string]::IsNullOrWhiteSpace($accountId) -or [string]::IsNullOrWhiteSpace($apiToken)) {
+        throw "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required to check immutable R2 objects."
+    }
+
+    $objectKey = "$objectPrefix/$ObjectName"
+    $objectUrl = "https://api.cloudflare.com/client/v4/accounts/$accountId/r2/buckets/$BucketName/objects/$objectKey"
     $probePath = Join-Path ([System.IO.Path]::GetTempPath()) "cubby-r2-probe-$([guid]::NewGuid().ToString('N'))"
     try {
         $statusCode = & curl.exe `
@@ -43,6 +53,7 @@ function Assert-R2ObjectDoesNotExist {
             --max-redirs 0 `
             --connect-timeout 10 `
             --max-time 60 `
+            --header "Authorization: Bearer $apiToken" `
             --output $probePath `
             --write-out "%{http_code}" `
             $objectUrl
@@ -50,11 +61,18 @@ function Assert-R2ObjectDoesNotExist {
             throw "Could not check whether $objectUrl already exists."
         }
         if ($statusCode -eq "200") {
-            throw "Refusing to overwrite immutable release object: $objectUrl"
+            $existingHash = (Get-FileHash -LiteralPath $probePath -Algorithm SHA256).Hash
+            $candidateHash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+            if ($existingHash -ne $candidateHash) {
+                throw "Refusing to overwrite immutable release object with different bytes: $objectKey"
+            }
+            Write-Output "Immutable release object already has the expected bytes; skipping upload: $objectKey"
+            return $false
         }
         if ($statusCode -ne "404") {
             throw "Unexpected HTTP $statusCode while checking $objectUrl."
         }
+        return $true
     } finally {
         Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
     }
@@ -75,7 +93,9 @@ function Publish-R2Object {
         [string]$CacheControl
     )
 
-    Assert-R2ObjectDoesNotExist -ObjectName $ObjectName
+    if (-not (Test-R2ObjectRequiresUpload -ObjectName $ObjectName -Path $Path)) {
+        return
+    }
     $objectPath = "$BucketName/$objectPrefix/$ObjectName"
     & npx --yes "wrangler@$WranglerVersion" r2 object put $objectPath `
         "--file=$Path" `
@@ -122,7 +142,7 @@ try {
             --retry-delay 5 `
             --retry-connrefused `
             --output $downloadPath `
-            $installerUrl
+            "$($installerUrl)?verify=$([guid]::NewGuid().ToString('N'))"
         if ($LASTEXITCODE -ne 0) {
             throw "Direct public download failed with curl exit code $LASTEXITCODE."
         }
