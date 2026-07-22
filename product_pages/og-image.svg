@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title description">
+  <title id="title">Cubby Clipboard</title>
+  <desc id="description">Better clipboard history for Windows 11</desc>
+  <rect width="1200" height="630" fill="#f7f5ef"/>
+  <circle cx="1080" cy="70" r="250" fill="#e7f1f0"/>
+  <circle cx="80" cy="610" r="190" fill="#e9eef8"/>
+  <g transform="translate(76 72)">
+    <path fill="#147ee8" d="M18 0h44c9.9 0 18 8.1 18 18v7H42c-8.8 0-16 7.2-16 16s7.2 16 16 16h38v5c0 9.9-8.1 18-18 18H18C8.1 80 0 71.9 0 62V18C0 8.1 8.1 0 18 0Z"/>
+    <rect x="54" y="31" width="26" height="20" rx="10" fill="#32aeb1"/>
+    <text x="100" y="57" fill="#1d2528" font-family="Segoe UI, Arial, sans-serif" font-size="44" font-weight="650" letter-spacing="-1">cubby clipboard</text>
+  </g>
+  <text x="76" y="244" fill="#1d2528" font-family="Segoe UI, Arial, sans-serif" font-size="74" font-weight="700" letter-spacing="-3">Keep what you copy.</text>
+  <text x="76" y="316" fill="#147ee8" font-family="Segoe UI, Arial, sans-serif" font-size="62" font-weight="700" letter-spacing="-2">Find it when you need it.</text>
+  <text x="80" y="388" fill="#536064" font-family="Segoe UI, Arial, sans-serif" font-size="29">Fast, private clipboard history built for Windows 11.</text>
+  <g transform="translate(78 440)" font-family="Segoe UI, Arial, sans-serif" font-size="23" font-weight="600">
+    <rect width="190" height="58" rx="29" fill="#ffffff" stroke="#d8d9d4"/>
+    <circle cx="30" cy="29" r="7" fill="#147ee8"/>
+    <text x="50" y="37" fill="#293236">Instant search</text>
+    <rect x="208" width="218" height="58" rx="29" fill="#ffffff" stroke="#d8d9d4"/>
+    <circle cx="238" cy="29" r="7" fill="#32aeb1"/>
+    <text x="258" y="37" fill="#293236">Local by design</text>
+    <rect x="444" width="225" height="58" rx="29" fill="#ffffff" stroke="#d8d9d4"/>
+    <circle cx="474" cy="29" r="7" fill="#147ee8"/>
+    <text x="494" y="37" fill="#293236">Free and open source</text>
+  </g>
+  <g transform="translate(842 188)">
+    <rect width="288" height="326" rx="24" fill="#11181b" stroke="#344146" stroke-width="2"/>
+    <rect x="22" y="22" width="244" height="45" rx="12" fill="#202a2e"/>
+    <circle cx="43" cy="44" r="7" fill="none" stroke="#8fa1a7" stroke-width="3"/>
+    <path d="m48 49 7 7" stroke="#8fa1a7" stroke-width="3" stroke-linecap="round"/>
+    <text x="67" y="52" fill="#8fa1a7" font-family="Segoe UI, Arial, sans-serif" font-size="16">Search clipboard history</text>
+    <rect x="22" y="84" width="244" height="67" rx="12" fill="#1c61a9"/>
+    <text x="40" y="111" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="650">Project handoff notes</text>
+    <text x="40" y="134" fill="#cce4fa" font-family="Segoe UI, Arial, sans-serif" font-size="13">Microsoft Edge · just now</text>
+    <rect x="22" y="165" width="244" height="58" rx="12" fill="#202a2e"/>
+    <text x="40" y="190" fill="#f0f3f4" font-family="Consolas, monospace" font-size="15">npm run build</text>
+    <text x="40" y="211" fill="#84969c" font-family="Segoe UI, Arial, sans-serif" font-size="12">Windows Terminal · 4 min</text>
+    <rect x="22" y="237" width="244" height="58" rx="12" fill="#202a2e"/>
+    <text x="40" y="262" fill="#f0f3f4" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="650">Screenshot</text>
+    <text x="40" y="283" fill="#84969c" font-family="Segoe UI, Arial, sans-serif" font-size="12">Snipping Tool · 8 min</text>
+  </g>
+</svg>
