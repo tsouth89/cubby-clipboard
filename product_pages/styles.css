@@ -2,7 +2,7 @@
   --paper: #f7f5ef;
   --paper-deep: #efede6;
   --ink: #1d2528;
-  --muted: #657074;
+  --muted: #596468;
   --line: #d9d8d1;
   --white: #fffefa;
   --blue: #0878c9;
@@ -56,7 +56,7 @@ h1 span { color: #607075; font-weight: 600; }
 .button-secondary:hover { border-color: #a9aba6; background: var(--white); }
 .star-count { padding: 2px 9px; border-radius: 999px; background: rgba(96,112,117,.14); color: #536064; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .star-count[hidden] { display: none; }
-.release-note { margin: 14px 0 0; color: #768084; font-size: 13px; }
+.release-note { margin: 14px 0 0; color: var(--muted); font-size: 13px; }
 
 .product-stage { position: relative; min-height: 560px; display: grid; align-items: center; }
 .product-stage::before { content: ""; position: absolute; width: 460px; height: 460px; right: -35px; border-radius: 50%; background: #dfe9e8; filter: blur(0); opacity: .65; }
@@ -146,7 +146,7 @@ kbd { padding: 2px 5px; border: 1px solid currentColor; border-radius: 4px; font
 .comparison-row:first-child { border: 0; }
 .comparison-row > * { display: flex; align-items: center; padding: 18px 24px; }
 .comparison-row > span { color: var(--muted); }
-.comparison-head { min-height: 57px; background: #efeee8; color: #6d777a; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.comparison-head { min-height: 57px; background: #efeee8; color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
 .comparison-head > span { color: inherit; }
 .comparison-row .cubby-col { border-left: 1px solid #b8d8ea; background: rgba(220,238,249,.55); color: #075e98; font-weight: 700; }
 .comparison-note { margin: 18px 0 0; color: var(--muted); font-size: 13px; text-align: center; }
@@ -175,7 +175,7 @@ kbd { padding: 2px 5px; border: 1px solid currentColor; border-radius: 4px; font
 .footer-grid p { margin: 0; color: var(--muted); font-size: 14px; }
 .footer-grid nav { display: flex; gap: 26px; }
 .footer-grid nav a { color: #535f62; font-size: 14px; text-decoration: none; }
-.footer-bottom { display: flex; justify-content: space-between; margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--line); color: #7c8486; font-size: 12px; }
+.footer-bottom { display: flex; justify-content: space-between; margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
 
 .legal-main { padding-block: 62px 110px; }
 .legal-header { max-width: 760px; margin-bottom: 58px; }

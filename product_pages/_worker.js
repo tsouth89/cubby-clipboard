@@ -15,6 +15,12 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    if (url.hostname === "www.cubbyclipboard.com") {
+      url.protocol = "https:";
+      url.hostname = "cubbyclipboard.com";
+      return Response.redirect(url.toString(), 308);
+    }
+
     if (request.method === "POST" && url.pathname === "/api/events") {
       return captureEvent(request, env, ctx);
     }

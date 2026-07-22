@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /api/
+Disallow: /_private/
+
+Sitemap: https://cubbyclipboard.com/sitemap.xml

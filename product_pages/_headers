@@ -4,3 +4,21 @@
   Referrer-Policy: strict-origin-when-cross-origin
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
+
+/styles.css
+  Cache-Control: public, max-age=3600, stale-while-revalidate=86400
+
+/release-links.js
+  Cache-Control: public, max-age=3600, stale-while-revalidate=86400
+
+/analytics.js
+  Cache-Control: public, max-age=3600, stale-while-revalidate=86400
+
+/og-image.png
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+
+/robots.txt
+  Cache-Control: public, max-age=3600
+
+/sitemap.xml
+  Cache-Control: public, max-age=3600

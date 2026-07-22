@@ -35,6 +35,16 @@ test("safePath keeps only local pathnames and rejects untrusted values", () => {
   assert.equal(safePath("https://example.com"), "/");
   assert.equal(safePath(null), "/");
 });
+test("www requests redirect to the canonical HTTPS host", async () => {
+  const response = await worker.fetch(
+    new Request("http://www.cubbyclipboard.com/start?from=search"),
+    {},
+    { waitUntil() {} },
+  );
+
+  assert.equal(response.status, 308);
+  assert.equal(response.headers.get("Location"), "https://cubbyclipboard.com/start?from=search");
+});
 test("visitor identifiers are pseudonymous and rotate every 30 days", async () => {
   const request = new Request("https://cubbyclipboard.com", {
     headers: { "CF-Connecting-IP": "192.0.2.10", "User-Agent": "Cubby test" },
