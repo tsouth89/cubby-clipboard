@@ -98,13 +98,16 @@ listener verifies both decoded values and exact bytes:
 
 - Unicode text (including leading/trailing whitespace) with simultaneous CF_HTML
   and RTF payloads
-- Unicode text with a multi-item `CF_HDROP` file list
+- Unicode text with an ordered multi-item `CF_HDROP` list containing a real
+  whitespace-sensitive text file, a Unicode-named binary file, and a folder
 - Unicode text with an application-defined binary format containing embedded NUL
   and high bytes
 
 Fixture validation retries transient auxiliary-format read contention with
 bounded exponential backoff. The writer retains each payload long enough for the
 complete retry window, so a retry cannot accidentally validate the next fixture.
+Physical targets stay on disk while the listener verifies their order, names,
+types, and exact bytes, then the writer removes the isolated temporary directory.
 
 This suite proves the local Windows clipboard can materialize those payloads
 without normalization or format loss. Application-specific compatibility still
