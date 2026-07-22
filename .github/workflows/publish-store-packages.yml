@@ -1,0 +1,70 @@
+name: Publish Microsoft Store packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing GitHub release tag to publish to Cloudflare R2
+        required: true
+        default: v1.2.1
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish signed installers
+    runs-on: windows-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate tag and download signed installers
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$') {
+            throw "Release tag must be a version such as v1.2.1."
+          }
+
+          $version = $Matches[1]
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          gh release download $env:RELEASE_TAG `
+            --repo $env:GITHUB_REPOSITORY `
+            --dir release-assets `
+            --pattern "Cubby.Clipboard_${version}_x64-setup.exe" `
+            --pattern "Cubby.Clipboard_${version}_arm64-setup.exe"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to download signed installers from $env:RELEASE_TAG."
+          }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Publish x64 installer
+        shell: pwsh
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
+        run: |
+          ./scripts/publish-store-installer.ps1 `
+            -Version "${{ steps.release.outputs.version }}" `
+            -Architecture x64 `
+            -InstallerPath "release-assets/Cubby.Clipboard_${{ steps.release.outputs.version }}_x64-setup.exe" `
+            -BucketName $env:CLOUDFLARE_R2_BUCKET
+
+      - name: Publish ARM64 installer
+        shell: pwsh
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
+        run: |
+          ./scripts/publish-store-installer.ps1 `
+            -Version "${{ steps.release.outputs.version }}" `
+            -Architecture arm64 `
+            -InstallerPath "release-assets/Cubby.Clipboard_${{ steps.release.outputs.version }}_arm64-setup.exe" `
+            -BucketName $env:CLOUDFLARE_R2_BUCKET
