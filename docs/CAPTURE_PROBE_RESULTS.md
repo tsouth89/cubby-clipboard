@@ -30,7 +30,7 @@ cargo run --locked --bin clipboard_probe -- --burst 100 --interval-ms 10 --timeo
 ## Remaining proof
 
 - Run the interactive probe during RDP and NinjaOne sessions.
-- Add image, physical file-list, and virtual-file burst fixtures.
+- Add image and delayed-rendered virtual-file burst fixtures.
 - Verify content remains available after disconnecting or closing the source session.
 - Run the new controlled-contention scenario and record the retry margin.
 
@@ -39,21 +39,26 @@ cargo run --locked --bin clipboard_probe -- --burst 100 --interval-ms 10 --timeo
 The probe's `--fixtures` mode covers the portable, deterministic subset of the
 rich-format matrix. It publishes each payload from a child process, then verifies
 exact Unicode text, raw CF_HTML and RTF bytes, decoded HTML/RTF, ordered
-`CF_HDROP` paths, and arbitrary binary bytes with embedded NUL/high-byte values.
+`CF_HDROP` paths backed by physical files and a folder, their exact on-disk
+bytes and types, and arbitrary binary bytes with embedded NUL/high-byte values.
 
 ```powershell
 scripts/test-clipboard-formats.ps1
 ```
 
-Live result on the Windows 11 development machine (2026-07-21): 10 consecutive
-runs, 30 fixture payloads observed and verified, zero read failures. The stress
-run exposed transient Win32 error 1418 while reading an auxiliary format after a
-clipboard notification; the probe now applies the same bounded retry principle
+Latest live result on the Windows 11 development machine (2026-07-21): 10
+consecutive runs, 30 fixture payloads observed and verified, zero read failures.
+Each file-list payload used a new isolated temporary directory containing a
+whitespace-sensitive text file, a Unicode-named binary file, and a folder. All
+targets were validated before cleanup, and no fixture directories remained.
+An earlier stress run exposed transient Win32 error 1418 while reading an
+auxiliary format after a clipboard notification; the probe now applies the same
+bounded retry principle
 used by production capture instead of treating the first contended read as data
 loss.
 
-Physical file lists, delayed-rendered virtual files, and the real application
-matrix remain separate because synthetic payloads cannot establish those claims.
+Delayed-rendered virtual files and the real application matrix remain separate
+because these local deterministic payloads cannot establish those claims.
 
 ## NinjaOne remote-session validation
 
