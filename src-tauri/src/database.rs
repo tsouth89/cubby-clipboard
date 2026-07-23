@@ -160,6 +160,10 @@ impl Database {
         // Encrypted OCR text extracted from screenshot/image clips, so images are
         // findable by their words. NULL until (or unless) OCR runs for a clip.
         add_column_if_missing(&self.pool, "ALTER TABLE clips ADD COLUMN ocr_text TEXT").await?;
+        // Encrypted JSON array of per-word bounding boxes for image clips, stored
+        // at capture time so search can later highlight matched words on the
+        // preview without re-running OCR (SOU-242). NULL when OCR found no words.
+        add_column_if_missing(&self.pool, "ALTER TABLE clips ADD COLUMN ocr_words TEXT").await?;
         add_column_if_missing(&self.pool, "ALTER TABLE clips ADD COLUMN ocr_status TEXT").await?;
         add_column_if_missing(
             &self.pool,

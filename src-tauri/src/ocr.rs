@@ -4,6 +4,29 @@
 //!
 //! Called from image capture; also exercised by a self-contained test.
 
+use serde::{Deserialize, Serialize};
+
+/// One recognized word and its bounding box, in the pixel coordinate space of
+/// the image handed to the OCR engine. Persisted (encrypted) at capture time so
+/// a later search can highlight matched words on the image without re-running
+/// OCR (SOU-242 phase 1 stores them; phase 2 renders them).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OcrWordBox {
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// The full result of recognizing an image: the assembled text and the
+/// per-word bounding boxes.
+#[derive(Debug, Clone, Default)]
+pub struct OcrRecognition {
+    pub text: String,
+    pub words: Vec<OcrWordBox>,
+}
+
 const MAX_ENCODED_IMAGE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_SOURCE_DIMENSION: u32 = 16_384;
 // Bounds the fully-decoded RGBA buffer (~4 bytes/pixel) and everything derived
@@ -80,10 +103,10 @@ fn decode_for_ocr(png_bytes: &[u8], max_ocr_dimension: u32) -> Result<image::Rgb
 }
 
 /// Recognize text from PNG-encoded image bytes with the user's installed OCR
-/// languages. Returns the recognized text (possibly empty), or an error when no
-/// OCR language is available on the machine.
+/// languages. Returns the recognized text (possibly empty) plus per-word
+/// bounding boxes, or an error when no OCR language is available on the machine.
 #[cfg(target_os = "windows")]
-pub fn recognize_png(png_bytes: &[u8]) -> Result<String, String> {
+pub fn recognize_png(png_bytes: &[u8]) -> Result<OcrRecognition, String> {
     use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
     use windows::Media::Ocr::OcrEngine;
     use windows::Security::Cryptography::CryptographicBuffer;
@@ -134,8 +157,30 @@ pub fn recognize_png(png_bytes: &[u8]) -> Result<String, String> {
     // multi-line image.
     let lines = result.Lines().map_err(|e| e.to_string())?;
     let mut text = String::new();
+    let mut words: Vec<OcrWordBox> = Vec::new();
     for index in 0..lines.Size().map_err(|e| e.to_string())? {
         let line = lines.GetAt(index).map_err(|e| e.to_string())?;
+
+        // Capture each word's box (SOU-242). The rect is in the coordinate space
+        // of the image we handed the engine (`decode_for_ocr` may have downscaled
+        // it), which phase 2 accounts for when mapping onto the preview.
+        let line_words = line.Words().map_err(|e| e.to_string())?;
+        for word_index in 0..line_words.Size().map_err(|e| e.to_string())? {
+            let word = line_words.GetAt(word_index).map_err(|e| e.to_string())?;
+            let word_text = word.Text().map_err(|e| e.to_string())?.to_string();
+            if word_text.is_empty() {
+                continue;
+            }
+            let rect = word.BoundingRect().map_err(|e| e.to_string())?;
+            words.push(OcrWordBox {
+                text: word_text,
+                x: rect.X,
+                y: rect.Y,
+                width: rect.Width,
+                height: rect.Height,
+            });
+        }
+
         let line_text = line.Text().map_err(|e| e.to_string())?.to_string();
         if line_text.is_empty() {
             continue;
@@ -145,11 +190,11 @@ pub fn recognize_png(png_bytes: &[u8]) -> Result<String, String> {
         }
         text.push_str(&line_text);
     }
-    Ok(text)
+    Ok(OcrRecognition { text, words })
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn recognize_png(_png_bytes: &[u8]) -> Result<String, String> {
+pub fn recognize_png(_png_bytes: &[u8]) -> Result<OcrRecognition, String> {
     Err("Screenshot OCR requires Windows".to_string())
 }
 
@@ -210,10 +255,13 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         match recognize_png(&png) {
-            Ok(text) => assert!(
-                text.to_uppercase().contains("CUBBY"),
-                "expected OCR to read the image, got: {text:?}"
-            ),
+            Ok(recognition) => {
+                let text = recognition.text;
+                assert!(
+                    text.to_uppercase().contains("CUBBY"),
+                    "expected OCR to read the image, got: {text:?}"
+                );
+            }
             // No OCR language pack (e.g. on some CI images) -> skip, don't fail.
             // Only the missing-language case is an acceptable skip; any other
             // failure (bitmap, API, poll) must fail the test loudly.
@@ -261,7 +309,7 @@ mod tests {
         let _ = std::fs::remove_file(&ui_path);
 
         let dark_text = match recognize_png(&dark_png) {
-            Ok(text) => text.to_uppercase(),
+            Ok(recognition) => recognition.text.to_uppercase(),
             Err(error) if error.contains("no OCR language") => {
                 eprintln!("skipping OCR corpus assertion: {error}");
                 return;
@@ -279,6 +327,7 @@ mod tests {
 
         let ui_text = recognize_png(&ui_png)
             .unwrap_or_else(|error| panic!("small UI OCR corpus failed unexpectedly: {error}"))
+            .text
             .to_uppercase();
         assert!(
             ui_text.contains("TICKET"),
