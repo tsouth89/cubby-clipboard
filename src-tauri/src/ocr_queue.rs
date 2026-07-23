@@ -132,6 +132,7 @@ pub async fn reprocess_existing_for_linebreaks(db: &Database) -> Result<(), Stri
         r#"
         UPDATE clips
         SET ocr_text = NULL,
+            ocr_words = NULL,
             ocr_status = 'pending',
             ocr_attempts = 0,
             ocr_next_retry_at = NULL,
@@ -388,9 +389,9 @@ async fn process_job(app: &AppHandle, db: &Database, job: OcrJob) -> Result<(), 
     .await;
 
     match result {
-        Ok(Ok(text)) => {
-            let has_text = !text.trim().is_empty();
-            mark_completed(db, &job.clip_uuid, &text).await?;
+        Ok(Ok(recognition)) => {
+            let has_text = !recognition.text.trim().is_empty();
+            mark_completed(db, &job.clip_uuid, &recognition.text, &recognition.layout).await?;
             if has_text {
                 // Let the open flyout surface this clip's "paste text" option
                 // right away instead of only after the list is next reloaded.
@@ -456,17 +457,33 @@ fn is_managed_image_path(image_dir: &std::path::Path, file_path: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn mark_completed(db: &Database, clip_uuid: &str, text: &str) -> Result<(), String> {
+async fn mark_completed(
+    db: &Database,
+    clip_uuid: &str,
+    text: &str,
+    layout: &crate::ocr::OcrLayout,
+) -> Result<(), String> {
     let encrypted = if text.trim().is_empty() {
         None
     } else {
         Some(db.crypto.encrypt_text(text.trim())?)
     };
 
+    // Persist the word boxes + their reference dimensions (SOU-242) as encrypted
+    // JSON, so a future search can scale and highlight matches on the image.
+    // NULL when OCR found no words.
+    let encrypted_words = if layout.words.is_empty() {
+        None
+    } else {
+        let json = serde_json::to_string(layout).map_err(|error| error.to_string())?;
+        Some(db.crypto.encrypt_text(&json)?)
+    };
+
     sqlx::query(
         r#"
         UPDATE clips
         SET ocr_text = ?,
+            ocr_words = ?,
             ocr_status = 'completed',
             ocr_next_retry_at = NULL,
             ocr_error_kind = NULL
@@ -474,6 +491,7 @@ async fn mark_completed(db: &Database, clip_uuid: &str, text: &str) -> Result<()
         "#,
     )
     .bind(encrypted)
+    .bind(encrypted_words)
     .bind(clip_uuid)
     .execute(&db.pool)
     .await
@@ -627,9 +645,14 @@ mod tests {
             .await
             .expect("claim should succeed")
         {
-            mark_completed(&database, &job.clip_uuid, "")
-                .await
-                .expect("completion should persist");
+            mark_completed(
+                &database,
+                &job.clip_uuid,
+                "",
+                &crate::ocr::OcrLayout::default(),
+            )
+            .await
+            .expect("completion should persist");
             processed += 1;
         }
 
@@ -640,6 +663,70 @@ mod tests {
                 .await
                 .expect("count should load");
         assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn mark_completed_persists_encrypted_word_boxes() {
+        use crate::ocr::{OcrLayout, OcrWordBox};
+        let database = test_database().await;
+        insert_image(&database, "shot", Some("processing")).await;
+
+        let layout = OcrLayout {
+            image_width: 1920,
+            image_height: 1080,
+            words: vec![
+                OcrWordBox {
+                    text: "Hello".to_string(),
+                    x: 1.0,
+                    y: 2.0,
+                    width: 30.0,
+                    height: 12.0,
+                },
+                OcrWordBox {
+                    text: "World".to_string(),
+                    x: 40.0,
+                    y: 2.0,
+                    width: 32.0,
+                    height: 12.0,
+                },
+            ],
+        };
+        mark_completed(&database, "shot", "Hello World", &layout)
+            .await
+            .expect("completion should persist");
+
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT ocr_words FROM clips WHERE uuid = 'shot'")
+                .fetch_one(&database.pool)
+                .await
+                .expect("row should load");
+        let encrypted = stored.expect("ocr_words should be stored");
+        // Boxes are stored as ciphertext, never plaintext JSON.
+        assert!(encrypted.starts_with("CUB1:"));
+        let json = database
+            .crypto
+            .decrypt_text(&encrypted)
+            .expect("boxes should decrypt");
+        let decoded: OcrLayout = serde_json::from_str(&json).expect("layout should deserialize");
+        // Dimensions round-trip too, so phase 2 knows the boxes' coordinate space.
+        assert_eq!(decoded, layout);
+    }
+
+    #[tokio::test]
+    async fn mark_completed_leaves_word_boxes_null_when_absent() {
+        let database = test_database().await;
+        insert_image(&database, "blank", Some("processing")).await;
+
+        mark_completed(&database, "blank", "", &crate::ocr::OcrLayout::default())
+            .await
+            .expect("completion should persist");
+
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT ocr_words FROM clips WHERE uuid = 'blank'")
+                .fetch_one(&database.pool)
+                .await
+                .expect("row should load");
+        assert!(stored.is_none(), "no words means NULL, not empty JSON");
     }
 
     #[tokio::test]
