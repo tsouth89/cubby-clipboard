@@ -1284,37 +1284,109 @@ pub struct StorageUsage {
     pub bytes: i64,
 }
 
-/// Approximate on-disk usage of the clipboard history: encrypted clip content
-/// (text and image thumbnails) plus the full image files stored on disk.
+#[derive(serde::Serialize)]
+pub struct StorageReclaim {
+    pub freed_bytes: i64,
+    pub usage: StorageUsage,
+}
+
+/// The Cubby history data directory: `cubby.db` (+ its `-wal`/`-shm` sidecars),
+/// the `images/` blob directory, and `storage.key`. It is `image_dir`'s parent
+/// (`image_dir` is `<data_dir>/images`). Tauri writes logs to a separate LogDir,
+/// so everything here is history state.
+fn history_data_dir(db: &Database) -> std::path::PathBuf {
+    db.image_dir
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| db.image_dir.clone())
+}
+
+/// Recursively sum the size of every file under `path`. Missing or unreadable
+/// entries are skipped rather than failing the whole measurement. Runs on a
+/// blocking thread since it stat()s potentially thousands of image files.
+fn directory_size_bytes(path: &std::path::Path) -> i64 {
+    let mut total: i64 = 0;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                stack.push(entry.path());
+            } else {
+                total = total.saturating_add(metadata.len() as i64);
+            }
+        }
+    }
+    total
+}
+
+async fn history_disk_bytes(db: &Database) -> Result<i64, String> {
+    let dir = history_data_dir(db);
+    tokio::task::spawn_blocking(move || directory_size_bytes(&dir))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Actual on-disk footprint of the clipboard history: the true size of the data
+/// directory (database file including free pages and WAL, plus the image blob
+/// files). This is what the user sees in Explorer, unlike a logical row sum,
+/// which ignores SQLite free pages left behind after deletes.
 #[tauri::command]
 pub async fn get_storage_usage(
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<StorageUsage, String> {
-    let pool = &db.pool;
     let items: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM clips WHERE is_deleted = 0"#)
-        .fetch_one(pool)
+        .fetch_one(&db.pool)
         .await
         .map_err(|error| error.to_string())?;
-    let content_bytes: i64 = sqlx::query_scalar(
-        r#"SELECT COALESCE(SUM(LENGTH(content)), 0) FROM clips WHERE is_deleted = 0"#,
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|error| error.to_string())?;
-    let image_bytes: i64 = sqlx::query_scalar(
-        r#"
-        SELECT COALESCE(SUM(clip_images.file_size), 0)
-        FROM clip_images
-        JOIN clips ON clips.uuid = clip_images.clip_uuid
-        WHERE clips.is_deleted = 0
-        "#,
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|error| error.to_string())?;
-    Ok(StorageUsage {
-        items,
-        bytes: content_bytes + image_bytes,
+    let bytes = history_disk_bytes(&db).await?;
+    Ok(StorageUsage { items, bytes })
+}
+
+/// Reclaim disk space: purge orphaned image blobs, then `VACUUM` the database to
+/// return SQLite free pages to the OS and checkpoint the WAL so the `-wal` file
+/// shrinks too. Without this, deleting history barely moves the on-disk size
+/// because SQLite keeps freed pages in the file. Returns how much was freed
+/// along with the refreshed usage.
+#[tauri::command]
+pub async fn reclaim_storage(
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<StorageReclaim, String> {
+    let before = history_disk_bytes(&db).await?;
+
+    // Drop clip_images rows (and their disk files) whose parent clip is gone, so
+    // VACUUM isn't preserving blobs nothing references.
+    cleanup_orphan_clip_image_files(&db.pool, &db.image_dir).await?;
+
+    // VACUUM rewrites the database without free pages; it cannot run inside a
+    // transaction. In WAL mode the rewrite lands in the -wal file, so checkpoint
+    // with TRUNCATE afterwards to flush it back and shrink the sidecar on disk.
+    sqlx::query("VACUUM")
+        .execute(&db.pool)
+        .await
+        .map_err(|error| format!("Failed to compact the database: {error}"))?;
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&db.pool)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let items: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM clips WHERE is_deleted = 0"#)
+        .fetch_one(&db.pool)
+        .await
+        .map_err(|error| error.to_string())?;
+    let after = history_disk_bytes(&db).await?;
+
+    Ok(StorageReclaim {
+        freed_bytes: before.saturating_sub(after),
+        usage: StorageUsage {
+            items,
+            bytes: after,
+        },
     })
 }
 
@@ -1692,7 +1764,7 @@ pub async fn import_from_ditto(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore,
+        build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore, directory_size_bytes,
         enforce_retention_in_pool, load_recognized_text, migrate_clip_format_model,
         migrate_encrypted_storage, remove_clip_image_files, restore_hash_material,
         search_clips_in_database, toggle_clip_pin_in_pool, ClipboardContent,
@@ -2461,5 +2533,24 @@ mod tests {
             clip_uuids(&database).await,
             vec!["ocr-pinned", "ocr-recent"]
         );
+    }
+
+    #[test]
+    fn directory_size_sums_nested_files_and_ignores_missing() {
+        let root = std::env::temp_dir().join(format!("cubby-size-{}", uuid::Uuid::new_v4()));
+        let images = root.join("images");
+        std::fs::create_dir_all(&images).expect("temp dirs should create");
+        std::fs::write(root.join("cubby.db"), vec![0u8; 500]).expect("db file should write");
+        std::fs::write(images.join("a.cubby"), vec![0u8; 1000]).expect("image should write");
+        std::fs::write(images.join("b.cubby"), vec![0u8; 24]).expect("image should write");
+
+        // Recurses into subdirectories and sums every file.
+        assert_eq!(directory_size_bytes(&root), 1524);
+
+        // A path that does not exist measures as zero rather than erroring.
+        let missing = root.join("does-not-exist");
+        assert_eq!(directory_size_bytes(&missing), 0);
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

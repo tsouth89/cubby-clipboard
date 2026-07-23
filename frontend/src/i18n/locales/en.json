@@ -172,7 +172,13 @@
     "retentionForever": "Forever",
     "retentionForeverWarning": "Cubby keeps everything you copy, including screenshots, until you clear it. This can use noticeable disk space over time.",
     "pinnedAlwaysKept": "Pinned items are always kept.",
-    "storageUsed": "Storage used"
+    "storageUsed": "Storage used",
+    "reclaimSpace": "Reclaim space",
+    "reclaimSpaceDesc": "Compact the database and remove leftover files to return freed space to your disk.",
+    "reclaimSpaceButton": "Reclaim",
+    "reclaiming": "Reclaiming…",
+    "reclaimSuccess": "Freed {{size}}",
+    "reclaimNothing": "Already compact — nothing to reclaim"
   },
   "notifications": {
     "clipDeleted": "Clip deleted",
