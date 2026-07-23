@@ -88,6 +88,9 @@ pub struct Clip {
     pub source_icon: Option<String>,
     pub metadata: Option<String>,
     pub ocr_text: Option<String>,
+    // True once retention has dropped this image clip's full-resolution blob but
+    // kept its thumbnail + ocr_text (SOU-244). Only ever set for `image` clips.
+    pub full_image_expired: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_accessed: chrono::DateTime<chrono::Utc>,
 }
@@ -109,6 +112,7 @@ impl<'r> FromRow<'r, SqliteRow> for Clip {
             source_icon: row.try_get("source_icon")?,
             metadata: row.try_get("metadata")?,
             ocr_text: row.try_get("ocr_text")?,
+            full_image_expired: row.try_get("full_image_expired")?,
             created_at: row.try_get("created_at")?,
             last_accessed: row.try_get("last_accessed")?,
         })
@@ -169,6 +173,10 @@ pub struct ClipboardItem {
     pub metadata: Option<String>,
     pub has_ocr_text: bool,
     pub ocr_match: Option<OcrMatch>,
+    // True when this image's full-resolution blob was dropped by retention but
+    // its thumbnail + OCR text were kept (SOU-244). The UI marks it and stops
+    // offering the full image for paste/copy.
+    pub image_expired: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -1,7 +1,7 @@
 import { ClipboardItem } from '../types';
 import { clsx } from 'clsx';
 import { memo, useMemo } from 'react';
-import { Copy, File, Image as ImageIcon, MoreHorizontal, Pin } from 'lucide-react';
+import { Clock, Copy, File, Image as ImageIcon, MoreHorizontal, Pin } from 'lucide-react';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { PREVIEW_CHAR_LIMIT } from '../constants';
 import { useTimeTick } from '../hooks/useTimeTick';
@@ -171,15 +171,29 @@ export const ClipCard = memo(function ClipCard({
           <div className="flex min-w-0 items-center gap-3">
             <div
               className={clsx(
-                'shrink-0 overflow-hidden rounded-lg border border-white/10 bg-black/20',
+                'relative shrink-0 overflow-hidden rounded-lg border border-white/10 bg-black/20',
                 isCompact ? 'h-[52px] w-[92px]' : 'h-[68px] w-[120px]'
               )}
             >
               {imageSrc ? (
-                <img src={imageSrc} alt="" className="h-full w-full object-cover" />
+                <img
+                  src={imageSrc}
+                  alt=""
+                  className={clsx('h-full w-full object-cover', clip.image_expired && 'opacity-60')}
+                />
               ) : (
                 <div className="flex h-full items-center justify-center">
                   <ImageIcon size={20} className="text-muted-foreground" />
+                </div>
+              )}
+              {clip.image_expired && (
+                <div
+                  data-el="image-expired-badge"
+                  className="absolute bottom-1 left-1 right-1 flex items-center justify-center gap-1 rounded bg-black/70 px-1 py-[3px] text-[9px] font-medium uppercase tracking-wide text-foreground/85 backdrop-blur-sm"
+                  title="Full image expired by retention — recognized text kept and searchable"
+                >
+                  <Clock size={9} className="shrink-0" />
+                  Text only
                 </div>
               )}
             </div>
