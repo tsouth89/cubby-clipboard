@@ -7,9 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 /// One recognized word and its bounding box, in the pixel coordinate space of
-/// the image handed to the OCR engine. Persisted (encrypted) at capture time so
-/// a later search can highlight matched words on the image without re-running
-/// OCR (SOU-242 phase 1 stores them; phase 2 renders them).
+/// the image handed to the OCR engine (see `OcrLayout::image_width`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OcrWordBox {
     pub text: String,
@@ -19,12 +17,30 @@ pub struct OcrWordBox {
     pub height: f32,
 }
 
-/// The full result of recognizing an image: the assembled text and the
-/// per-word bounding boxes.
+/// The per-word boxes plus the pixel dimensions of the image OCR actually ran
+/// on. Persisted (encrypted) at capture time so a later search can highlight
+/// matched words on the image without re-running OCR (SOU-242: phase 1 stores
+/// this; phase 2 renders it).
+///
+/// The dimensions are essential and easy to overlook: `decode_for_ocr` may
+/// downscale a large screenshot before OCR, so the word coordinates are in that
+/// (possibly reduced) space, not the full image's. Storing `image_width`/
+/// `image_height` lets phase 2 scale the boxes onto the real preview. Without
+/// them the boxes are unusable for anything that was downscaled, and the only
+/// recovery would be a full re-OCR — exactly what capturing now avoids.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OcrLayout {
+    pub image_width: u32,
+    pub image_height: u32,
+    pub words: Vec<OcrWordBox>,
+}
+
+/// The full result of recognizing an image: the assembled text and the word
+/// layout.
 #[derive(Debug, Clone, Default)]
 pub struct OcrRecognition {
     pub text: String,
-    pub words: Vec<OcrWordBox>,
+    pub layout: OcrLayout,
 }
 
 const MAX_ENCODED_IMAGE_BYTES: usize = 128 * 1024 * 1024;
@@ -162,8 +178,9 @@ pub fn recognize_png(png_bytes: &[u8]) -> Result<OcrRecognition, String> {
         let line = lines.GetAt(index).map_err(|e| e.to_string())?;
 
         // Capture each word's box (SOU-242). The rect is in the coordinate space
-        // of the image we handed the engine (`decode_for_ocr` may have downscaled
-        // it), which phase 2 accounts for when mapping onto the preview.
+        // of the image we handed the engine (`width`/`height` above, post any
+        // `decode_for_ocr` downscale), recorded in the OcrLayout so phase 2 can
+        // scale onto the full-size preview.
         let line_words = line.Words().map_err(|e| e.to_string())?;
         for word_index in 0..line_words.Size().map_err(|e| e.to_string())? {
             let word = line_words.GetAt(word_index).map_err(|e| e.to_string())?;
@@ -190,7 +207,14 @@ pub fn recognize_png(png_bytes: &[u8]) -> Result<OcrRecognition, String> {
         }
         text.push_str(&line_text);
     }
-    Ok(OcrRecognition { text, words })
+    Ok(OcrRecognition {
+        text,
+        layout: OcrLayout {
+            image_width: width,
+            image_height: height,
+            words,
+        },
+    })
 }
 
 #[cfg(not(target_os = "windows"))]
