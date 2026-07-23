@@ -225,9 +225,46 @@ jobs:
             Write-Error "No NSIS installer was produced"
             exit 1
           }
-          # The signing action requires a rooted (absolute) path; $file.FullName is a Windows-rooted path.
-          "path=$($file.FullName)" >> $env:GITHUB_OUTPUT
-          "name=$($file.Name -replace ' ', '.')" >> $env:GITHUB_OUTPUT
+          $name = $file.Name -replace ' ', '.'
+          $stagedPath = Join-Path $env:RUNNER_TEMP $name
+          Copy-Item $file.FullName $stagedPath -Force
+          $binary = Resolve-Path "src-tauri/target/${{ matrix.target }}/release/cubby.exe"
+          $stagedBinary = Join-Path $env:RUNNER_TEMP "cubby-${{ matrix.arch }}.exe"
+          Copy-Item $binary $stagedBinary -Force
+          # Stage the slim installer before the Store build overwrites Tauri's
+          # default NSIS output path and app binary.
+          "path=$stagedPath" >> $env:GITHUB_OUTPUT
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "binary_path=$stagedBinary" >> $env:GITHUB_OUTPUT
+
+      - name: Build offline Microsoft Store installer
+        shell: pwsh
+        run: |
+          pnpm tauri build `
+            --ci `
+            --target "${{ matrix.target }}" `
+            --features app-store `
+            --bundles nsis `
+            --config src-tauri/tauri.store.conf.json
+
+      - name: Locate the offline Store installer
+        id: store-installer
+        shell: pwsh
+        run: |
+          $file = Get-ChildItem "src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          if (-not $file) {
+            Write-Error "No offline NSIS installer was produced"
+            exit 1
+          }
+          $name = "Cubby.Clipboard_${{ needs.create-release.outputs.version }}_${{ matrix.arch }}-Store-setup.exe"
+          $stagedPath = Join-Path $env:RUNNER_TEMP $name
+          Copy-Item $file.FullName $stagedPath -Force
+          if ((Get-Item -LiteralPath $stagedPath).Length -lt 50MB) {
+            Write-Error "Store installer is too small to contain the offline WebView2 runtime"
+            exit 1
+          }
+          "path=$stagedPath" >> $env:GITHUB_OUTPUT
+          "name=$name" >> $env:GITHUB_OUTPUT
 
       - name: Sign in to Azure with GitHub OIDC
         uses: azure/login@v3
@@ -236,25 +273,31 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Sign the installer with Trusted Signing
+      - name: Sign the installers with Trusted Signing
         uses: Azure/artifact-signing-action@v2
         with:
           endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
           signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT_NAME }}
           certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
-          files: ${{ steps.installer.outputs.path }}
+          files: |
+            ${{ steps.installer.outputs.path }}
+            ${{ steps.store-installer.outputs.path }}
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
 
-      - name: Upload the signed installer
+      - name: Upload the signed installers
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.create-release.outputs.tag }}
         run: |
           Copy-Item "${{ steps.installer.outputs.path }}" "${{ steps.installer.outputs.name }}"
-          gh release upload "$env:TAG" "${{ steps.installer.outputs.name }}" --clobber
+          Copy-Item "${{ steps.store-installer.outputs.path }}" "${{ steps.store-installer.outputs.name }}"
+          gh release upload "$env:TAG" `
+            "${{ steps.installer.outputs.name }}" `
+            "${{ steps.store-installer.outputs.name }}" `
+            --clobber
 
       - name: Re-sign the installer for the updater (over the signed bytes)
         shell: pwsh
@@ -297,7 +340,7 @@ jobs:
           ./scripts/publish-store-installer.ps1 `
             -Version "${{ needs.create-release.outputs.version }}" `
             -Architecture "${{ matrix.arch }}" `
-            -InstallerPath "${{ steps.installer.outputs.path }}" `
+            -InstallerPath "${{ steps.store-installer.outputs.path }}" `
             -BucketName $env:CLOUDFLARE_R2_BUCKET
 
       - name: Assemble the portable package
@@ -307,7 +350,7 @@ jobs:
         run: |
           $stage = Join-Path (Get-Location) "portable"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item "src-tauri/target/${{ matrix.target }}/release/cubby.exe" (Join-Path $stage "Cubby Clipboard.exe")
+          Copy-Item "${{ steps.installer.outputs.binary_path }}" (Join-Path $stage "Cubby Clipboard.exe")
           # The marker's presence next to the exe switches Cubby to portable mode.
           Set-Content -Path (Join-Path $stage "portable.txt") -Value @(
             "This file makes Cubby run in portable mode. Keep it next to Cubby Clipboard.exe.",
