@@ -71,6 +71,11 @@ type StorageUsage = {
   bytes: number;
 };
 
+type StorageReclaim = {
+  freed_bytes: number;
+  usage: StorageUsage;
+};
+
 function formatBytes(bytes: number): string {
   if (bytes <= 0) return '0 MB';
   if (bytes < 1024) return `${bytes} B`;
@@ -319,6 +324,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   const [ocrStatus, setOcrStatus] = useState<OcrQueueStatus | null>(null);
   const [ocrActionBusy, setOcrActionBusy] = useState(false);
   const [storageUsage, setStorageUsage] = useState<StorageUsage | null>(null);
+  const [reclaiming, setReclaiming] = useState(false);
   const ocrRemaining = (ocrStatus?.pending ?? 0) + (ocrStatus?.processing ?? 0);
   const ocrFailures = (ocrStatus?.failed ?? 0) + (ocrStatus?.unavailable ?? 0);
   const ocrStatusLabel = !ocrStatus
@@ -553,6 +559,26 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     } catch (e) {
       toast.error(`Failed to remove ignored app: ${e}`);
       console.error(e);
+    }
+  };
+
+  const handleReclaimStorage = async () => {
+    setReclaiming(true);
+    try {
+      const result = await invoke<StorageReclaim>('reclaim_storage');
+      setStorageUsage(result.usage);
+      const newSize = await invoke<number>('get_clipboard_history_size');
+      setHistorySize(newSize);
+      if (result.freed_bytes > 0) {
+        toast.success(t('settings.reclaimSuccess', { size: formatBytes(result.freed_bytes) }));
+      } else {
+        toast.success(t('settings.reclaimNothing'));
+      }
+    } catch (error) {
+      console.error('Failed to reclaim space:', error);
+      toast.error(`Failed to reclaim space: ${error}`);
+    } finally {
+      setReclaiming(false);
     }
   };
 
@@ -1081,6 +1107,21 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                                 })} · ${formatBytes(storageUsage.bytes)}`
                               : '…'}
                           </span>
+                        }
+                      />
+                      <Row
+                        title={t('settings.reclaimSpace')}
+                        desc={t('settings.reclaimSpaceDesc')}
+                        control={
+                          <button
+                            onClick={handleReclaimStorage}
+                            disabled={reclaiming}
+                            className={ghostButton}
+                          >
+                            {reclaiming
+                              ? t('settings.reclaiming')
+                              : t('settings.reclaimSpaceButton')}
+                          </button>
                         }
                       />
                     </SettingCard>
