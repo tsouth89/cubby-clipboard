@@ -14,6 +14,7 @@ param(
     [string]$BucketName = "cubby-downloads",
     [string]$DownloadOrigin = "https://downloads.cubbyclipboard.com",
     [string]$WranglerVersion = "4.113.0",
+    [string]$ExpectedSigner = "CN=Brandon South",
     [switch]$SkipPublicVerification
 )
 
@@ -21,11 +22,27 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $resolvedInstallerPath = (Resolve-Path -LiteralPath $InstallerPath).Path
-$installerName = "Cubby.Clipboard_${Version}_${Architecture}-setup.exe"
+$installerName = "Cubby.Clipboard_${Version}_${Architecture}-Store-setup.exe"
 $hashName = "$installerName.sha256"
 $objectPrefix = "releases/v$Version"
 $localHash = (Get-FileHash -LiteralPath $resolvedInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $hashPath = Join-Path ([System.IO.Path]::GetTempPath()) "$hashName-$([guid]::NewGuid().ToString('N')).txt"
+
+$installer = Get-Item -LiteralPath $resolvedInstallerPath
+if ($installer.Length -lt 50MB) {
+    throw "Store installer is only $($installer.Length) bytes. Expected an offline installer containing WebView2."
+}
+
+$signature = Get-AuthenticodeSignature -FilePath $resolvedInstallerPath
+if ($signature.Status -ne "Valid") {
+    throw "Store installer Authenticode signature is not valid. Status: $($signature.Status)"
+}
+if ($signature.SignerCertificate.Subject -notlike "*$ExpectedSigner*") {
+    throw "Unexpected Store installer signer: $($signature.SignerCertificate.Subject)"
+}
+if ($null -eq $signature.TimeStamperCertificate) {
+    throw "Store installer is missing an RFC 3161 timestamp."
+}
 
 function Test-R2ObjectRequiresUpload {
     param(

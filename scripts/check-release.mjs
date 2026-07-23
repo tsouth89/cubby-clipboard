@@ -9,6 +9,7 @@ const read = (relativePath) => readFile(new URL(relativePath, root), 'utf8');
 const [
   packageText,
   tauriText,
+  storeTauriText,
   cargoText,
   changelog,
   releaseWorkflow,
@@ -24,6 +25,7 @@ const [
 ] = await Promise.all([
   read('package.json'),
   read('src-tauri/tauri.conf.json'),
+  read('src-tauri/tauri.store.conf.json'),
   read('src-tauri/Cargo.toml'),
   read('CHANGELOG.md'),
   read('.github/workflows/release.yml'),
@@ -40,6 +42,7 @@ const [
 
 const packageVersion = JSON.parse(packageText).version;
 const tauriConfig = JSON.parse(tauriText);
+const storeTauriConfig = JSON.parse(storeTauriText);
 const capability = JSON.parse(capabilityText);
 const cargoVersion = cargoText.match(/^version = "([^"]+)"/m)?.[1];
 const versions = new Map([
@@ -63,6 +66,24 @@ if (!changelogHeading.test(changelog)) {
 
 if (JSON.stringify(tauriConfig.bundle.targets) !== JSON.stringify(['nsis'])) {
   throw new Error('Release bundles must be limited to the Windows NSIS installer');
+}
+
+if (
+  storeTauriConfig.bundle?.windows?.webviewInstallMode?.type !== 'offlineInstaller'
+) {
+  throw new Error('Microsoft Store installers must embed the offline WebView2 installer');
+}
+
+if (storeTauriConfig.bundle?.createUpdaterArtifacts !== false) {
+  throw new Error('Microsoft Store builds must not generate updater artifacts');
+}
+
+if (!releaseWorkflow.includes('--config src-tauri/tauri.store.conf.json')) {
+  throw new Error('Release workflow must build the Microsoft Store installer with its offline configuration');
+}
+
+if (!releaseWorkflow.includes('--features app-store')) {
+  throw new Error('Microsoft Store builds must disable Cubby self-update and autostart integration');
 }
 
 const csp = tauriConfig.app?.security?.csp;
