@@ -88,6 +88,9 @@ pub struct Clip {
     pub source_icon: Option<String>,
     pub metadata: Option<String>,
     pub ocr_text: Option<String>,
+    // Encrypted JSON of the OCR word layout (boxes + reference dimensions) for
+    // image clips (SOU-242). Used to highlight matched words on search results.
+    pub ocr_words: Option<String>,
     // True once retention has dropped this image clip's full-resolution blob but
     // kept its thumbnail + ocr_text (SOU-244). Only ever set for `image` clips.
     pub full_image_expired: bool,
@@ -112,6 +115,7 @@ impl<'r> FromRow<'r, SqliteRow> for Clip {
             source_icon: row.try_get("source_icon")?,
             metadata: row.try_get("metadata")?,
             ocr_text: row.try_get("ocr_text")?,
+            ocr_words: row.try_get("ocr_words")?,
             full_image_expired: row.try_get("full_image_expired")?,
             created_at: row.try_get("created_at")?,
             last_accessed: row.try_get("last_accessed")?,
@@ -173,6 +177,9 @@ pub struct ClipboardItem {
     pub metadata: Option<String>,
     pub has_ocr_text: bool,
     pub ocr_match: Option<OcrMatch>,
+    // Word boxes to highlight on an image search result whose OCR text matched
+    // the query (SOU-242 phase 2). None for non-image or non-matching results.
+    pub ocr_highlights: Option<OcrHighlights>,
     // True when this image's full-resolution blob was dropped by retention but
     // its thumbnail + OCR text were kept (SOU-244). The UI marks it and stops
     // offering the full image for paste/copy.
@@ -184,6 +191,25 @@ pub struct OcrMatch {
     pub before: String,
     pub matched: String,
     pub after: String,
+}
+
+/// Matched OCR word boxes for one image search result, ready to render as an
+/// overlay. `boxes` are fractions of the image (0..1); `aspect` is the image's
+/// width/height so the frontend can letterbox the thumbnail to that shape and
+/// place the rects with plain percentages.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OcrHighlights {
+    pub aspect: f32,
+    pub boxes: Vec<OcrRect>,
+}
+
+/// One highlight rectangle, as fractions of the image dimensions (0..1).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OcrRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
