@@ -14,16 +14,6 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Strengthen sensitive-content privacy gates, clipboard listener recovery, and rich clipboard-format compatibility coverage
 - Publish immutable Store packages through direct Cloudflare R2 URLs suitable for Microsoft certification
 
-### 新增
-- 为 x64 和 ARM64 提供独立签名的 Microsoft Store 安装程序，内置 WebView2 并支持完全离线安装，同时保留较小的 GitHub 和 Winget 安装程序
-- 新增“回收空间”操作，并根据 Cubby 历史记录的实际磁盘占用显示准确的存储用量
-
-### 变更
-- 在完整截图按保留规则过期后，继续保留识别文本和可搜索缩略图
-- 在捕获时保存 OCR 单词位置，使图片搜索结果无需重新识别即可高亮匹配内容
-- 加强敏感内容隐私保护、剪贴板监听恢复能力和富剪贴板格式兼容性测试
-- 通过适用于 Microsoft 认证的 Cloudflare R2 直链发布不可变的 Store 安装包
-
 ## v1.2.1
 
 ### Fixed
