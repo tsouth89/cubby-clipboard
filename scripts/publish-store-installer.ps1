@@ -53,27 +53,22 @@ function Test-R2ObjectRequiresUpload {
         [string]$Path
     )
 
-    $accountId = $env:CLOUDFLARE_ACCOUNT_ID
-    $apiToken = $env:CLOUDFLARE_API_TOKEN
-    if ([string]::IsNullOrWhiteSpace($accountId) -or [string]::IsNullOrWhiteSpace($apiToken)) {
-        throw "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required to check immutable R2 objects."
-    }
-
     $objectKey = "$objectPrefix/$ObjectName"
-    $objectUrl = "https://api.cloudflare.com/client/v4/accounts/$accountId/r2/buckets/$BucketName/objects/$objectKey"
+    $origin = $DownloadOrigin.TrimEnd('/')
+    $encodedObjectName = [uri]::EscapeDataString($ObjectName)
+    $objectUrl = "$origin/$objectPrefix/$encodedObjectName"
+    $probeUrl = "$objectUrl`?immutable-probe=$([guid]::NewGuid().ToString('N'))"
     $probePath = Join-Path ([System.IO.Path]::GetTempPath()) "cubby-r2-probe-$([guid]::NewGuid().ToString('N'))"
     try {
         $statusCode = & curl.exe `
             --silent `
             --show-error `
-            --location `
             --max-redirs 0 `
             --connect-timeout 10 `
-            --max-time 60 `
-            --header "Authorization: Bearer $apiToken" `
+            --max-time 180 `
             --output $probePath `
             --write-out "%{http_code}" `
-            $objectUrl
+            $probeUrl
         if ($LASTEXITCODE -ne 0) {
             throw "Could not check whether $objectUrl already exists."
         }
@@ -83,7 +78,7 @@ function Test-R2ObjectRequiresUpload {
             if ($existingHash -ne $candidateHash) {
                 throw "Refusing to overwrite immutable release object with different bytes: $objectKey"
             }
-            Write-Output "Immutable release object already has the expected bytes; skipping upload: $objectKey"
+            Write-Host "Immutable release object already has the expected bytes; skipping upload: $objectKey"
             return $false
         }
         if ($statusCode -ne "404") {
