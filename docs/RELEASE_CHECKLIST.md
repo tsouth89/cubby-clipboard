@@ -14,7 +14,9 @@ environment must define:
 Tag releases upload and verify both signed installers automatically. To backfill
 an existing GitHub release, run the `Publish Microsoft Store packages` workflow
 with its version tag. Submit the resulting immutable x64 and ARM64 URLs to
-Microsoft Partner Center.
+Microsoft Partner Center. Publishing a GitHub tag or uploading to R2 does not
+update the Store listing: each new version still needs a Partner Center
+submission, either manually or through Microsoft's MSI/EXE submission API.
 
 ## Automated gate
 
