@@ -6,7 +6,6 @@ on:
       tag:
         description: Existing GitHub release tag to publish to Cloudflare R2
         required: true
-        default: v1.2.1
 
 permissions:
   contents: read
@@ -18,6 +17,11 @@ jobs:
     environment: release
     steps:
       - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          # Wrangler 4.113+ requires Node 22 for R2 publication.
+          node-version: 22
 
       - name: Validate tag and download signed installers
         id: release
@@ -35,15 +39,15 @@ jobs:
           gh release download $env:RELEASE_TAG `
             --repo $env:GITHUB_REPOSITORY `
             --dir release-assets `
-            --pattern "Cubby.Clipboard_${version}_x64-setup.exe" `
-            --pattern "Cubby.Clipboard_${version}_arm64-setup.exe"
+            --pattern "Cubby.Clipboard_${version}_x64-Store-setup.exe" `
+            --pattern "Cubby.Clipboard_${version}_arm64-Store-setup.exe"
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to download signed installers from $env:RELEASE_TAG."
           }
 
           $expectedSignerSubject = "CN=Brandon South, O=Brandon South, L=Wilmore, S=ky, C=US"
           foreach ($architecture in @("x64", "arm64")) {
-            $installerPath = "release-assets/Cubby.Clipboard_${version}_${architecture}-setup.exe"
+            $installerPath = "release-assets/Cubby.Clipboard_${version}_${architecture}-Store-setup.exe"
             $signature = Get-AuthenticodeSignature -LiteralPath $installerPath
             if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
               throw "$architecture installer has an invalid Authenticode signature: $($signature.StatusMessage)"
@@ -65,7 +69,7 @@ jobs:
           ./scripts/publish-store-installer.ps1 `
             -Version "${{ steps.release.outputs.version }}" `
             -Architecture x64 `
-            -InstallerPath "release-assets/Cubby.Clipboard_${{ steps.release.outputs.version }}_x64-setup.exe" `
+            -InstallerPath "release-assets/Cubby.Clipboard_${{ steps.release.outputs.version }}_x64-Store-setup.exe" `
             -BucketName $env:CLOUDFLARE_R2_BUCKET
 
       - name: Publish ARM64 installer
@@ -78,5 +82,5 @@ jobs:
           ./scripts/publish-store-installer.ps1 `
             -Version "${{ steps.release.outputs.version }}" `
             -Architecture arm64 `
-            -InstallerPath "release-assets/Cubby.Clipboard_${{ steps.release.outputs.version }}_arm64-setup.exe" `
+            -InstallerPath "release-assets/Cubby.Clipboard_${{ steps.release.outputs.version }}_arm64-Store-setup.exe" `
             -BucketName $env:CLOUDFLARE_R2_BUCKET
