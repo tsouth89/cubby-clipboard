@@ -1,5 +1,5 @@
 use crate::database::Database;
-use crate::models::{Clip, ClipboardItem, Folder, FolderItem, OcrMatch};
+use crate::models::{Clip, ClipboardItem, Folder, FolderItem, OcrHighlights, OcrMatch, OcrRect};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use clipboard_rs::common::RustImage;
 use clipboard_rs::{Clipboard, ClipboardContent, ClipboardContext, RustImageData};
@@ -32,8 +32,53 @@ fn clip_to_list_item(clip: &Clip) -> ClipboardItem {
             .as_deref()
             .is_some_and(|text| !text.trim().is_empty()),
         ocr_match: None,
+        ocr_highlights: None,
         image_expired: clip.full_image_expired,
     }
+}
+
+/// Build the highlight overlay for an image search result: the word boxes whose
+/// text matches the query, expressed as fractions of the image plus its aspect
+/// ratio (SOU-242 phase 2). Returns None when nothing usable matches.
+fn build_ocr_highlights(ocr_words_json: &str, query: &str) -> Option<OcrHighlights> {
+    let tokens: Vec<String> = query
+        .split_whitespace()
+        .filter(|token| token.chars().count() >= 2)
+        .map(|token| token.to_lowercase())
+        .collect();
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let layout: crate::ocr::OcrLayout = serde_json::from_str(ocr_words_json).ok()?;
+    if layout.image_width == 0 || layout.image_height == 0 {
+        return None;
+    }
+    let width = layout.image_width as f32;
+    let height = layout.image_height as f32;
+
+    let boxes: Vec<OcrRect> = layout
+        .words
+        .iter()
+        .filter(|word| {
+            let lowered = word.text.to_lowercase();
+            tokens.iter().any(|token| lowered.contains(token))
+        })
+        .map(|word| OcrRect {
+            x: (word.x / width).clamp(0.0, 1.0),
+            y: (word.y / height).clamp(0.0, 1.0),
+            width: (word.width / width).clamp(0.0, 1.0),
+            height: (word.height / height).clamp(0.0, 1.0),
+        })
+        .collect();
+
+    if boxes.is_empty() {
+        return None;
+    }
+    Some(OcrHighlights {
+        aspect: width / height,
+        boxes,
+    })
 }
 
 const OCR_SNIPPET_CHAR_LIMIT: usize = 96;
@@ -158,6 +203,10 @@ fn clip_to_search_item(clip: &Clip, query: &str) -> ClipboardItem {
             .ocr_text
             .as_deref()
             .and_then(|text| build_ocr_match(text, query));
+        item.ocr_highlights = clip
+            .ocr_words
+            .as_deref()
+            .and_then(|words| build_ocr_highlights(words, query));
     }
     item
 }
@@ -171,6 +220,14 @@ fn decrypt_clip_fields(db: &Database, clip: &mut Clip) -> Result<(), String> {
     // OCR text is auxiliary; never let a bad value block loading the clip.
     if db.crypto.decrypt_optional_text(&mut clip.ocr_text).is_err() {
         clip.ocr_text = None;
+    }
+    // OCR word boxes are likewise auxiliary (highlighting only).
+    if db
+        .crypto
+        .decrypt_optional_text(&mut clip.ocr_words)
+        .is_err()
+    {
+        clip.ocr_words = None;
     }
     Ok(())
 }
@@ -1764,10 +1821,10 @@ pub async fn import_from_ditto(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore, directory_size_bytes,
-        enforce_retention_in_pool, load_recognized_text, migrate_clip_format_model,
-        migrate_encrypted_storage, remove_clip_image_files, restore_hash_material,
-        search_clips_in_database, toggle_clip_pin_in_pool, ClipboardContent,
+        build_ocr_highlights, build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore,
+        directory_size_bytes, enforce_retention_in_pool, load_recognized_text,
+        migrate_clip_format_model, migrate_encrypted_storage, remove_clip_image_files,
+        restore_hash_material, search_clips_in_database, toggle_clip_pin_in_pool, ClipboardContent,
         OCR_SNIPPET_CHAR_LIMIT,
     };
     use crate::clipboard::CapturedFormat;
@@ -2183,6 +2240,7 @@ mod tests {
             source_icon: None,
             metadata: None,
             ocr_text: None,
+            ocr_words: None,
             full_image_expired: false,
             created_at: chrono::Utc::now(),
             last_accessed: chrono::Utc::now(),
@@ -2552,5 +2610,56 @@ mod tests {
         assert_eq!(directory_size_bytes(&missing), 0);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn ocr_highlights_selects_matching_words_as_image_fractions() {
+        use crate::ocr::{OcrLayout, OcrWordBox};
+        let layout = OcrLayout {
+            image_width: 100,
+            image_height: 50,
+            words: vec![
+                OcrWordBox {
+                    text: "Error".to_string(),
+                    x: 10.0,
+                    y: 5.0,
+                    width: 40.0,
+                    height: 10.0,
+                },
+                OcrWordBox {
+                    text: "Denied".to_string(),
+                    x: 60.0,
+                    y: 5.0,
+                    width: 30.0,
+                    height: 10.0,
+                },
+                OcrWordBox {
+                    text: "Ok".to_string(),
+                    x: 0.0,
+                    y: 30.0,
+                    width: 10.0,
+                    height: 8.0,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&layout).expect("layout should serialize");
+
+        // Single-token, case-insensitive: one matched box, coordinates as fractions.
+        let hits = build_ocr_highlights(&json, "error").expect("should match a word");
+        assert_eq!(hits.aspect, 2.0);
+        assert_eq!(hits.boxes.len(), 1);
+        let rect = &hits.boxes[0];
+        assert!((rect.x - 0.10).abs() < 1e-6);
+        assert!((rect.y - 0.10).abs() < 1e-6);
+        assert!((rect.width - 0.40).abs() < 1e-6);
+        assert!((rect.height - 0.20).abs() < 1e-6);
+
+        // Every word matching any query token is highlighted.
+        let multi = build_ocr_highlights(&json, "error denied").expect("should match two words");
+        assert_eq!(multi.boxes.len(), 2);
+
+        // No matching word, and too-short tokens, both yield nothing.
+        assert!(build_ocr_highlights(&json, "zzz").is_none());
+        assert!(build_ocr_highlights(&json, "a").is_none());
     }
 }
