@@ -21,7 +21,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
 hmac = "0.12"
 aes-gcm = "0.10"
-getrandom = "0.3"
+getrandom = "0.4"
 image = { version = "0.24", default-features = false, features = ["png"] }
 dirs = "5"
 parking_lot = "0.12"

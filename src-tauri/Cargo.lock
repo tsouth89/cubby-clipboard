@@ -916,7 +916,7 @@ dependencies = [
  "clipboard-win",
  "dark-light",
  "dirs 5.0.1",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "hmac",
  "image 0.24.9",
  "log",
