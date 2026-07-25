@@ -11,6 +11,9 @@ export interface ClipboardItem {
   metadata: string | null;
   has_ocr_text?: boolean;
   ocr_match: OcrMatch | null;
+  // Matched OCR word boxes to highlight on an image search result (SOU-242
+  // phase 2). Present only for image results whose OCR text matched the query.
+  ocr_highlights?: OcrHighlights | null;
   // Retention dropped this image's full-resolution blob but kept its thumbnail
   // and OCR text (SOU-244). It stays searchable; the full image can't be pasted.
   image_expired?: boolean;
@@ -20,6 +23,20 @@ export interface OcrMatch {
   before: string;
   matched: string;
   after: string;
+}
+
+export interface OcrHighlights {
+  // Image width/height ratio, so the thumbnail can be letterboxed to that shape.
+  aspect: number;
+  // Rectangles as fractions (0..1) of the image dimensions.
+  boxes: OcrRect[];
+}
+
+export interface OcrRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface FolderItem {

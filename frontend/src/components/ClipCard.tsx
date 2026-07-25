@@ -116,6 +116,12 @@ export const ClipCard = memo(function ClipCard({
     formatBytes(imageMetadata.size_bytes),
   ].filter(Boolean);
   const isCompact = density === 'compact';
+  const highlights = clip.ocr_highlights ?? null;
+  const showHighlights = !!(imageSrc && highlights && highlights.boxes.length > 0);
+  // Aspect of the fixed thumbnail box; used to letterbox a highlighted image to
+  // its true aspect so the overlay rectangles line up in both densities.
+  const thumbAspect = isCompact ? 92 / 52 : 120 / 68;
+  const imageIsWide = highlights ? highlights.aspect >= thumbAspect : true;
 
   return (
     <article
@@ -171,20 +177,50 @@ export const ClipCard = memo(function ClipCard({
           <div className="flex min-w-0 items-center gap-3">
             <div
               className={clsx(
-                'relative shrink-0 overflow-hidden rounded-lg border border-white/10 bg-black/20',
+                'relative flex shrink-0 items-center justify-center overflow-hidden rounded-lg border border-white/10 bg-black/20',
                 isCompact ? 'h-[52px] w-[92px]' : 'h-[68px] w-[120px]'
               )}
             >
-              {imageSrc ? (
+              {!imageSrc ? (
+                <div className="flex h-full items-center justify-center">
+                  <ImageIcon size={20} className="text-muted-foreground" />
+                </div>
+              ) : showHighlights && highlights ? (
+                // Letterbox to the image's true aspect so the matched-word boxes
+                // (stored as fractions of the image) map straight to percentages
+                // here — nothing is cropped, so every match stays visible.
+                <div
+                  className={clsx('relative overflow-hidden', imageIsWide ? 'w-full' : 'h-full')}
+                  style={{ aspectRatio: String(highlights.aspect) }}
+                >
+                  <img
+                    src={imageSrc}
+                    alt=""
+                    className={clsx(
+                      'h-full w-full object-cover',
+                      clip.image_expired && 'opacity-60'
+                    )}
+                  />
+                  {highlights.boxes.map((box, index) => (
+                    <div
+                      key={index}
+                      data-el="ocr-highlight"
+                      className="pointer-events-none absolute rounded-[1px] bg-primary/30 ring-1 ring-primary/70"
+                      style={{
+                        left: `${box.x * 100}%`,
+                        top: `${box.y * 100}%`,
+                        width: `${box.width * 100}%`,
+                        height: `${box.height * 100}%`,
+                      }}
+                    />
+                  ))}
+                </div>
+              ) : (
                 <img
                   src={imageSrc}
                   alt=""
                   className={clsx('h-full w-full object-cover', clip.image_expired && 'opacity-60')}
                 />
-              ) : (
-                <div className="flex h-full items-center justify-center">
-                  <ImageIcon size={20} className="text-muted-foreground" />
-                </div>
               )}
               {clip.image_expired && (
                 <div
