@@ -1,5 +1,7 @@
 version: 2
 updates:
+  # Group only non-breaking updates. Major bumps open as individual PRs so they
+  # can be reviewed (and rejected) without blocking security/patch traffic.
   - package-ecosystem: npm
     directory: /
     schedule:
@@ -7,7 +9,11 @@ updates:
     groups:
       frontend-dependencies:
         patterns:
-          - '*'
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    open-pull-requests-limit: 10
 
   - package-ecosystem: cargo
     directory: /src-tauri
@@ -16,7 +22,11 @@ updates:
     groups:
       rust-dependencies:
         patterns:
-          - '*'
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    open-pull-requests-limit: 10
 
   - package-ecosystem: github-actions
     directory: /
@@ -25,4 +35,7 @@ updates:
     groups:
       actions:
         patterns:
-          - '*'
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
