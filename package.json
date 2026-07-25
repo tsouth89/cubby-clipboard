@@ -28,7 +28,7 @@
     "react-dom": "^18.2.0",
     "react-i18next": "^14.0.0",
     "sonner": "^2.0.7",
-    "tailwind-merge": "^2.1.0",
+    "tailwind-merge": "^3.6.0",
     "use-shortcut-recorder": "^2.3.0"
   },
   "devDependencies": {
