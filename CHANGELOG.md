@@ -2,6 +2,15 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
+## v1.2.3
+
+### Added
+- Image search highlights the words that matched inside screenshots
+- Safer history recovery: a damaged database is set aside and Cubby starts fresh so capture never blocks, with a daily rolling backup left for possible manual recovery
+
+### Fixed
+- When another app clears the clipboard (for example a password manager), Cubby forgets that clip from history instead of keeping the sensitive content
+
 ## v1.2.2
 
 ### Added
