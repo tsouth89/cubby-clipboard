@@ -66,6 +66,7 @@ export interface Settings {
   ignore_ghost_clips: boolean;
   skip_sensitive?: boolean;
   skip_likely_secrets?: boolean;
+  forget_on_clipboard_clear?: boolean;
   has_completed_onboarding?: boolean;
 }
 

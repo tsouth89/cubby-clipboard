@@ -66,6 +66,8 @@
     "roundCornersDesc": "Cubby ウィンドウに丸い角を使用します。",
     "ignoreGhostClips": "ゴーストクリップを無視",
     "ignoreGhostClipsDesc": "一時的なクリップボード項目を無視します",
+    "forgetOnClipboardClear": "クリアされたコピーを忘れる",
+    "forgetOnClipboardClearDesc": "コピー直後にクリップボードが空にされた場合（パスワードマネージャーの拡張機能など）、その直前の項目を履歴から削除します。空のクリアのみ対象で、次の通常コピーでは削除しません。ピン留めは残ります。",
     "hotkey": "グローバルホットキー",
     "hotkeyDesc": "Cubby を表示または非表示にするショートカット",
     "hotkeyRecording": "キーを押してください...",

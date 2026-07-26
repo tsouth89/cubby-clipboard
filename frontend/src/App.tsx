@@ -114,6 +114,7 @@ function App() {
         ignore_ghost_clips: true,
         skip_sensitive: true,
         skip_likely_secrets: false,
+        forget_on_clipboard_clear: true,
         has_completed_onboarding: true,
       });
       return;

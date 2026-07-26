@@ -32,6 +32,11 @@ pub struct AppSettings {
     // payment cards). Off by default (opt-in): heuristic sniffing can drop a
     // clip the user meant to keep. Never logs matched content when enabled.
     pub skip_likely_secrets: bool,
+    // When the clipboard is cleared shortly after a capture (typical of password
+    // manager browser extensions that auto-clear), forget that last clip. On by
+    // default: closes the browser-extension gap that ignored-apps cannot cover.
+    // Only empty/clear events qualify — a normal next copy never deletes the previous item.
+    pub forget_on_clipboard_clear: bool,
     // True after the built-in password-manager ignore list has been seeded once.
     // Clearing an entry in Settings must stick across restarts.
     pub default_sensitive_apps_seeded: bool,
@@ -66,6 +71,9 @@ impl Default for AppSettings {
             // reliable protections (OS sensitive tag + seeded password-manager
             // ignore list) stay on by default and cover the important cases.
             skip_likely_secrets: false,
+            // Default on: browser-extension password copies cannot be filtered by
+            // executable name, and managers almost always auto-clear within seconds.
+            forget_on_clipboard_clear: true,
             default_sensitive_apps_seeded: false,
             ignored_apps: HashSet::new(),
         }
@@ -261,10 +269,13 @@ mod tests {
             .expect("settings without the new fields should stay readable");
         assert!(!migrated.skip_likely_secrets);
         assert!(!migrated.default_sensitive_apps_seeded);
+        // Auto-clear forget is default-on even for upgrades (browser-extension gap).
+        assert!(migrated.forget_on_clipboard_clear);
 
         let fresh = AppSettings::default();
         assert!(!fresh.skip_likely_secrets);
         assert!(!fresh.default_sensitive_apps_seeded);
+        assert!(fresh.forget_on_clipboard_clear);
 
         // The deterministic protection stays on regardless.
         assert!(fresh.skip_sensitive);
@@ -277,12 +288,14 @@ mod tests {
         let settings: AppSettings = serde_json::from_str(
             r#"{
                 "skip_likely_secrets": true,
-                "default_sensitive_apps_seeded": true
+                "default_sensitive_apps_seeded": true,
+                "forget_on_clipboard_clear": false
             }"#,
         )
         .expect("explicitly persisted privacy flags should round-trip");
 
         assert!(settings.skip_likely_secrets);
         assert!(settings.default_sensitive_apps_seeded);
+        assert!(!settings.forget_on_clipboard_clear);
     }
 }

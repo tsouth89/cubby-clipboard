@@ -66,6 +66,8 @@
     "roundCornersDesc": "Abgerundete Ecken für das Cubby-Fenster verwenden.",
     "ignoreGhostClips": "Geistereinträge ignorieren",
     "ignoreGhostClipsDesc": "Temporäre Zwischenablageeinträge ignorieren",
+    "forgetOnClipboardClear": "Gelöschte Kopien vergessen",
+    "forgetOnClipboardClearDesc": "Wenn etwas die Zwischenablage kurz nach dem Kopieren leert (typisch für Passwort-Manager-Erweiterungen), wird der letzte Eintrag aus dem Verlauf entfernt. Nur leere Clear-Events, kein normales nächstes Kopieren. Angeheftete bleiben.",
     "hotkey": "Globale Tastenkombination",
     "hotkeyDesc": "Tastenkombination zum Anzeigen oder Ausblenden von Cubby",
     "hotkeyRecording": "Tasten drücken...",

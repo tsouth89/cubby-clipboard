@@ -1050,6 +1050,22 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         }
                       />
                       <Row
+                        title={t('settings.forgetOnClipboardClear')}
+                        desc={t('settings.forgetOnClipboardClearDesc')}
+                        control={
+                          <Toggle
+                            checked={settings.forget_on_clipboard_clear ?? true}
+                            onChange={() =>
+                              updateSetting(
+                                'forget_on_clipboard_clear',
+                                !(settings.forget_on_clipboard_clear ?? true)
+                              )
+                            }
+                            label={t('settings.forgetOnClipboardClear')}
+                          />
+                        }
+                      />
+                      <Row
                         title={t('settings.ignoreGhostClips')}
                         desc={t('settings.ignoreGhostClipsDesc')}
                         control={
