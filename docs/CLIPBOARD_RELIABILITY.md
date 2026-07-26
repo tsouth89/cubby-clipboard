@@ -17,6 +17,9 @@ Clipboard capture is Cubby's primary product promise. A polished history UI is n
 - Keep a supervised native listener that restarts on failure instead of exiting the process thread silently.
 - Detect silent listener death with a clipboard-sequence watchdog (recreate when the sequence advances but no `WM_CLIPBOARDUPDATE` arrives for several seconds).
 - Expose lightweight capture health via `get_clipboard_capture_status` (state, restart count, last error) without clipboard payloads.
+- Keep local history durable: on startup, run SQLite `PRAGMA quick_check` on the existing `cubby.db`. If the file cannot be opened or fails the check, quarantine it (and any `-wal`/`-shm` sidecars) under a timestamped `*.corrupt-*` name and start a fresh empty database so capture never blocks on a broken store.
+- Refresh a rolling `cubby.db.bak` snapshot of a healthy database at most once per 24 hours (after a WAL checkpoint) so operators have a recent recovery point without copying on every launch.
+- Never log clipboard content, previews, or decryptable payloads during recovery; logs may include paths and short structural diagnostics only. The DPAPI-protected `storage.key` and image blobs are left in place when the DB is quarantined.
 
 ## Format baseline
 

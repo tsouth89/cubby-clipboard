@@ -55,6 +55,54 @@ After the automated gate is green, install the draft NSIS package on a clean Win
 10. Uninstall removes the app cleanly; document whether local history remains on disk.
 11. Record SHA-256 hashes for the final installers.
 
+## Lifecycle / recovery acceptance (SOU-218 remainder)
+
+Capture-listener restart and the sequence watchdog already shipped. Confirm the
+storage and session slices below on a daily-driver or VM before closing the
+issue. Do not paste clipboard contents into bug reports or logs.
+
+### Database repair / backup
+
+1. Fresh install: `%AppData%` (or portable data dir) has no `cubby.db`; first
+   launch creates it and capture works.
+2. After history exists, quit Cubby and confirm a `cubby.db.bak` appears within
+   one successful launch (rolling backup; may skip if a backup younger than
+   24h already exists).
+3. With Cubby quit, replace `cubby.db` with garbage bytes (or truncate mid-file).
+   Relaunch: app must start, capture must work, and the bad file must be renamed
+   to something like `cubby.db.corrupt-YYYYMMDD-HHMMSS`. `storage.key` must
+   still be present. History is empty (expected after quarantine).
+4. Logs under the app log dir mention quarantine/structural failure only; no
+   clip text or image payloads.
+
+### Single-instance and autostart
+
+1. With Cubby running, start a second process (installer shortcut or
+   `Cubby.exe`): only one process remains; the existing flyout shows near the
+   cursor.
+2. Enable autostart in Settings (installed build), sign out/in or reboot, confirm
+   tray icon returns and a new copy appears in history.
+3. Portable build: autostart control is unavailable / does not write Run-key
+   entries.
+
+### Display and session (verification; no required code change yet)
+
+1. Copy text, then sleep/resume Windows; within ~10s another copy is captured
+   (watchdog may take 5–7s after silent listener death).
+2. Lock and unlock the session; capture still works.
+3. Change display scale (100% ↔ 150%) or unplug a monitor with the flyout open
+   or closed; next hotkey show positions on the active work area without
+   crashing.
+4. Move the taskbar (bottom ↔ side); flyout still clamps to the work area.
+5. Optional: switch virtual desktop and invoke the hotkey; window appears on the
+   current desktop.
+
+### Capture health API
+
+From a dev build or tooling, invoke `get_clipboard_capture_status` and confirm
+fields are present (`state`, restart counters, last error) with no clipboard
+payload. A Settings/About surface for this status is still optional.
+
 ## Public-release decisions
 
 - Installers are signed with Azure Trusted Signing in CI; confirm SmartScreen reputation is acceptable for the channel you are announcing.
