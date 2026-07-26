@@ -297,7 +297,10 @@ async fn prepare_database_file(db_path: &Path) -> Result<(), String> {
                 "STORAGE: Clipboard history database is unusable ({}); quarantining and starting fresh",
                 sanitize_storage_diagnostic(&reason)
             );
-            quarantine_database_files(db_path)?;
+            let path = db_path.to_path_buf();
+            tokio::task::spawn_blocking(move || quarantine_database_files(&path))
+                .await
+                .map_err(|e| format!("quarantine task failed: {e}"))??;
             Ok(())
         }
     }
@@ -328,9 +331,11 @@ async fn verify_database_quick_check(db_path: &Path) -> Result<(), String> {
         .await;
 
     // Always close before returning so quarantine can rename on Windows.
-    conn.close()
-        .await
-        .map_err(|e| format!("close failed: {e}"))?;
+    // Close failure is not an integrity verdict: never quarantine a healthy DB
+    // just because the check connection failed to close cleanly.
+    if let Err(error) = conn.close().await {
+        log::warn!("STORAGE: Failed to close integrity-check connection: {error}");
+    }
 
     match result {
         Ok(text) if text.eq_ignore_ascii_case("ok") => Ok(()),
@@ -358,9 +363,9 @@ async fn refresh_rolling_backup(db_path: &Path) -> Result<(), String> {
         .execute(&mut conn)
         .await
         .map_err(|e| format!("backup checkpoint failed: {e}"))?;
-    conn.close()
-        .await
-        .map_err(|e| format!("backup close failed: {e}"))?;
+    if let Err(error) = conn.close().await {
+        log::warn!("STORAGE: Failed to close backup checkpoint connection: {error}");
+    }
 
     let temporary = db_path.with_file_name(format!(
         "{}.bak.{}.{}.tmp",
@@ -368,11 +373,24 @@ async fn refresh_rolling_backup(db_path: &Path) -> Result<(), String> {
         std::process::id(),
         uuid::Uuid::new_v4()
     ));
-    std::fs::copy(db_path, &temporary).map_err(|e| format!("backup copy failed: {e}"))?;
-    std::fs::rename(&temporary, &backup).map_err(|e| {
-        let _ = std::fs::remove_file(&temporary);
-        format!("backup install failed: {e}")
-    })?;
+    let source = db_path.to_path_buf();
+    let temporary_for_copy = temporary.clone();
+    tokio::task::spawn_blocking(move || std::fs::copy(&source, &temporary_for_copy))
+        .await
+        .map_err(|e| format!("backup copy task failed: {e}"))?
+        .map_err(|e| format!("backup copy failed: {e}"))?;
+
+    let temporary_for_rename = temporary.clone();
+    let backup_for_rename = backup.clone();
+    tokio::task::spawn_blocking(move || {
+        std::fs::rename(&temporary_for_rename, &backup_for_rename).inspect_err(|_| {
+            let _ = std::fs::remove_file(&temporary_for_rename);
+        })
+    })
+    .await
+    .map_err(|e| format!("backup install task failed: {e}"))?
+    .map_err(|e| format!("backup install failed: {e}"))?;
+
     log::info!(
         "STORAGE: Refreshed rolling history backup at {}",
         backup.display()
@@ -402,6 +420,13 @@ fn rolling_backup_path(db_path: &Path) -> PathBuf {
     db_path.with_file_name(format!("{name}.bak"))
 }
 
+fn sqlite_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
+    // Append `-wal` / `-shm` to the full path bytes (not via Display, which is lossy).
+    let mut name = db_path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
 fn quarantine_database_files(db_path: &Path) -> Result<(), String> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let parent = db_path.parent().unwrap_or_else(|| Path::new("."));
@@ -409,8 +434,8 @@ fn quarantine_database_files(db_path: &Path) -> Result<(), String> {
     // SQLite names WAL/SHM as `{main}-wal` / `{main}-shm` (suffix on full name).
     let candidates = [
         db_path.to_path_buf(),
-        PathBuf::from(format!("{}-wal", db_path.display())),
-        PathBuf::from(format!("{}-shm", db_path.display())),
+        sqlite_sidecar_path(db_path, "-wal"),
+        sqlite_sidecar_path(db_path, "-shm"),
     ];
 
     let mut moved_any = false;
@@ -486,7 +511,7 @@ fn sanitize_storage_diagnostic(message: &str) -> String {
         flat
     } else {
         let truncated: String = flat.chars().take(MAX).collect();
-        format!("{truncated}…")
+        format!("{truncated}...")
     }
 }
 
@@ -647,6 +672,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fresh_rolling_backup_is_not_rewritten() {
+        let directory = temp_dir();
+        let database_path = directory.join("cubby.db");
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&database_path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let backup = rolling_backup_path(&database_path);
+        let marker = b"preexisting-fresh-backup";
+        std::fs::write(&backup, marker).unwrap();
+        let before_meta = std::fs::metadata(&backup).unwrap();
+        let before_modified = before_meta.modified().unwrap();
+
+        prepare_database_file(&database_path)
+            .await
+            .expect("healthy database with fresh backup should pass");
+
+        assert_eq!(std::fs::read(&backup).unwrap(), marker);
+        let after_modified = std::fs::metadata(&backup).unwrap().modified().unwrap();
+        assert_eq!(
+            before_modified, after_modified,
+            "backup younger than 24h must not be rewritten"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
     async fn garbage_database_is_quarantined_and_fresh_open_succeeds() {
         let directory = temp_dir();
         let database_path = directory.join("cubby.db");
@@ -718,7 +780,10 @@ mod tests {
         // Punch a hole in the file body while keeping the SQLite header so open
         // may succeed but quick_check should fail.
         let mut bytes = std::fs::read(&database_path).unwrap();
-        assert!(bytes.len() > 200, "fixture should be larger than the header");
+        assert!(
+            bytes.len() > 200,
+            "fixture should be larger than the header"
+        );
         for byte in bytes.iter_mut().skip(100).take(80) {
             *byte = 0xFF;
         }
@@ -737,7 +802,7 @@ mod tests {
         let clean = sanitize_storage_diagnostic(&noisy);
         assert!(!clean.contains('\n'));
         assert!(!clean.contains('\u{7}'));
-        assert!(clean.chars().count() <= 181);
+        assert!(clean.chars().count() <= 183);
     }
 
     #[test]
