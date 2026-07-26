@@ -46,7 +46,7 @@ bytes and types, and arbitrary binary bytes with embedded NUL/high-byte values.
 scripts/test-clipboard-formats.ps1
 ```
 
-Latest live result on the Windows 11 development machine (2026-07-21): 10
+Latest live result on the Windows 11 development machine (2026-07-26): 10
 consecutive runs, 30 fixture payloads observed and verified, zero read failures.
 Each file-list payload used a new isolated temporary directory containing a
 whitespace-sensitive text file, a Unicode-named binary file, and a folder. All
