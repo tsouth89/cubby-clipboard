@@ -104,7 +104,10 @@ mod windows_probe {
         let config = parse_args();
         if config.writer {
             if config.fixtures {
-                run_fixture_writer();
+                if let Err(error) = run_fixture_writer() {
+                    eprintln!("clipboard fixture writer failed: {error}");
+                    std::process::exit(1);
+                }
                 return;
             }
             run_burst_writer(
@@ -384,12 +387,9 @@ mod windows_probe {
         }
     }
 
-    fn run_fixture_writer() {
+    fn run_fixture_writer() -> Result<(), String> {
         thread::sleep(Duration::from_millis(250));
-        let clipboard = ClipboardContext::new().unwrap_or_else(|error| {
-            eprintln!("failed to create fixture clipboard context: {error}");
-            std::process::exit(1);
-        });
+        let clipboard = ClipboardContext::new().map_err(|error| error.to_string())?;
 
         set_fixture(
             &clipboard,
@@ -404,18 +404,19 @@ mod windows_probe {
                 ]
             },
             "rich",
-        );
+        )?;
 
+        let physical_files = PhysicalFileFixture::create()?;
         set_fixture(
             &clipboard,
             || {
                 vec![
                     ClipboardContent::Text(FILES_MARKER.to_string()),
-                    ClipboardContent::Files(fixture_file_paths()),
+                    ClipboardContent::Files(physical_files.paths.clone()),
                 ]
             },
             "files",
-        );
+        )?;
 
         set_fixture(
             &clipboard,
@@ -426,14 +427,17 @@ mod windows_probe {
                 ]
             },
             "binary",
-        );
+        )?;
+
+        Ok(())
     }
 
     fn set_fixture(
         clipboard: &ClipboardContext,
         contents: impl Fn() -> Vec<ClipboardContent>,
         name: &str,
-    ) {
+    ) -> Result<(), String> {
+        let mut last_error = None;
         for attempt in 0..10_u32 {
             match clipboard.set(contents()) {
                 Ok(()) => {
@@ -441,20 +445,21 @@ mod windows_probe {
                     // Clipboard owners and monitors can transiently contend even
                     // after WM_CLIPBOARDUPDATE has been delivered.
                     thread::sleep(Duration::from_millis(500));
-                    return;
-                }
-                Err(error) if attempt < 9 => {
-                    thread::sleep(Duration::from_millis(2_u64.pow(attempt.min(6))));
-                    if attempt == 8 {
-                        eprintln!("retrying fixture {name} after clipboard error: {error}");
-                    }
+                    return Ok(());
                 }
                 Err(error) => {
-                    eprintln!("failed to write fixture {name}: {error}");
-                    std::process::exit(1);
+                    last_error = Some(error.to_string());
+                    if attempt < 9 {
+                        thread::sleep(Duration::from_millis(2_u64.pow(attempt.min(6))));
+                    }
                 }
             }
         }
+
+        Err(format!(
+            "failed to write fixture {name}: {}",
+            last_error.unwrap_or_else(|| "unknown clipboard error".to_string())
+        ))
     }
 
     fn spawn_fixture_writer() -> Child {
@@ -467,11 +472,55 @@ mod windows_probe {
             })
     }
 
-    fn fixture_file_paths() -> Vec<String> {
-        vec![
-            r"C:\Cubby Probe\leading space.txt".to_string(),
-            r"C:\Cubby Probe\Unicode-文档.txt".to_string(),
-        ]
+    struct PhysicalFileFixture {
+        root: std::path::PathBuf,
+        paths: Vec<String>,
+    }
+
+    impl PhysicalFileFixture {
+        fn create() -> Result<Self, String> {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let root = env::temp_dir().join(format!(
+                "cubby-clipboard-probe-files-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&root).map_err(|error| error.to_string())?;
+
+            let text_file = root.join(" leading and trailing.txt");
+            let binary_file = root.join("Unicode-文档.bin");
+            let folder = root.join("Folder with spaces");
+            let fixture = Self {
+                root,
+                paths: vec![
+                    text_file.to_string_lossy().into_owned(),
+                    binary_file.to_string_lossy().into_owned(),
+                    folder.to_string_lossy().into_owned(),
+                ],
+            };
+            std::fs::write(&text_file, fixture_file_text()).map_err(|error| error.to_string())?;
+            std::fs::write(&binary_file, fixture_binary()).map_err(|error| error.to_string())?;
+            std::fs::create_dir(&folder).map_err(|error| error.to_string())?;
+
+            Ok(fixture)
+        }
+    }
+
+    impl Drop for PhysicalFileFixture {
+        fn drop(&mut self) {
+            if let Err(error) = std::fs::remove_dir_all(&self.root) {
+                eprintln!(
+                    "failed to remove physical file fixture {}: {error}",
+                    self.root.display()
+                );
+            }
+        }
+    }
+
+    fn fixture_file_text() -> &'static [u8] {
+        b"  line one\r\nline two\r\n  "
     }
 
     fn fixture_rtf() -> &'static str {
@@ -805,13 +854,58 @@ mod windows_probe {
             }
             "files" => {
                 let files = clipboard.get_files().map_err(|error| error.to_string())?;
-                if files != fixture_file_paths() {
-                    return Err(format!("file list differed: {files:?}"));
-                }
+                validate_physical_file_fixture(&files)?;
             }
             "binary" => assert_clipboard_buffer(&clipboard, BINARY_FORMAT, &fixture_binary())?,
             _ => return Err(format!("unknown fixture {name}")),
         }
+        Ok(())
+    }
+
+    fn validate_physical_file_fixture(files: &[String]) -> Result<(), String> {
+        if files.len() != 3 {
+            return Err(format!("expected 3 physical targets, got {files:?}"));
+        }
+
+        let text_file = std::path::Path::new(&files[0]);
+        let binary_file = std::path::Path::new(&files[1]);
+        let folder = std::path::Path::new(&files[2]);
+
+        if text_file.file_name() != Some(std::ffi::OsStr::new(" leading and trailing.txt"))
+            || binary_file.file_name() != Some(std::ffi::OsStr::new("Unicode-文档.bin"))
+            || folder.file_name() != Some(std::ffi::OsStr::new("Folder with spaces"))
+        {
+            return Err(format!(
+                "physical target order or names differed: {files:?}"
+            ));
+        }
+        if std::fs::read(text_file).map_err(|error| error.to_string())? != fixture_file_text() {
+            return Err("physical text file bytes differed".to_string());
+        }
+        if std::fs::read(binary_file).map_err(|error| error.to_string())? != fixture_binary() {
+            return Err("physical binary file bytes differed".to_string());
+        }
+        if !folder.is_dir() {
+            return Err("physical folder target was missing or not a directory".to_string());
+        }
+
+        let parent = text_file
+            .parent()
+            .ok_or_else(|| "physical text target had no parent".to_string())?;
+        if binary_file.parent() != Some(parent) || folder.parent() != Some(parent) {
+            return Err("physical targets did not share the fixture root".to_string());
+        }
+        if !parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("cubby-clipboard-probe-files-"))
+        {
+            return Err(format!(
+                "unexpected physical fixture root: {}",
+                parent.display()
+            ));
+        }
+
         Ok(())
     }
 
@@ -952,7 +1046,10 @@ mod windows_probe {
 
     #[cfg(test)]
     mod tests {
-        use super::{cf_html_payload, fixture_binary, fixture_html_fragment};
+        use super::{
+            cf_html_payload, fixture_binary, fixture_html_fragment, validate_physical_file_fixture,
+            PhysicalFileFixture,
+        };
 
         #[test]
         fn cf_html_offsets_are_byte_accurate_for_unicode() {
@@ -985,6 +1082,28 @@ mod windows_probe {
             assert!(bytes.contains(&0));
             assert!(bytes.iter().any(|byte| *byte >= 0x80));
             assert!(std::str::from_utf8(&bytes).is_err());
+        }
+
+        #[test]
+        fn physical_file_fixture_validates_and_cleans_up() {
+            let fixture = PhysicalFileFixture::create().expect("physical fixture");
+            let root = fixture.root.clone();
+
+            validate_physical_file_fixture(&fixture.paths).expect("valid physical fixture");
+            assert!(root.is_dir());
+
+            drop(fixture);
+            assert!(!root.exists());
+        }
+
+        #[test]
+        fn physical_file_fixture_detects_changed_bytes() {
+            let fixture = PhysicalFileFixture::create().expect("physical fixture");
+            std::fs::write(&fixture.paths[0], b"changed").expect("change fixture file");
+
+            let error = validate_physical_file_fixture(&fixture.paths)
+                .expect_err("changed fixture should fail validation");
+            assert_eq!(error, "physical text file bytes differed");
         }
     }
 }
