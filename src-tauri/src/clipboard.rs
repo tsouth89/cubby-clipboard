@@ -1289,16 +1289,33 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
             .await
             .unwrap_or(None);
 
-    if let Err(error) = sqlx::query(r#"DELETE FROM clips WHERE uuid = ? AND is_pinned = 0"#)
+    // Guarded delete: re-check is_pinned in the same statement so a pin that
+    // lands between the earlier SELECT and this DELETE cannot leave orphan
+    // file/index cleanup for a still-present clip (TOCTOU).
+    let deleted = match sqlx::query(r#"DELETE FROM clips WHERE uuid = ? AND is_pinned = 0"#)
         .bind(&recent.uuid)
         .execute(&mut *transaction)
         .await
     {
-        log::error!(
-            "CLIPBOARD: Failed to forget cleared capture {}: {error}",
+        Ok(result) => result.rows_affected(),
+        Err(error) => {
+            log::error!(
+                "CLIPBOARD: Failed to forget cleared capture {}: {error}",
+                recent.uuid
+            );
+            restore_marker(recent);
+            return;
+        }
+    };
+
+    if deleted == 0 {
+        log::info!(
+            "CLIPBOARD: Clear sequence {} — capture {} not deleted (pinned or already gone)",
+            sequence,
             recent.uuid
         );
-        restore_marker(recent);
+        // No restore: either pinned now or already removed. Either way the
+        // clear-forget target should not fire again for this uuid.
         return;
     }
 
