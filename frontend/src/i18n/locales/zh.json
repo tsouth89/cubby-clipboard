@@ -66,6 +66,8 @@
     "roundCornersDesc": "为 Cubby 窗口使用圆角。",
     "ignoreGhostClips": "忽略临时剪贴",
     "ignoreGhostClipsDesc": "忽略临时剪贴板项目",
+    "forgetOnClipboardClear": "忘记被清空的复制",
+    "forgetOnClipboardClearDesc": "若复制后很快清空剪贴板（密码管理器浏览器扩展常见做法），则从历史中删除上一条。仅识别清空，不会因下一次普通复制而删除。已置顶的项目会保留。",
     "hotkey": "全局快捷键",
     "hotkeyDesc": "显示/隐藏 Cubby 的快捷键",
     "hotkeyRecording": "按下按键...",

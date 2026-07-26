@@ -16,7 +16,7 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::MAX_PATH;
@@ -52,8 +52,30 @@ static IGNORE_HASH: Lazy<parking_lot::Mutex<Option<String>>> =
     Lazy::new(|| parking_lot::Mutex::new(None));
 static LAST_STABLE_HASH: Lazy<parking_lot::Mutex<Option<String>>> =
     Lazy::new(|| parking_lot::Mutex::new(None));
+/// Most recent accepted capture, used to forget extension password copies when
+/// the clipboard is auto-cleared shortly afterward (SOU-316).
+static LAST_ACCEPTED_CAPTURE: Lazy<parking_lot::Mutex<Option<RecentCapture>>> =
+    Lazy::new(|| parking_lot::Mutex::new(None));
 pub static CLIPBOARD_SYNC: Lazy<Arc<tokio::sync::Mutex<()>>> =
     Lazy::new(|| Arc::new(tokio::sync::Mutex::new(())));
+
+/// Password-manager extensions typically clear within tens of seconds. Keep this
+/// short so a deliberate later clear does not erase an intentional keep.
+const CLIPBOARD_CLEAR_FORGET_WINDOW: Duration = Duration::from_secs(90);
+
+#[derive(Clone, Debug)]
+struct RecentCapture {
+    uuid: String,
+    captured_at: Instant,
+}
+
+/// Pure helper for SOU-316 unit tests: only empty clears within the window
+/// forget the last clip. A later clear must leave history alone.
+fn should_forget_recent_capture(captured_at: Instant, cleared_at: Instant, window: Duration) -> bool {
+    cleared_at
+        .checked_duration_since(captured_at)
+        .is_some_and(|elapsed| elapsed <= window)
+}
 
 /// Capture-listener health (SOU-218). Values are diagnostics only — never clipboard content.
 ///
@@ -146,21 +168,37 @@ pub fn get_clipboard_capture_status() -> ClipboardCaptureStatus {
 
 pub fn init(app: &AppHandle, db: Arc<Database>) {
     crate::ocr_queue::init(app.clone(), db.clone());
-    let (snapshot_tx, mut snapshot_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let app_for_consumer = app.clone();
     let db_for_consumer = db.clone();
 
     tauri::async_runtime::spawn(async move {
-        while let Some(snapshot) = snapshot_rx.recv().await {
-            process_clipboard_snapshot(app_for_consumer.clone(), db_for_consumer.clone(), snapshot)
-                .await;
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                ClipboardListenerEvent::Content(snapshot) => {
+                    process_clipboard_snapshot(
+                        app_for_consumer.clone(),
+                        db_for_consumer.clone(),
+                        snapshot,
+                    )
+                    .await;
+                }
+                ClipboardListenerEvent::Cleared { sequence } => {
+                    process_clipboard_clear(
+                        app_for_consumer.clone(),
+                        db_for_consumer.clone(),
+                        sequence,
+                    )
+                    .await;
+                }
+            }
         }
         log::error!("CLIPBOARD: Native snapshot queue closed unexpectedly");
     });
 
     std::thread::Builder::new()
         .name("cubby-clipboard-listener".to_string())
-        .spawn(move || run_native_listener(snapshot_tx))
+        .spawn(move || run_native_listener(event_tx))
         .unwrap_or_else(|error| panic!("failed to start native clipboard listener: {error}"));
 }
 
@@ -212,6 +250,12 @@ struct ClipboardSnapshot {
     /// The source application tagged this copy as sensitive (e.g. a password
     /// manager) so clipboard monitors should skip it. See `clipboard_marked_sensitive`.
     sensitive: bool,
+}
+
+enum ClipboardListenerEvent {
+    Content(ClipboardSnapshot),
+    /// Clipboard became empty (or empty-text) after a sequence advance.
+    Cleared { sequence: u32 },
 }
 
 /// Returns true when the current clipboard contents are tagged with the
@@ -304,12 +348,12 @@ fn spawn_listener_watchdog() {
 #[cfg(target_os = "windows")]
 fn run_listener_session(
     monitor: &mut Monitor,
-    snapshot_tx: &tokio::sync::mpsc::UnboundedSender<ClipboardSnapshot>,
+    event_tx: &tokio::sync::mpsc::UnboundedSender<ClipboardListenerEvent>,
 ) -> ListenerSessionExit {
     loop {
         match monitor.recv() {
             Ok(true) => {
-                let started = std::time::Instant::now();
+                let started = Instant::now();
                 let sequence =
                     unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
                 // Always mark the notification as seen, even when the payload is
@@ -330,7 +374,20 @@ fn run_listener_session(
                         sensitive,
                     };
 
-                    if snapshot_tx.send(snapshot).is_err() {
+                    if event_tx
+                        .send(ClipboardListenerEvent::Content(snapshot))
+                        .is_err()
+                    {
+                        return ListenerSessionExit::ConsumerGone;
+                    }
+                } else if clipboard_is_cleared() {
+                    // Empty clipboard (or empty text with no image/files). This is
+                    // the password-manager auto-clear signal; never treat a new
+                    // non-empty copy as a clear.
+                    if event_tx
+                        .send(ClipboardListenerEvent::Cleared { sequence })
+                        .is_err()
+                    {
                         return ListenerSessionExit::ConsumerGone;
                     }
                 } else {
@@ -346,6 +403,61 @@ fn run_listener_session(
     }
 }
 
+/// True when the clipboard is empty or only holds empty text (and no image/files).
+/// Returns false when the clipboard cannot be opened (contention) so we never
+/// treat a lock miss as an auto-clear.
+fn clipboard_is_cleared() -> bool {
+    const ATTEMPTS: u32 = 5;
+
+    for attempt in 0..ATTEMPTS {
+        if let Ok(ctx) = ClipboardContext::new() {
+            if let Ok(files) = ctx.get_files() {
+                if !files.is_empty() {
+                    return false;
+                }
+            }
+            if ctx.get_image().is_ok() {
+                return false;
+            }
+            match ctx.get_text() {
+                Ok(text) if !text.is_empty() => return false,
+                Ok(_) => return true,
+                Err(_) => {
+                    // No readable text. If there are no formats at all, it is a clear;
+                    // otherwise something unsupported/custom remains — leave it alone.
+                    return clipboard_format_count_is_zero();
+                }
+            }
+        }
+
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(clipboard_retry_delay(attempt));
+        }
+    }
+
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn clipboard_format_count_is_zero() -> bool {
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, CountClipboardFormats, OpenClipboard,
+    };
+
+    let opened = unsafe { OpenClipboard(None) };
+    if opened.is_err() {
+        return false;
+    }
+    let count = unsafe { CountClipboardFormats() };
+    let _ = unsafe { CloseClipboard() };
+    count == 0
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clipboard_format_count_is_zero() -> bool {
+    true
+}
+
 /// Supervise the native clipboard listener so capture never silently stops.
 ///
 /// Tradeoffs (SOU-218):
@@ -356,7 +468,7 @@ fn run_listener_session(
 ///   surface area and toast spam.
 /// - Consumer channel close stops the supervisor (process teardown).
 #[cfg(target_os = "windows")]
-fn run_native_listener(snapshot_tx: tokio::sync::mpsc::UnboundedSender<ClipboardSnapshot>) {
+fn run_native_listener(event_tx: tokio::sync::mpsc::UnboundedSender<ClipboardListenerEvent>) {
     spawn_listener_watchdog();
 
     let mut backoff = INITIAL_LISTENER_BACKOFF;
@@ -384,7 +496,7 @@ fn run_native_listener(snapshot_tx: tokio::sync::mpsc::UnboundedSender<Clipboard
         set_capture_state(CAPTURE_STATE_LISTENING);
         log::info!("CLIPBOARD: Native WM_CLIPBOARDUPDATE listener started");
 
-        let exit = run_listener_session(&mut monitor, &snapshot_tx);
+        let exit = run_listener_session(&mut monitor, &event_tx);
         *LISTENER_SHUTDOWN.lock() = None;
         drop(monitor);
 
@@ -413,7 +525,7 @@ fn run_native_listener(snapshot_tx: tokio::sync::mpsc::UnboundedSender<Clipboard
 }
 
 #[cfg(not(target_os = "windows"))]
-fn run_native_listener(_snapshot_tx: tokio::sync::mpsc::UnboundedSender<ClipboardSnapshot>) {
+fn run_native_listener(_event_tx: tokio::sync::mpsc::UnboundedSender<ClipboardListenerEvent>) {
     set_capture_state(CAPTURE_STATE_STOPPED);
     record_capture_error("clipboard capture requires Windows");
 }
@@ -1009,7 +1121,13 @@ async fn process_clipboard_snapshot(
             .upsert(&emitted_id, clip_type, &clip_content, &clip_preview, None);
     }
 
-    let emit_started = std::time::Instant::now();
+    // Remember this capture so a short-lived auto-clear can forget it (SOU-316).
+    *LAST_ACCEPTED_CAPTURE.lock() = Some(RecentCapture {
+        uuid: emitted_id.clone(),
+        captured_at: Instant::now(),
+    });
+
+    let emit_started = Instant::now();
     let _ = app.emit(
         "clipboard-change",
         &serde_json::json!({
@@ -1035,6 +1153,135 @@ async fn process_clipboard_snapshot(
         db_write_ms,
         emit_ms,
         started.elapsed().as_millis()
+    );
+}
+
+/// Forget the last capture when the clipboard is cleared shortly afterward.
+///
+/// Password-manager browser extensions copy into chrome.exe/msedge.exe (so the
+/// ignored-apps list cannot help) and almost always empty the clipboard a few
+/// seconds later. Only empty/clear events trigger this — never a new non-empty
+/// copy. Pinned items are never removed.
+async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u32) {
+    use crate::settings_manager::SettingsManager;
+    use tauri::Manager;
+
+    let manager = app.state::<Arc<SettingsManager>>();
+    let settings = manager.get();
+    if !settings.forget_on_clipboard_clear {
+        return;
+    }
+
+    let recent = {
+        let mut lock = LAST_ACCEPTED_CAPTURE.lock();
+        let should_forget = lock.as_ref().is_some_and(|recent| {
+            should_forget_recent_capture(
+                recent.captured_at,
+                Instant::now(),
+                CLIPBOARD_CLEAR_FORGET_WINDOW,
+            )
+        });
+        if should_forget {
+            lock.take()
+        } else {
+            // Outside the window (or nothing tracked): drop any stale marker.
+            lock.take();
+            None
+        }
+    };
+
+    let Some(recent) = recent else {
+        log::debug!(
+            "CLIPBOARD: Clear sequence {} with no recent capture to forget",
+            sequence
+        );
+        return;
+    };
+
+    let _guard = CLIPBOARD_SYNC.lock().await;
+    let pool = &db.pool;
+
+    let row: Option<(i64, i64)> = sqlx::query_as(
+        r#"
+        SELECT is_pinned, is_deleted
+        FROM clips
+        WHERE uuid = ?
+        "#,
+    )
+    .bind(&recent.uuid)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+
+    let Some((is_pinned, is_deleted)) = row else {
+        log::debug!(
+            "CLIPBOARD: Clear sequence {} — recent capture {} already gone",
+            sequence,
+            recent.uuid
+        );
+        return;
+    };
+
+    if is_pinned != 0 {
+        log::info!(
+            "CLIPBOARD: Clear sequence {} — keeping pinned capture {}",
+            sequence,
+            recent.uuid
+        );
+        return;
+    }
+    if is_deleted != 0 {
+        return;
+    }
+
+    let mut transaction = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            log::error!("CLIPBOARD: Failed to begin clear-forget transaction: {error}");
+            return;
+        }
+    };
+
+    let file_path: Option<String> =
+        sqlx::query_scalar(r#"SELECT file_path FROM clip_images WHERE clip_uuid = ?"#)
+            .bind(&recent.uuid)
+            .fetch_optional(&mut *transaction)
+            .await
+            .unwrap_or(None);
+
+    if let Err(error) = sqlx::query(r#"DELETE FROM clips WHERE uuid = ? AND is_pinned = 0"#)
+        .bind(&recent.uuid)
+        .execute(&mut *transaction)
+        .await
+    {
+        log::error!(
+            "CLIPBOARD: Failed to forget cleared capture {}: {error}",
+            recent.uuid
+        );
+        return;
+    }
+
+    if let Err(error) = transaction.commit().await {
+        log::error!("CLIPBOARD: Failed to commit clear-forget for {}: {error}", recent.uuid);
+        return;
+    }
+
+    crate::commands::remove_clip_image_files(&db.image_dir, file_path.into_iter().collect());
+    db.search_index.remove(&recent.uuid);
+
+    log::info!(
+        "CLIPBOARD: Forgot capture {} after clipboard clear (sequence {}, within {}s window)",
+        recent.uuid,
+        sequence,
+        CLIPBOARD_CLEAR_FORGET_WINDOW.as_secs()
+    );
+
+    let _ = app.emit(
+        "clipboard-change",
+        &serde_json::json!({
+            "id": recent.uuid,
+            "forgotten_on_clear": true,
+        }),
     );
 }
 pub(crate) fn calculate_hash(content: &[u8]) -> String {
@@ -1459,10 +1706,49 @@ unsafe fn extract_icon(path: &str) -> Option<String> {
 mod tests {
     use super::{
         calculate_hash, capture_state_name, capture_text, clipboard_retry_delay,
-        next_listener_backoff, CapturedContent, CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING,
-        CAPTURE_STATE_STOPPED,
+        next_listener_backoff, should_forget_recent_capture, CapturedContent,
+        CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED,
+        CLIPBOARD_CLEAR_FORGET_WINDOW,
     };
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn forget_window_accepts_clears_within_bound() {
+        let captured = Instant::now();
+        let cleared = captured + Duration::from_secs(30);
+        assert!(should_forget_recent_capture(
+            captured,
+            cleared,
+            CLIPBOARD_CLEAR_FORGET_WINDOW
+        ));
+        assert!(should_forget_recent_capture(
+            captured,
+            captured + CLIPBOARD_CLEAR_FORGET_WINDOW,
+            CLIPBOARD_CLEAR_FORGET_WINDOW
+        ));
+    }
+
+    #[test]
+    fn forget_window_rejects_late_clears() {
+        let captured = Instant::now();
+        let cleared = captured + CLIPBOARD_CLEAR_FORGET_WINDOW + Duration::from_millis(1);
+        assert!(!should_forget_recent_capture(
+            captured,
+            cleared,
+            CLIPBOARD_CLEAR_FORGET_WINDOW
+        ));
+    }
+
+    #[test]
+    fn forget_window_rejects_inverted_timestamps() {
+        let captured = Instant::now();
+        let cleared = captured - Duration::from_secs(1);
+        assert!(!should_forget_recent_capture(
+            captured,
+            cleared,
+            CLIPBOARD_CLEAR_FORGET_WINDOW
+        ));
+    }
 
     #[test]
     fn capture_text_preserves_exact_whitespace() {
