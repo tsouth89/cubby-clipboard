@@ -71,7 +71,11 @@ struct RecentCapture {
 
 /// Pure helper for SOU-316 unit tests: only empty clears within the window
 /// forget the last clip. A later clear must leave history alone.
-fn should_forget_recent_capture(captured_at: Instant, cleared_at: Instant, window: Duration) -> bool {
+fn should_forget_recent_capture(
+    captured_at: Instant,
+    cleared_at: Instant,
+    window: Duration,
+) -> bool {
     cleared_at
         .checked_duration_since(captured_at)
         .is_some_and(|elapsed| elapsed <= window)
@@ -255,7 +259,9 @@ struct ClipboardSnapshot {
 enum ClipboardListenerEvent {
     Content(ClipboardSnapshot),
     /// Clipboard became empty (or empty-text) after a sequence advance.
-    Cleared { sequence: u32 },
+    Cleared {
+        sequence: u32,
+    },
 }
 
 /// Returns true when the current clipboard contents are tagged with the
@@ -418,6 +424,18 @@ fn clipboard_is_cleared() -> bool {
             }
             if ctx.get_image().is_ok() {
                 return false;
+            }
+            // Empty plain text must not count as a clear if HTML/RTF still hold
+            // content (materialize can miss those when get_text is empty).
+            if let Ok(html) = ctx.get_html() {
+                if !html.is_empty() {
+                    return false;
+                }
+            }
+            if let Ok(rtf) = ctx.get_rich_text() {
+                if !rtf.is_empty() {
+                    return false;
+                }
             }
             match ctx.get_text() {
                 Ok(text) if !text.is_empty() => return false,
@@ -775,8 +793,15 @@ async fn process_clipboard_snapshot(
     let manager = app.state::<Arc<SettingsManager>>();
     let settings = manager.get();
 
+    // Skipped captures must not leave an older clip as the clear-forget target.
+    // Otherwise: copy note → skip password → auto-clear would delete the note.
+    let discard_clear_target = || {
+        *LAST_ACCEPTED_CAPTURE.lock() = None;
+    };
+
     if settings.skip_sensitive && sensitive {
         log::info!("CLIPBOARD: Skipping content the source app marked as sensitive");
+        discard_clear_target();
         return;
     }
 
@@ -785,6 +810,7 @@ async fn process_clipboard_snapshot(
             if let Some(kind) = crate::secrets::classify_secret(text) {
                 // Category only — never log the matched clipboard bytes.
                 log::info!("CLIPBOARD: Skipping likely secret ({})", kind.as_str());
+                discard_clear_target();
                 return;
             }
         }
@@ -792,6 +818,7 @@ async fn process_clipboard_snapshot(
 
     if settings.ignore_ghost_clips && !is_explicit_owner {
         log::info!("CLIPBOARD: Ignoring ghost clip (unknown owner)");
+        discard_clear_target();
         return;
     }
 
@@ -807,6 +834,7 @@ async fn process_clipboard_snapshot(
     if let Some(ref path) = full_path {
         if is_ignored(path) {
             log::info!("CLIPBOARD: Ignoring content from configured application (path match)");
+            discard_clear_target();
             return;
         }
     }
@@ -816,6 +844,7 @@ async fn process_clipboard_snapshot(
             log::info!(
                 "CLIPBOARD: Ignoring content from configured application (executable match)"
             );
+            discard_clear_target();
             return;
         }
     }
@@ -1198,6 +1227,14 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
         return;
     };
 
+    let restore_marker = |recent: RecentCapture| {
+        let mut lock = LAST_ACCEPTED_CAPTURE.lock();
+        // Only restore if nothing newer was captured while we held the marker.
+        if lock.is_none() {
+            *lock = Some(recent);
+        }
+    };
+
     let _guard = CLIPBOARD_SYNC.lock().await;
     let pool = &db.pool;
 
@@ -1228,6 +1265,8 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
             sequence,
             recent.uuid
         );
+        // Keep tracking so a later clear after unpin is not required; pinned
+        // items stay forever under this policy.
         return;
     }
     if is_deleted != 0 {
@@ -1238,6 +1277,7 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
         Ok(tx) => tx,
         Err(error) => {
             log::error!("CLIPBOARD: Failed to begin clear-forget transaction: {error}");
+            restore_marker(recent);
             return;
         }
     };
@@ -1258,11 +1298,16 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
             "CLIPBOARD: Failed to forget cleared capture {}: {error}",
             recent.uuid
         );
+        restore_marker(recent);
         return;
     }
 
     if let Err(error) = transaction.commit().await {
-        log::error!("CLIPBOARD: Failed to commit clear-forget for {}: {error}", recent.uuid);
+        log::error!(
+            "CLIPBOARD: Failed to commit clear-forget for {}: {error}",
+            recent.uuid
+        );
+        restore_marker(recent);
         return;
     }
 
