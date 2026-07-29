@@ -80,27 +80,7 @@ function Test-R2ObjectRequiresUpload {
                 return $false
             }
 
-            # A published release must stay byte-stable for Store certification URLs.
-            # A still-draft tag can be rebuilt (failed validate, retag, etc.); replace
-            # the orphan so R2 matches the GitHub draft assets.
-            $isDraft = $false
-            if (-not [string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
-                $releaseJson = & gh release view "v$Version" --json isDraft 2>$null
-                if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($releaseJson)) {
-                    $isDraft = ($releaseJson | ConvertFrom-Json).isDraft -eq $true
-                }
-            }
-            if (-not $isDraft) {
-                throw "Refusing to overwrite immutable release object with different bytes: $objectKey"
-            }
-
-            Write-Warning "Draft release has different bytes at $objectKey; replacing orphan R2 object."
-            $objectPath = "$BucketName/$objectPrefix/$ObjectName"
-            & npx --yes "wrangler@$WranglerVersion" r2 object delete $objectPath --remote
-            if ($LASTEXITCODE -ne 0) {
-                throw "Failed to delete draft orphan object $objectKey before re-upload."
-            }
-            return $true
+            throw "Refusing to overwrite immutable release object with different bytes: $objectKey"
         }
         if ($statusCode -ne "404") {
             throw "Unexpected HTTP $statusCode while checking $objectUrl."
