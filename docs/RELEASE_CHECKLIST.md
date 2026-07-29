@@ -13,10 +13,29 @@ environment must define:
 
 Tag releases upload and verify both signed installers automatically. To backfill
 an existing GitHub release, run the `Publish Microsoft Store packages` workflow
-with its version tag. Submit the resulting immutable x64 and ARM64 URLs to
-Microsoft Partner Center. Publishing a GitHub tag or uploading to R2 does not
-update the Store listing: each new version still needs a Partner Center
-submission, either manually or through Microsoft's MSI/EXE submission API.
+with its version tag.
+
+Microsoft Store submission is disabled until Partner Center onboarding has
+been validated. The GitHub `release` environment must also define:
+
+- variable `PARTNER_CENTER_PRODUCT_ID`;
+- variable `MICROSOFT_STORE_SUBMISSION_ENABLED` (`false` during onboarding);
+- secrets `PARTNER_CENTER_TENANT_ID`, `PARTNER_CENTER_SELLER_ID`,
+  `PARTNER_CENTER_CLIENT_ID`, and `PARTNER_CENTER_CLIENT_SECRET`.
+
+The manual **Validate Microsoft Store submission** workflow uses a separate
+`store-validation` environment containing the same five Partner Center values.
+It verifies both R2 installers and checksums, authenticates to Partner Center,
+and maps the existing x64 and ARM64 Store packages to their new versioned URLs
+without changing a submission unless `publish` is explicitly selected.
+
+After a validation-only run passes, set
+`MICROSOFT_STORE_SUBMISSION_ENABLED=true`. Future tag releases wait for both
+architecture uploads, update both package URLs together, and create one Store
+submission before the GitHub release is published. Reruns skip existing R2
+objects only when their bytes match; a different build must use a new version
+instead of replacing an existing versioned URL, even while the GitHub release
+is still a draft.
 
 ## Automated gate
 

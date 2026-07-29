@@ -428,11 +428,101 @@ jobs:
             > latest.json
           gh release upload "$TAG" latest.json --clobber
 
+  submit-store:
+    name: Submit Microsoft Store update
+    if: github.event_name != 'workflow_dispatch'
+    needs: [create-release, build-installers]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Check out release tag
+        if: vars.MICROSOFT_STORE_SUBMISSION_ENABLED == 'true'
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Microsoft Store Developer CLI
+        if: vars.MICROSOFT_STORE_SUBMISSION_ENABLED == 'true'
+        uses: microsoft/microsoft-store-apppublisher@cc9910a8d59f2eb55cbb83df0a3800cf3b5300e0 # v1.4
+
+      - name: Configure Partner Center credentials
+        if: vars.MICROSOFT_STORE_SUBMISSION_ENABLED == 'true'
+        shell: pwsh
+        env:
+          PARTNER_CENTER_TENANT_ID: ${{ secrets.PARTNER_CENTER_TENANT_ID }}
+          PARTNER_CENTER_SELLER_ID: ${{ secrets.PARTNER_CENTER_SELLER_ID }}
+          PARTNER_CENTER_CLIENT_ID: ${{ secrets.PARTNER_CENTER_CLIENT_ID }}
+          PARTNER_CENTER_CLIENT_SECRET: ${{ secrets.PARTNER_CENTER_CLIENT_SECRET }}
+        run: |
+          foreach ($name in @(
+            "PARTNER_CENTER_TENANT_ID",
+            "PARTNER_CENTER_SELLER_ID",
+            "PARTNER_CENTER_CLIENT_ID",
+            "PARTNER_CENTER_CLIENT_SECRET"
+          )) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "The release environment is missing secret $name."
+            }
+          }
+          msstore settings --enableTelemetry false
+          msstore reconfigure `
+            --tenantId $env:PARTNER_CENTER_TENANT_ID `
+            --sellerId $env:PARTNER_CENTER_SELLER_ID `
+            --clientId $env:PARTNER_CENTER_CLIENT_ID `
+            --clientSecret $env:PARTNER_CENTER_CLIENT_SECRET
+          if ($LASTEXITCODE -ne 0) {
+            throw "Microsoft Store CLI authentication failed."
+          }
+
+      - name: Prepare Microsoft Store package update
+        if: vars.MICROSOFT_STORE_SUBMISSION_ENABLED == 'true'
+        shell: pwsh
+        env:
+          PARTNER_CENTER_PRODUCT_ID: ${{ vars.PARTNER_CENTER_PRODUCT_ID }}
+          STORE_VERSION: ${{ needs.create-release.outputs.version }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PARTNER_CENTER_PRODUCT_ID)) {
+            throw "The release environment is missing variable PARTNER_CENTER_PRODUCT_ID."
+          }
+          $currentPath = Join-Path $env:RUNNER_TEMP "store-packages-current.json"
+          $preparedPath = Join-Path $env:RUNNER_TEMP "store-packages-prepared.json"
+          msstore submission get $env:PARTNER_CENTER_PRODUCT_ID > $currentPath
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not retrieve Cubby's current Microsoft Store packages."
+          }
+          & .\scripts\prepare-store-submission.ps1 `
+            -CurrentPackagePath $currentPath `
+            -Version $env:STORE_VERSION `
+            -OutputPath $preparedPath
+          "STORE_PACKAGE_PATH=$preparedPath" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Submit update to Microsoft Store
+        if: vars.MICROSOFT_STORE_SUBMISSION_ENABLED == 'true'
+        shell: pwsh
+        env:
+          PARTNER_CENTER_PRODUCT_ID: ${{ vars.PARTNER_CENTER_PRODUCT_ID }}
+        run: |
+          $package = Get-Content -LiteralPath $env:STORE_PACKAGE_PATH -Raw
+          msstore submission update $env:PARTNER_CENTER_PRODUCT_ID $package
+          if ($LASTEXITCODE -ne 0) {
+            throw "Microsoft Store package update failed."
+          }
+          msstore submission publish $env:PARTNER_CENTER_PRODUCT_ID
+          if ($LASTEXITCODE -ne 0) {
+            throw "Microsoft Store submission failed."
+          }
+          "### Submitted Cubby Clipboard to Microsoft Store" |
+            Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
   publish-release:
     name: Publish validated release
     if: github.event_name != 'workflow_dispatch'
     # Gate publishing on validate too, since create-release/build no longer do.
-    needs: [validate, create-release, build-installers, updater-manifest]
+    needs: [validate, create-release, build-installers, updater-manifest, submit-store]
     runs-on: ubuntu-latest
     permissions:
       contents: write

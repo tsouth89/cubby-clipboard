@@ -1,0 +1,156 @@
+name: Validate Microsoft Store submission
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing Cubby version already published to R2 (for example, 1.2.3)
+        required: true
+        type: string
+      publish:
+        description: Submit this version to Microsoft Store after validation
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: microsoft-store-submission
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate Store access and packages
+    runs-on: windows-latest
+    timeout-minutes: 30
+    environment: store-validation
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Validate version
+        shell: pwsh
+        env:
+          STORE_VERSION: ${{ inputs.version }}
+        run: |
+          if ($env:STORE_VERSION -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
+            throw "Version must look like 1.2.3 (without the v prefix)."
+          }
+
+      - name: Verify immutable R2 installers and checksums
+        shell: pwsh
+        env:
+          STORE_VERSION: ${{ inputs.version }}
+        run: |
+          foreach ($architecture in @("x64", "arm64")) {
+            $name = "Cubby.Clipboard_$env:STORE_VERSION`_$architecture-Store-setup.exe"
+            $url = "https://downloads.cubbyclipboard.com/releases/v$env:STORE_VERSION/$name"
+            $installerPath = Join-Path $env:RUNNER_TEMP $name
+            $hashPath = "$installerPath.sha256"
+            & curl.exe --fail --silent --show-error --location --max-redirs 0 `
+              --retry 3 --output $installerPath $url
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not download $url"
+            }
+            & curl.exe --fail --silent --show-error --location --max-redirs 0 `
+              --retry 3 --output $hashPath "$url.sha256"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not download $url.sha256"
+            }
+            $expectedText = Get-Content -LiteralPath $hashPath -Raw
+            if ($expectedText -notmatch '(?i)\b([0-9a-f]{64})\b') {
+              throw "$url.sha256 does not contain a SHA-256 value."
+            }
+            $expected = $Matches[1].ToLowerInvariant()
+            $actual = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) {
+              throw "$architecture R2 installer SHA-256 mismatch. Expected $expected, got $actual."
+            }
+            Write-Host "Verified immutable R2 installer: $url"
+          }
+
+      - name: Set up Microsoft Store Developer CLI
+        uses: microsoft/microsoft-store-apppublisher@cc9910a8d59f2eb55cbb83df0a3800cf3b5300e0 # v1.4
+
+      - name: Configure Partner Center credentials
+        shell: pwsh
+        env:
+          PARTNER_CENTER_TENANT_ID: ${{ secrets.PARTNER_CENTER_TENANT_ID }}
+          PARTNER_CENTER_SELLER_ID: ${{ secrets.PARTNER_CENTER_SELLER_ID }}
+          PARTNER_CENTER_CLIENT_ID: ${{ secrets.PARTNER_CENTER_CLIENT_ID }}
+          PARTNER_CENTER_CLIENT_SECRET: ${{ secrets.PARTNER_CENTER_CLIENT_SECRET }}
+        run: |
+          foreach ($name in @(
+            "PARTNER_CENTER_TENANT_ID",
+            "PARTNER_CENTER_SELLER_ID",
+            "PARTNER_CENTER_CLIENT_ID",
+            "PARTNER_CENTER_CLIENT_SECRET"
+          )) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "The store-validation environment is missing secret $name."
+            }
+          }
+          msstore settings --enableTelemetry false
+          msstore reconfigure `
+            --tenantId $env:PARTNER_CENTER_TENANT_ID `
+            --sellerId $env:PARTNER_CENTER_SELLER_ID `
+            --clientId $env:PARTNER_CENTER_CLIENT_ID `
+            --clientSecret $env:PARTNER_CENTER_CLIENT_SECRET
+          if ($LASTEXITCODE -ne 0) {
+            throw "Microsoft Store CLI authentication failed."
+          }
+
+      - name: Read and prepare current Store packages
+        shell: pwsh
+        env:
+          PARTNER_CENTER_PRODUCT_ID: ${{ vars.PARTNER_CENTER_PRODUCT_ID }}
+          STORE_VERSION: ${{ inputs.version }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PARTNER_CENTER_PRODUCT_ID)) {
+            throw "The store-validation environment is missing variable PARTNER_CENTER_PRODUCT_ID."
+          }
+          $currentPath = Join-Path $env:RUNNER_TEMP "store-packages-current.json"
+          $preparedPath = Join-Path $env:RUNNER_TEMP "store-packages-prepared.json"
+          msstore submission get $env:PARTNER_CENTER_PRODUCT_ID > $currentPath
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not retrieve Cubby's current Microsoft Store packages."
+          }
+          & .\scripts\prepare-store-submission.ps1 `
+            -CurrentPackagePath $currentPath `
+            -Version $env:STORE_VERSION `
+            -OutputPath $preparedPath
+          "STORE_PACKAGE_PATH=$preparedPath" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Publish Microsoft Store submission
+        if: inputs.publish
+        shell: pwsh
+        env:
+          PARTNER_CENTER_PRODUCT_ID: ${{ vars.PARTNER_CENTER_PRODUCT_ID }}
+        run: |
+          $package = Get-Content -LiteralPath $env:STORE_PACKAGE_PATH -Raw
+          msstore submission update $env:PARTNER_CENTER_PRODUCT_ID $package
+          if ($LASTEXITCODE -ne 0) {
+            throw "Microsoft Store package update failed."
+          }
+          msstore submission publish $env:PARTNER_CENTER_PRODUCT_ID
+          if ($LASTEXITCODE -ne 0) {
+            throw "Microsoft Store submission failed."
+          }
+          "### Submitted Cubby Clipboard to Microsoft Store" |
+            Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Report validation-only result
+        if: ${{ !inputs.publish }}
+        shell: pwsh
+        run: |
+          "### Microsoft Store validation passed" |
+            Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "Credentials, product access, both package architectures, and R2 URLs were validated. No submission was changed." |
+            Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
