@@ -250,7 +250,10 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
       .then(async () => {
         const newSettings = { ...settingsRef.current, ...updates };
         try {
-          await invoke('save_settings', { settings: newSettings });
+          await invoke('save_settings', {
+            settings: newSettings,
+            changedKeys: Object.keys(updates),
+          });
           settingsRef.current = newSettings;
           setSettings(newSettings);
           await emit('settings-changed', newSettings);
@@ -390,7 +393,10 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
       .then(async () => {
         const newSettings = { ...settingsRef.current, ...updates };
         try {
-          await invoke('save_settings', { settings: newSettings });
+          await invoke('save_settings', {
+            settings: newSettings,
+            changedKeys: Object.keys(updates),
+          });
           settingsRef.current = newSettings;
           setSettings(newSettings);
           await emit('settings-changed', newSettings);

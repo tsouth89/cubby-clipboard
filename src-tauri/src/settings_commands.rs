@@ -64,7 +64,11 @@ pub async fn get_settings(app: AppHandle) -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
+pub async fn save_settings(
+    app: AppHandle,
+    settings: serde_json::Value,
+    changed_keys: Option<Vec<String>>,
+) -> Result<(), String> {
     let manager = app.state::<Arc<SettingsManager>>();
 
     // Deserialize incoming settings (Frontend sends full object except ignored_apps)
@@ -78,15 +82,27 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
     new_settings.ignored_apps = current.ignored_apps.clone();
     new_settings.default_sensitive_apps_seeded = current.default_sensitive_apps_seeded;
 
+    // Newer frontends identify the exact fields involved in this save. Keep a
+    // value comparison fallback for older callers, but avoid touching Windows
+    // startup state for unrelated settings when the changed fields are known.
+    let startup_setting_changed = changed_keys
+        .as_ref()
+        .map(|keys| keys.iter().any(|key| key == "startup_with_windows"))
+        .unwrap_or(new_settings.startup_with_windows != current.startup_with_windows);
+
     let portable = crate::portable_data_dir().is_some();
     if portable || cfg!(feature = "app-store") {
         // Never persist a capability the current build cannot apply. This also
         // clears a stale installed-build preference after switching channels.
         new_settings.startup_with_windows = false;
+    } else if !startup_setting_changed {
+        // The OS is authoritative for display, but the persisted fallback must
+        // not be rewritten from an unrelated save or an unavailable read.
+        new_settings.startup_with_windows = current.startup_with_windows;
     }
 
     #[cfg(not(feature = "app-store"))]
-    let autostart_transition = if portable {
+    let autostart_transition = if portable || !startup_setting_changed {
         None
     } else {
         use tauri_plugin_autostart::ManagerExt;
