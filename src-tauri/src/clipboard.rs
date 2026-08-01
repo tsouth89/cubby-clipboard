@@ -131,6 +131,13 @@ pub fn set_ignore_hash(hash: String) {
     *lock = Some(hash);
 }
 
+fn clear_ignore_hash_if_matches(hash: &str) {
+    let mut lock = IGNORE_HASH.lock();
+    if lock.as_deref() == Some(hash) {
+        lock.take();
+    }
+}
+
 /// Forget the consecutive-duplicate marker after history is deleted. Without
 /// this, deleting a clip and copying the same content again is silently
 /// dropped ("capture is broken" from the user's perspective): the marker still
@@ -760,14 +767,6 @@ fn relay_remote_capture(
     captured_formats: &[CapturedFormat],
     clip_hash: &str,
 ) {
-    {
-        let mut last = LAST_RELAYED_HASH.lock();
-        if last.as_deref() == Some(clip_hash) {
-            return;
-        }
-        *last = Some(clip_hash.to_string());
-    }
-
     let mut contents = if clip_type == "image" {
         let Some(png_bytes) = full_image_content else {
             return;
@@ -801,10 +800,24 @@ fn relay_remote_capture(
         }
     }
 
+    {
+        let mut last = LAST_RELAYED_HASH.lock();
+        if last.as_deref() == Some(clip_hash) {
+            return;
+        }
+        *last = Some(clip_hash.to_string());
+    }
     set_ignore_hash(clip_hash.to_string());
     match ClipboardContext::new().and_then(|context| context.set(contents)) {
         Ok(()) => log::info!("CLIPBOARD: Relayed remote-session capture under Cubby ownership"),
-        Err(error) => log::warn!("CLIPBOARD: Failed to relay remote capture: {error}"),
+        Err(error) => {
+            clear_ignore_hash_if_matches(clip_hash);
+            let mut last = LAST_RELAYED_HASH.lock();
+            if last.as_deref() == Some(clip_hash) {
+                last.take();
+            }
+            log::warn!("CLIPBOARD: Failed to relay remote capture: {error}");
+        }
     }
 }
 
