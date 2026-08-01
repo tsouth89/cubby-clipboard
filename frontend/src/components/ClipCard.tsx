@@ -10,10 +10,9 @@ interface ClipCardProps {
   clip: ClipboardItem;
   density: 'compact' | 'comfortable';
   isSelected: boolean;
-  /** Fired on mouse enter AND move; the list ignores events whose pointer
-   *  position hasn't changed (a card sliding under a stationary cursor when
-   *  arrow-key navigation scrolls the list must not steal the selection). */
-  onHover: (event: React.MouseEvent) => void;
+  /** Fired only on real mouse movement. A card sliding under a stationary
+   *  cursor during keyboard navigation must not steal selection. */
+  onHover: () => void;
   onPaste: () => void;
   onCopy: () => void;
   onTogglePin: () => void;
@@ -133,7 +132,6 @@ export const ClipCard = memo(function ClipCard({
       data-selected={isSelected}
       role="listitem"
       aria-current={isSelected ? 'true' : undefined}
-      onMouseEnter={onHover}
       onMouseMove={onHover}
       onClick={onPaste}
       onContextMenu={(event) => {

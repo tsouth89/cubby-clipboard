@@ -43,20 +43,10 @@ export function ClipList({
 }: ClipListProps) {
   const { t } = useTranslation();
   const listRef = useRef<HTMLDivElement>(null);
-  // Last pointer position seen over a card. Arrow-key navigation calls
-  // scrollIntoView, which slides cards under a stationary cursor and fires
-  // mouseenter without any real mouse movement — acting on those would yank
-  // the selection (and the next Enter) back to whatever landed under the
-  // cursor. Only a pointer that actually moved may change the selection.
-  const lastPointer = useRef<{ x: number; y: number } | null>(null);
-
-  const handleCardHover = (clipId: string) => (event: React.MouseEvent) => {
-    const previous = lastPointer.current;
-    const moved =
-      previous !== null && (previous.x !== event.clientX || previous.y !== event.clientY);
-    lastPointer.current = { x: event.clientX, y: event.clientY };
-    if (moved) onSelectClip(clipId);
-  };
+  // Arrow-key navigation can scroll a card under a stationary cursor and fire
+  // mouseenter. A mousemove, including the first one after opening the flyout,
+  // is direct evidence of pointer intent and may safely change selection.
+  const handleCardHover = (clipId: string) => () => onSelectClip(clipId);
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: 0 });

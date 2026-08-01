@@ -249,13 +249,23 @@ pub fn restore_previous_foreground_window() -> bool {
 #[cfg(target_os = "windows")]
 fn physically_held_modifiers() -> Vec<windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RMENU, VK_RSHIFT, VK_RWIN,
+        GetAsyncKeyState, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU,
+        VK_RSHIFT, VK_RWIN,
     };
 
-    [VK_LWIN, VK_RWIN, VK_LMENU, VK_RMENU, VK_LSHIFT, VK_RSHIFT]
-        .into_iter()
-        .filter(|key| unsafe { GetAsyncKeyState(key.0 as i32) } as u16 & 0x8000 != 0)
-        .collect()
+    [
+        VK_LWIN,
+        VK_RWIN,
+        VK_LCONTROL,
+        VK_RCONTROL,
+        VK_LMENU,
+        VK_RMENU,
+        VK_LSHIFT,
+        VK_RSHIFT,
+    ]
+    .into_iter()
+    .filter(|key| unsafe { GetAsyncKeyState(key.0 as i32) } as u16 & 0x8000 != 0)
+    .collect()
 }
 
 /// The full key sequence for one synthesized paste: release held modifiers,
@@ -510,7 +520,7 @@ mod tests {
     mod paste_input_plan {
         use super::super::paste_input_plan;
         use windows::Win32::UI::Input::KeyboardAndMouse::{
-            VK_CONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_NONAME, VK_V,
+            VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_NONAME, VK_V,
         };
 
         #[test]
@@ -542,6 +552,22 @@ mod tests {
             assert_eq!(plan.first(), Some(&(VK_LSHIFT, true)));
             assert_eq!(plan.last(), Some(&(VK_LSHIFT, false)));
             assert!(!plan.iter().any(|(key, _)| *key == VK_NONAME));
+        }
+
+        #[test]
+        fn held_control_is_released_and_restored_around_paste() {
+            let plan = paste_input_plan(&[VK_LCONTROL]);
+            assert_eq!(plan.first(), Some(&(VK_LCONTROL, true)));
+            assert_eq!(
+                plan[1..5],
+                [
+                    (VK_CONTROL, false),
+                    (VK_V, false),
+                    (VK_V, true),
+                    (VK_CONTROL, true)
+                ]
+            );
+            assert_eq!(plan.last(), Some(&(VK_LCONTROL, false)));
         }
     }
 }

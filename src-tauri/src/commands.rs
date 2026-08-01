@@ -636,16 +636,17 @@ pub async fn get_clips(
             let folder_id_num = id.parse::<i64>().ok();
             if let Some(numeric_id) = folder_id_num {
                 log::info!("Querying for folder_id: {}", numeric_id);
-                sqlx::query_as(&format!(
+                let sql = format!(
                     "SELECT * FROM clips WHERE is_deleted = 0 AND folder_id = ?{type_clause} \
                      ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?"
-                ))
-                .bind(numeric_id)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| e.to_string())?
+                );
+                sqlx::query_as(&sql)
+                    .bind(numeric_id)
+                    .bind(limit)
+                    .bind(offset)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(|e| e.to_string())?
             } else {
                 log::info!("Unknown folder_id, returning empty");
                 Vec::new()
@@ -653,15 +654,16 @@ pub async fn get_clips(
         }
         None => {
             log::info!("Querying for items, offset: {}, limit: {}", offset, limit);
-            sqlx::query_as(&format!(
+            let sql = format!(
                 "SELECT * FROM clips WHERE is_deleted = 0{type_clause} \
                  ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?"
-            ))
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| e.to_string())?
+            );
+            sqlx::query_as(&sql)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| e.to_string())?
         }
     };
     let sql_ms = sql_started.elapsed().as_millis();
@@ -1179,22 +1181,24 @@ async fn search_clips_in_database(
     let type_clause = content_filter_clause(content_filter.as_deref());
     let sql_started = Instant::now();
     let ordered_ids: Vec<String> = if let Some(folder_id) = folder_id {
-        sqlx::query_scalar(&format!(
+        let sql = format!(
             "SELECT uuid FROM clips WHERE is_deleted = 0 AND folder_id = ?{type_clause} \
              ORDER BY is_pinned DESC, created_at DESC"
-        ))
-        .bind(folder_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| error.to_string())?
+        );
+        sqlx::query_scalar(&sql)
+            .bind(folder_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|error| error.to_string())?
     } else {
-        sqlx::query_scalar(&format!(
+        let sql = format!(
             "SELECT uuid FROM clips WHERE is_deleted = 0{type_clause} \
              ORDER BY is_pinned DESC, created_at DESC"
-        ))
-        .fetch_all(pool)
-        .await
-        .map_err(|error| error.to_string())?
+        );
+        sqlx::query_scalar(&sql)
+            .fetch_all(pool)
+            .await
+            .map_err(|error| error.to_string())?
     };
     let selected_ids = ordered_ids
         .into_iter()
