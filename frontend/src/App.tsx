@@ -126,6 +126,7 @@ function App() {
         float_above_taskbar: true,
         density: 'comfortable',
         remote_paste_mode: 'copy_then_paste',
+        remote_clipboard_relay: true,
         ignore_ghost_clips: true,
         skip_sensitive: true,
         skip_likely_secrets: false,

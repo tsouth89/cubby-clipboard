@@ -992,6 +992,22 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                           {t('settings.remoteHotkeyHint')}
                         </p>
                       </Row>
+                      <Row
+                        title={t('settings.remoteClipboardRelay')}
+                        desc={t('settings.remoteClipboardRelayDesc')}
+                        control={
+                          <Toggle
+                            checked={settings.remote_clipboard_relay !== false}
+                            onChange={() =>
+                              updateSetting(
+                                'remote_clipboard_relay',
+                                settings.remote_clipboard_relay === false
+                              )
+                            }
+                            label={t('settings.remoteClipboardRelay')}
+                          />
+                        }
+                      />
                     </SettingCard>
                   </section>
                 </div>
