@@ -294,15 +294,51 @@ async fn prepare_database_file(db_path: &Path) -> Result<(), String> {
         Err(reason) => {
             // Structural diagnostics only: never log row contents.
             log::error!(
-                "STORAGE: Clipboard history database is unusable ({}); quarantining and starting fresh",
+                "STORAGE: Clipboard history database is unusable ({}); quarantining",
                 sanitize_storage_diagnostic(&reason)
             );
             let path = db_path.to_path_buf();
             tokio::task::spawn_blocking(move || quarantine_database_files(&path))
                 .await
                 .map_err(|e| format!("quarantine task failed: {e}"))??;
+            restore_from_rolling_backup(db_path).await;
             Ok(())
         }
+    }
+}
+
+/// After a corrupt database is quarantined, bring back the rolling backup so
+/// the user keeps up to 24h-old history instead of silently starting from
+/// zero. The backup file itself is kept (copy, not rename) as a second chance
+/// for manual recovery. Best-effort: any failure falls back to a fresh file.
+async fn restore_from_rolling_backup(db_path: &Path) {
+    let backup = rolling_backup_path(db_path);
+    if !backup.exists() {
+        log::warn!("STORAGE: No rolling backup found; starting with an empty history");
+        return;
+    }
+
+    if let Err(error) = verify_database_quick_check(&backup).await {
+        log::error!(
+            "STORAGE: Rolling backup failed verification ({}); starting with an empty history",
+            sanitize_storage_diagnostic(&error)
+        );
+        return;
+    }
+
+    let source = backup.clone();
+    let destination = db_path.to_path_buf();
+    match tokio::task::spawn_blocking(move || std::fs::copy(&source, &destination)).await {
+        Ok(Ok(_)) => log::warn!(
+            "STORAGE: Restored clipboard history from rolling backup {}",
+            backup.display()
+        ),
+        Ok(Err(error)) => log::error!(
+            "STORAGE: Could not restore history backup: {error}; starting with an empty history"
+        ),
+        Err(error) => log::error!(
+            "STORAGE: Backup restore task failed: {error}; starting with an empty history"
+        ),
     }
 }
 
@@ -367,6 +403,23 @@ async fn refresh_rolling_backup(db_path: &Path) -> Result<(), String> {
         log::warn!("STORAGE: Failed to close backup checkpoint connection: {error}");
     }
 
+    // A rich backup must never be clobbered by a drastically smaller database
+    // (fresh file after a corruption event, wiped history). Unknown counts
+    // (missing tables on a brand-new file) fall through to a normal refresh.
+    if backup.exists() {
+        if let (Some(current), Some(existing)) = (
+            count_clips_in_file(db_path).await,
+            count_clips_in_file(&backup).await,
+        ) {
+            if should_skip_backup_refresh(current, existing) {
+                log::warn!(
+                    "STORAGE: Keeping existing history backup ({existing} clips); current database only has {current}"
+                );
+                return Ok(());
+            }
+        }
+    }
+
     let temporary = db_path.with_file_name(format!(
         "{}.bak.{}.{}.tmp",
         file_stem_lossy(db_path),
@@ -396,6 +449,31 @@ async fn refresh_rolling_backup(db_path: &Path) -> Result<(), String> {
         backup.display()
     );
     Ok(())
+}
+
+/// Refuse a backup refresh when it would replace a substantial backup with a
+/// near-empty database. The 10% threshold tolerates normal retention shrinkage
+/// while catching the reset-to-zero cases that matter.
+fn should_skip_backup_refresh(current_clips: i64, backup_clips: i64) -> bool {
+    backup_clips >= 100 && current_clips.saturating_mul(10) < backup_clips
+}
+
+async fn count_clips_in_file(path: &Path) -> Option<i64> {
+    use sqlx::Connection;
+
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(false)
+        .read_only(true);
+    let mut conn = sqlx::SqliteConnection::connect_with(&options).await.ok()?;
+    let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM clips WHERE is_deleted = 0")
+        .fetch_one(&mut conn)
+        .await
+        .ok();
+    if let Err(error) = conn.close().await {
+        log::warn!("STORAGE: Failed to close clip-count connection: {error}");
+    }
+    count
 }
 
 fn backup_is_fresh(backup: &Path) -> bool {
@@ -533,7 +611,8 @@ async fn add_column_if_missing(pool: &SqlitePool, sql: &str) -> Result<(), sqlx:
 mod tests {
     use super::{
         prepare_database_file, quarantine_database_files, rolling_backup_path,
-        sanitize_storage_diagnostic, Database,
+        sanitize_storage_diagnostic, should_skip_backup_refresh, verify_database_quick_check,
+        Database,
     };
     use crate::crypto::CryptoManager;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -752,6 +831,75 @@ mod tests {
         db.migrate().await.expect("fresh schema should apply");
         db.pool.close().await;
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn corrupt_database_is_restored_from_rolling_backup() {
+        let directory = temp_dir();
+        let database_path = directory.join("cubby.db");
+        let backup_path = rolling_backup_path(&database_path);
+
+        // Healthy backup with a recognizable row.
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&backup_path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t (name) VALUES ('survivor')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        std::fs::write(&database_path, b"this is not a sqlite database").unwrap();
+
+        prepare_database_file(&database_path)
+            .await
+            .expect("corrupt history should be quarantined and restored");
+
+        assert!(
+            database_path.exists(),
+            "database should be restored from the backup"
+        );
+        assert!(backup_path.exists(), "backup must survive the restore");
+        verify_database_quick_check(&database_path)
+            .await
+            .expect("restored database should be healthy");
+
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&database_path)
+            .create_if_missing(false);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let name: String = sqlx::query_scalar("SELECT name FROM t")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        assert_eq!(name, "survivor");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn backup_refresh_skips_when_current_is_drastically_smaller() {
+        // Reset-to-zero cases keep the rich backup.
+        assert!(should_skip_backup_refresh(0, 100));
+        assert!(should_skip_backup_refresh(5, 1000));
+        // Normal retention shrinkage still refreshes.
+        assert!(!should_skip_backup_refresh(50, 100));
+        assert!(!should_skip_backup_refresh(500, 1000));
+        // Small histories never block a refresh.
+        assert!(!should_skip_backup_refresh(0, 99));
     }
 
     #[tokio::test]

@@ -93,6 +93,44 @@ pub fn classify_secret(text: &str) -> Option<SecretKind> {
     None
 }
 
+/// True when `text` is shaped like a single credential rather than prose or an
+/// identifier: one whitespace-free token of password length mixing at least
+/// three character classes, or a [`classify_secret`] match.
+///
+/// Used to decide whether a clipboard auto-clear should forget the last
+/// capture (SOU-316): password managers copy exactly this shape, while notes,
+/// URLs, and file paths (anything with slashes) must never be forgotten just
+/// because some app cleared the clipboard. Prefers false negatives — an
+/// unmatched password stays in history, which is recoverable; deleting a
+/// user's note is not.
+pub fn looks_like_credential(text: &str) -> bool {
+    let trimmed = text.trim();
+    if classify_secret(trimmed).is_some() {
+        return true;
+    }
+
+    let length = trimmed.chars().count();
+    if !(8..=128).contains(&length) {
+        return false;
+    }
+    if trimmed
+        .chars()
+        .any(|c| c.is_whitespace() || c == '/' || c == '\\')
+    {
+        return false;
+    }
+
+    let has_lower = trimmed.chars().any(|c| c.is_ascii_lowercase());
+    let has_upper = trimmed.chars().any(|c| c.is_ascii_uppercase());
+    let has_digit = trimmed.chars().any(|c| c.is_ascii_digit());
+    let has_symbol = trimmed.chars().any(|c| !c.is_ascii_alphanumeric());
+    [has_lower, has_upper, has_digit, has_symbol]
+        .into_iter()
+        .filter(|present| *present)
+        .count()
+        >= 3
+}
+
 fn looks_like_private_key(text: &str) -> bool {
     text.contains("-----BEGIN")
         && (text.contains("PRIVATE KEY-----") || text.contains("OPENSSH PRIVATE KEY-----"))
@@ -323,6 +361,22 @@ mod tests {
         assert_eq!(classify_secret(&card_dashes), Some(SecretKind::PaymentCard));
         // Scattered digits plus a stray dash must not concatenate into a card.
         assert_eq!(classify_secret("order 4111 qty 1111-1111 ref 1111"), None);
+    }
+
+    #[test]
+    fn credential_shape_matches_passwords_not_prose() {
+        // Manager-generated password shapes.
+        assert!(looks_like_credential("Tr0ub4dor&3x"));
+        assert!(looks_like_credential("kX9#mPq2$vLn8!wZ"));
+        // Secrets classified by pattern still count.
+        let github = format!("ghp_{}", "abcdefghijklmnopqrstuvwxyz0123456789");
+        assert!(looks_like_credential(&github));
+        // Prose, URLs, paths, and short codes must never count.
+        assert!(!looks_like_credential("meet at 5pm tomorrow"));
+        assert!(!looks_like_credential("https://example.com:8080/page"));
+        assert!(!looks_like_credential("C:\\Users\\me\\file2.txt"));
+        assert!(!looks_like_credential("123456"));
+        assert!(!looks_like_credential("correcthorsebatterystaple"));
     }
 
     #[test]

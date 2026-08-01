@@ -952,6 +952,7 @@ pub async fn delete_clip(
             .await
             .map_err(|e| e.to_string())?;
     }
+    crate::clipboard::reset_capture_dedup();
     db.search_index.remove(&id);
     Ok(())
 }
@@ -1675,6 +1676,7 @@ pub async fn clear_unpinned_clips(db: tauri::State<'_, Arc<Database>>) -> Result
 pub async fn clear_all_clips(db: tauri::State<'_, Arc<Database>>) -> Result<(), String> {
     let (_, image_paths) = clear_clips_in_pool(&db.pool, false).await?;
     remove_clip_image_files(&db.image_dir, image_paths);
+    crate::clipboard::reset_capture_dedup();
     db.search_index.invalidate();
     Ok(())
 }
@@ -1683,12 +1685,17 @@ pub async fn clear_all_clips(db: tauri::State<'_, Arc<Database>>) -> Result<(), 
 pub async fn remove_duplicate_clips(db: tauri::State<'_, Arc<Database>>) -> Result<i64, String> {
     let pool = &db.pool;
 
+    // Keepers are the oldest *visible* copy per hash: a soft-deleted survivor
+    // would make the content vanish from the UI entirely. Pinned rows are never
+    // deleted, matching retention and clear-all.
     let result = sqlx::query(
         r#"
         DELETE FROM clips
-        WHERE id NOT IN (
+        WHERE is_pinned = 0
+          AND id NOT IN (
             SELECT MIN(id)
             FROM clips
+            WHERE is_deleted = 0
             GROUP BY content_hash
         )
     "#,
@@ -1700,6 +1707,7 @@ pub async fn remove_duplicate_clips(db: tauri::State<'_, Arc<Database>>) -> Resu
     cleanup_orphan_clip_image_files(pool, &db.image_dir).await?;
 
     if result.rows_affected() > 0 {
+        crate::clipboard::reset_capture_dedup();
         db.search_index.invalidate();
     }
 

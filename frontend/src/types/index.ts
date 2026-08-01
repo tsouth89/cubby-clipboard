@@ -63,6 +63,7 @@ export interface Settings {
   float_above_taskbar?: boolean;
   density?: 'compact' | 'comfortable';
   remote_paste_mode: 'copy_then_paste' | 'paste_as_keystrokes';
+  remote_clipboard_relay?: boolean;
   ignore_ghost_clips: boolean;
   skip_sensitive?: boolean;
   skip_likely_secrets?: boolean;

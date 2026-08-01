@@ -3,8 +3,8 @@ use tauri::{AppHandle, Emitter};
 use crate::database::Database;
 #[cfg(target_os = "windows")]
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use clipboard_rs::common::RustImage;
-use clipboard_rs::{Clipboard, ClipboardContext};
+use clipboard_rs::common::{RustImage, RustImageData};
+use clipboard_rs::{Clipboard, ClipboardContent, ClipboardContext};
 #[cfg(target_os = "windows")]
 use clipboard_win::Monitor;
 use once_cell::sync::Lazy;
@@ -56,6 +56,11 @@ static LAST_STABLE_HASH: Lazy<parking_lot::Mutex<Option<String>>> =
 /// the clipboard is auto-cleared shortly afterward (SOU-316).
 static LAST_ACCEPTED_CAPTURE: Lazy<parking_lot::Mutex<Option<RecentCapture>>> =
     Lazy::new(|| parking_lot::Mutex::new(None));
+/// Hash of the last capture the remote relay re-announced. A viewer that echoes
+/// our rewrite back (via its remote endpoint) must not trigger another relay,
+/// or Cubby and the viewer would ping-pong writes forever.
+static LAST_RELAYED_HASH: Lazy<parking_lot::Mutex<Option<String>>> =
+    Lazy::new(|| parking_lot::Mutex::new(None));
 pub static CLIPBOARD_SYNC: Lazy<Arc<tokio::sync::Mutex<()>>> =
     Lazy::new(|| Arc::new(tokio::sync::Mutex::new(())));
 
@@ -67,6 +72,12 @@ const CLIPBOARD_CLEAR_FORGET_WINDOW: Duration = Duration::from_secs(90);
 struct RecentCapture {
     uuid: String,
     captured_at: Instant,
+    /// Whether the captured text was credential-shaped at capture time. An
+    /// auto-clear only forgets credential-shaped captures: password managers
+    /// clear on a timer regardless of what is on the clipboard by then, so an
+    /// unconditional forget could delete an innocent note copied after the
+    /// password (the wrong-clip bug).
+    credential_like: bool,
 }
 
 /// Pure helper for SOU-316 unit tests: only empty clears within the window
@@ -118,6 +129,14 @@ pub struct ClipboardCaptureStatus {
 pub fn set_ignore_hash(hash: String) {
     let mut lock = IGNORE_HASH.lock();
     *lock = Some(hash);
+}
+
+/// Forget the consecutive-duplicate marker after history is deleted. Without
+/// this, deleting a clip and copying the same content again is silently
+/// dropped ("capture is broken" from the user's perspective): the marker still
+/// holds the deleted clip's hash and suppresses the re-copy.
+pub fn reset_capture_dedup() {
+    *LAST_STABLE_HASH.lock() = None;
 }
 
 fn unix_now_ms() -> u64 {
@@ -439,7 +458,11 @@ fn clipboard_is_cleared() -> bool {
             }
             match ctx.get_text() {
                 Ok(text) if !text.is_empty() => return false,
-                Ok(_) => return true,
+                // Empty text only counts as a clear when nothing else is on the
+                // clipboard. An empty CF_UNICODETEXT written alongside an app's
+                // private format is a normal copy of unsupported content, and
+                // treating it as a clear used to delete the previous capture.
+                Ok(_) => return clipboard_only_has_placeholder_text_formats(),
                 Err(_) => {
                     // No readable text. If there are no formats at all, it is a clear;
                     // otherwise something unsupported/custom remains — leave it alone.
@@ -473,6 +496,43 @@ fn clipboard_format_count_is_zero() -> bool {
 
 #[cfg(not(target_os = "windows"))]
 fn clipboard_format_count_is_zero() -> bool {
+    true
+}
+
+/// True when every format currently on the clipboard is one of the text
+/// placeholders Windows keeps or synthesizes for an empty-text write
+/// (CF_TEXT, CF_OEMTEXT, CF_UNICODETEXT, CF_LOCALE). A private/custom format
+/// alongside them means an app copied real content we simply cannot read.
+#[cfg(target_os = "windows")]
+fn clipboard_only_has_placeholder_text_formats() -> bool {
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EnumClipboardFormats, OpenClipboard,
+    };
+
+    const CF_TEXT: u32 = 1;
+    const CF_OEMTEXT: u32 = 7;
+    const CF_UNICODETEXT: u32 = 13;
+    const CF_LOCALE: u32 = 16;
+
+    if unsafe { OpenClipboard(None) }.is_err() {
+        // Contention: never treat an unreadable clipboard as a clear.
+        return false;
+    }
+    let mut only_placeholders = true;
+    let mut format = unsafe { EnumClipboardFormats(0) };
+    while format != 0 {
+        if !matches!(format, CF_TEXT | CF_OEMTEXT | CF_UNICODETEXT | CF_LOCALE) {
+            only_placeholders = false;
+            break;
+        }
+        format = unsafe { EnumClipboardFormats(format) };
+    }
+    let _ = unsafe { CloseClipboard() };
+    only_placeholders
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clipboard_only_has_placeholder_text_formats() -> bool {
     true
 }
 
@@ -670,6 +730,82 @@ fn read_clipboard_image_with_clipboard_rs(
 
 fn read_clipboard_image_fast() -> Result<ClipboardImageRead, String> {
     read_clipboard_image_with_clipboard_rs("clipboard-rs-image")
+}
+
+/// Relay only captures owned by a remote-control viewer, and never
+/// sensitive-tagged content: a rewrite would strip the
+/// `ExcludeClipboardContentFromMonitorProcessing` flag other monitors rely on.
+fn should_relay_capture(relay_enabled: bool, sensitive: bool, exe_name: Option<&str>) -> bool {
+    relay_enabled
+        && !sensitive
+        && exe_name.is_some_and(|exe| {
+            crate::paste_engine::paste_strategy_for_process(exe)
+                != crate::paste_engine::PasteStrategy::Standard
+        })
+}
+
+/// Rewrite a capture that originated in a remote-control viewer back to the
+/// clipboard under Cubby's ownership.
+///
+/// Remote viewers (NinjaOne's ncplayer, mstsc, ...) suppress clipboard updates
+/// owned by their own process to avoid sync loops, so a copy inside one remote
+/// session never reaches a second session on the same machine. A rewrite from a
+/// foreign process (Cubby) is accepted by every viewer window and synced into
+/// all sessions. Loop safety: the ignore hash swallows Cubby's own re-capture,
+/// and [`LAST_RELAYED_HASH`] stops viewer echoes from relaying again.
+fn relay_remote_capture(
+    clip_type: &str,
+    clip_content: &[u8],
+    full_image_content: Option<&[u8]>,
+    captured_formats: &[CapturedFormat],
+    clip_hash: &str,
+) {
+    {
+        let mut last = LAST_RELAYED_HASH.lock();
+        if last.as_deref() == Some(clip_hash) {
+            return;
+        }
+        *last = Some(clip_hash.to_string());
+    }
+
+    let mut contents = if clip_type == "image" {
+        let Some(png_bytes) = full_image_content else {
+            return;
+        };
+        match RustImageData::from_bytes(png_bytes) {
+            Ok(image) => vec![ClipboardContent::Image(image)],
+            Err(error) => {
+                log::warn!("CLIPBOARD: Relay skipped, image decode failed: {error}");
+                return;
+            }
+        }
+    } else {
+        vec![ClipboardContent::Text(
+            String::from_utf8_lossy(clip_content).to_string(),
+        )]
+    };
+    for format in captured_formats {
+        match format.name {
+            "html" => contents.push(ClipboardContent::Html(
+                String::from_utf8_lossy(&format.content).to_string(),
+            )),
+            "rtf" => contents.push(ClipboardContent::Rtf(
+                String::from_utf8_lossy(&format.content).to_string(),
+            )),
+            "files" => {
+                if let Ok(files) = serde_json::from_slice::<Vec<String>>(&format.content) {
+                    contents.push(ClipboardContent::Files(files));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    set_ignore_hash(clip_hash.to_string());
+    match ClipboardContext::new().and_then(|context| context.set(contents)) {
+        Ok(()) => log::info!("CLIPBOARD: Relayed remote-session capture under Cubby ownership"),
+        Err(error) => log::warn!("CLIPBOARD: Failed to relay remote capture: {error}"),
+    }
 }
 
 async fn process_clipboard_snapshot(
@@ -1151,10 +1287,29 @@ async fn process_clipboard_snapshot(
     }
 
     // Remember this capture so a short-lived auto-clear can forget it (SOU-316).
+    let credential_like = clip_type == "text"
+        && std::str::from_utf8(&clip_content).is_ok_and(crate::secrets::looks_like_credential);
     *LAST_ACCEPTED_CAPTURE.lock() = Some(RecentCapture {
         uuid: emitted_id.clone(),
         captured_at: Instant::now(),
+        credential_like,
     });
+
+    // Re-announce remote-viewer captures so a second remote session can paste
+    // them directly.
+    if should_relay_capture(
+        settings.remote_clipboard_relay,
+        sensitive,
+        exe_name.as_deref(),
+    ) {
+        relay_remote_capture(
+            clip_type,
+            &clip_content,
+            full_image_content.as_deref(),
+            &captured_formats,
+            &clip_hash,
+        );
+    }
 
     let emit_started = Instant::now();
     let _ = app.emit(
@@ -1226,6 +1381,15 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
         );
         return;
     };
+
+    if !recent.credential_like {
+        log::info!(
+            "CLIPBOARD: Clear sequence {} — keeping capture {} (not credential-shaped)",
+            sequence,
+            recent.uuid
+        );
+        return;
+    }
 
     let restore_marker = |recent: RecentCapture| {
         let mut lock = LAST_ACCEPTED_CAPTURE.lock();
@@ -1330,6 +1494,8 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
 
     crate::commands::remove_clip_image_files(&db.image_dir, file_path.into_iter().collect());
     db.search_index.remove(&recent.uuid);
+    // The forgotten clip's hash must not suppress a deliberate re-copy later.
+    reset_capture_dedup();
 
     log::info!(
         "CLIPBOARD: Forgot capture {} after clipboard clear (sequence {}, within {}s window)",
@@ -1768,11 +1934,25 @@ unsafe fn extract_icon(path: &str) -> Option<String> {
 mod tests {
     use super::{
         calculate_hash, capture_state_name, capture_text, clipboard_retry_delay,
-        next_listener_backoff, should_forget_recent_capture, CapturedContent,
+        next_listener_backoff, should_forget_recent_capture, should_relay_capture, CapturedContent,
         CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED,
         CLIPBOARD_CLEAR_FORGET_WINDOW,
     };
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn relays_only_remote_viewer_captures() {
+        assert!(should_relay_capture(true, false, Some("ncplayer.exe")));
+        assert!(should_relay_capture(true, false, Some("mstsc.exe")));
+        assert!(!should_relay_capture(true, false, Some("notepad.exe")));
+        assert!(!should_relay_capture(true, false, None));
+    }
+
+    #[test]
+    fn relay_respects_setting_and_sensitive_flag() {
+        assert!(!should_relay_capture(false, false, Some("ncplayer.exe")));
+        assert!(!should_relay_capture(true, true, Some("ncplayer.exe")));
+    }
 
     #[test]
     fn forget_window_accepts_clears_within_bound() {

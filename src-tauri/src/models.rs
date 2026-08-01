@@ -15,6 +15,13 @@ pub struct AppSettings {
     pub hotkey: String,
     pub replace_win_v: bool,
     pub remote_paste_mode: String,
+    // Re-announce clipboard content captured from a remote-control viewer
+    // (NinjaOne, RDP, ...) under Cubby's ownership. Viewers ignore clipboard
+    // writes made by their own process, so copy in one remote session never
+    // reaches a second session; a foreign-owner rewrite makes every session
+    // sync it. Only fires for remote-viewer sources, so local rich-format
+    // copies (Office paste-special) are never re-owned.
+    pub remote_clipboard_relay: bool,
     pub ignore_ghost_clips: bool,
     pub startup_with_windows: bool,
     pub round_corners: bool,
@@ -35,7 +42,10 @@ pub struct AppSettings {
     // When the clipboard is cleared shortly after a capture (typical of password
     // manager browser extensions that auto-clear), forget that last clip. On by
     // default: closes the browser-extension gap that ignored-apps cannot cover.
-    // Only empty/clear events qualify — a normal next copy never deletes the previous item.
+    // Only empty/clear events qualify — a normal next copy never deletes the
+    // previous item — and only credential-shaped captures are forgotten, so a
+    // manager's timer-based clear cannot delete an unrelated note copied after
+    // the password.
     pub forget_on_clipboard_clear: bool,
     // True after the built-in password-manager ignore list has been seeded once.
     // Clearing an entry in Settings must stick across restarts.
@@ -57,6 +67,7 @@ impl Default for AppSettings {
             hotkey: "Win+Alt+V".to_string(),
             replace_win_v: true,
             remote_paste_mode: "copy_then_paste".to_string(),
+            remote_clipboard_relay: true,
             ignore_ghost_clips: false,
             startup_with_windows: false,
             round_corners: true,

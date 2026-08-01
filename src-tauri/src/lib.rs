@@ -618,6 +618,42 @@ pub fn animate_window_hide(
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
+        // Another show/hide is in flight. A cosmetic hide (no callback) can be
+        // skipped like before — the blur handler and outside-click watcher will
+        // fire again. But a callback carries a paste's focus-restore + Ctrl+V
+        // (or refresh_window's re-show): dropping it silently used to leave the
+        // clipboard set with nothing pasted and the flyout stuck open. Wait
+        // briefly for the lock, then hide and run the callback regardless — a
+        // missed animation frame is cosmetic, a missed paste is not.
+        let Some(callback) = on_done else {
+            return;
+        };
+        let window = window.clone();
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
+            let acquired = loop {
+                if IS_ANIMATING
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    break true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            };
+            if !acquired {
+                log::warn!(
+                    "WINDOW: Hide callback proceeding without animation lock (still held after 1s)"
+                );
+            }
+            let _ = window.hide();
+            if acquired {
+                IS_ANIMATING.store(false, Ordering::SeqCst);
+            }
+            callback();
+        });
         return;
     }
 

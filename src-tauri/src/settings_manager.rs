@@ -21,9 +21,12 @@ impl SettingsManager {
         let load_path = Self::resolve_settings_load_path(app, &base, &path);
 
         let settings = if load_path.exists() {
-            match fs::read_to_string(&load_path) {
-                Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-                Err(_) => AppSettings::default(),
+            match fs::read_to_string(&load_path)
+                .map_err(|e| e.to_string())
+                .and_then(|content| serde_json::from_str(&content).map_err(|e| e.to_string()))
+            {
+                Ok(settings) => settings,
+                Err(error) => Self::recover_from_unreadable_settings(&load_path, &error),
             }
         } else {
             // One-shot import from the old SQLite settings tables. After the
@@ -85,6 +88,37 @@ impl SettingsManager {
                     legacy
                 }
             }
+        }
+    }
+
+    /// A settings file that exists but cannot be parsed is evidence of a bad
+    /// write (power loss, disk full), not of user intent. Preserve the file for
+    /// inspection and fall back to defaults with retention disabled — silently
+    /// adopting the default 30-day window would mass-delete the history of a
+    /// user who had chosen "keep forever".
+    fn recover_from_unreadable_settings(load_path: &Path, error: &str) -> AppSettings {
+        let backup = load_path.with_extension(format!(
+            "json.corrupt-{}",
+            chrono::Local::now().format("%Y%m%d-%H%M%S")
+        ));
+        match fs::copy(load_path, &backup) {
+            Ok(_) => log::error!(
+                "SETTINGS: settings.json is unreadable ({error}); preserved a copy at {} and loading safe defaults",
+                backup.display()
+            ),
+            Err(copy_error) => log::error!(
+                "SETTINGS: settings.json is unreadable ({error}) and could not be preserved ({copy_error}); loading safe defaults"
+            ),
+        }
+        Self::safe_default_settings()
+    }
+
+    /// Defaults used when the user's real preferences are unknown: identical to
+    /// [`AppSettings::default`] except nothing is ever auto-deleted.
+    fn safe_default_settings() -> AppSettings {
+        AppSettings {
+            auto_delete_days: 0,
+            ..AppSettings::default()
         }
     }
 
@@ -163,12 +197,86 @@ impl SettingsManager {
         if let Some(parent) = self.file_path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        fs::write(&self.file_path, json).map_err(|e| e.to_string())?;
-        {
-            let mut lock = self.settings.write().unwrap();
-            *lock = new_settings;
+        // Hold the write lock across the file write so concurrent saves cannot
+        // interleave, and swap in a temp file so a crash mid-write never leaves
+        // a truncated settings.json (a truncated file used to silently reset
+        // every preference on the next launch).
+        let mut lock = self.settings.write().unwrap();
+        let tmp_path = self.file_path.with_extension("json.tmp");
+        fs::write(&tmp_path, json).map_err(|e| e.to_string())?;
+        if let Err(error) = fs::rename(&tmp_path, &self.file_path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(error.to_string());
         }
+        *lock = new_settings;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_defaults_never_auto_delete() {
+        let recovered = SettingsManager::safe_default_settings();
+        assert_eq!(recovered.auto_delete_days, 0);
+        assert_eq!(recovered.max_items, 0);
+    }
+
+    #[test]
+    fn recovery_preserves_corrupt_file_and_disables_retention() {
+        let dir =
+            std::env::temp_dir().join(format!("cubby-settings-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(&path, "{\"theme\": \"dark\", TRUNCATED").unwrap();
+
+        let recovered = SettingsManager::recover_from_unreadable_settings(&path, "parse error");
+        assert_eq!(recovered.auto_delete_days, 0);
+
+        let corrupt_copies = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("json.corrupt-")
+            })
+            .count();
+        assert_eq!(corrupt_copies, 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_replaces_file_atomically_and_updates_cache() {
+        let dir =
+            std::env::temp_dir().join(format!("cubby-settings-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(
+            &path,
+            serde_json::to_string(&AppSettings::default()).unwrap(),
+        )
+        .unwrap();
+
+        let manager = SettingsManager {
+            file_path: path.clone(),
+            settings: RwLock::new(AppSettings::default()),
+        };
+        let mut updated = AppSettings::default();
+        updated.auto_delete_days = 365;
+        manager.save(updated).unwrap();
+
+        assert_eq!(manager.get().auto_delete_days, 365);
+        let on_disk: AppSettings =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk.auto_delete_days, 365);
+        assert!(!path.with_extension("json.tmp").exists());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
