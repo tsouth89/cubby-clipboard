@@ -15,6 +15,35 @@ struct ShortcutConfiguration {
 static CURRENT_CONFIGURATION: Lazy<Mutex<ShortcutConfiguration>> =
     Lazy::new(|| Mutex::new(ShortcutConfiguration::default()));
 
+/// What startup shortcut recovery did, surfaced to the flyout as a toast.
+/// Recovery is session-only — the user's configured hotkey is never persisted
+/// over — so the user must be told which hotkey is actually active.
+#[derive(Clone, serde::Serialize)]
+pub struct HotkeyStartupNotice {
+    /// "fallback_hotkey" | "win_v_disabled" | "failed"
+    pub kind: String,
+    pub requested_hotkey: String,
+    pub active_hotkey: Option<String>,
+}
+
+static STARTUP_NOTICE: Lazy<Mutex<Option<HotkeyStartupNotice>>> = Lazy::new(|| Mutex::new(None));
+
+pub fn record_startup_notice(kind: &str, requested_hotkey: &str, active_hotkey: Option<&str>) {
+    *STARTUP_NOTICE.lock().unwrap() = Some(HotkeyStartupNotice {
+        kind: kind.to_string(),
+        requested_hotkey: requested_hotkey.to_string(),
+        active_hotkey: active_hotkey.map(str::to_string),
+    });
+}
+
+/// One-shot: the flyout fetches this on mount and shows it on first focus.
+/// The setup hook runs before the webview loads, so an emitted event would be
+/// lost — pull is the reliable direction.
+#[tauri::command]
+pub fn get_hotkey_startup_notice() -> Option<HotkeyStartupNotice> {
+    STARTUP_NOTICE.lock().unwrap().take()
+}
+
 fn parser_hotkey(hotkey: &str) -> String {
     hotkey
         .split('+')

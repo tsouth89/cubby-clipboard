@@ -14,6 +14,7 @@ static IS_ANIMATING: AtomicBool = AtomicBool::new(false);
 static LAST_SHOW_TIME: AtomicI64 = AtomicI64::new(0);
 static SHOW_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+mod cf_html;
 mod clipboard;
 mod commands;
 mod constants;
@@ -294,6 +295,12 @@ pub fn run_app() {
 
             let manager = app_handle.state::<Arc<SettingsManager>>();
             let mut shortcut_settings = manager.get();
+            let user_hotkey = shortcut_settings.hotkey.clone();
+            // Startup conflicts recover for this session only and are surfaced
+            // as a toast. The user's configured hotkey is never persisted over:
+            // a transient conflict at boot (another app briefly holding the
+            // key) must not permanently rewrite their choice, and the next
+            // launch retries the original settings.
             let mut shortcuts_ready = match shortcuts::register_shortcuts(
                 &app_handle,
                 &shortcut_settings.hotkey,
@@ -310,9 +317,16 @@ pub fn run_app() {
                         )
                         .is_ok();
 
-                    let recovered = if replacement_disabled {
+                    if replacement_disabled {
                         shortcut_settings.replace_win_v = false;
-                        log::warn!("SHORTCUT: Disabled Win+V replacement after startup conflict");
+                        log::warn!(
+                            "SHORTCUT: Disabled Win+V replacement for this session after startup conflict"
+                        );
+                        shortcuts::record_startup_notice(
+                            "win_v_disabled",
+                            &user_hotkey,
+                            Some(&user_hotkey),
+                        );
                         true
                     } else {
                         let fallback = "Win+Ctrl+Alt+V";
@@ -321,22 +335,18 @@ pub fn run_app() {
                         {
                             shortcut_settings.hotkey = fallback.to_string();
                             shortcut_settings.replace_win_v = false;
-                            log::warn!("SHORTCUT: Fell back to {}", fallback);
+                            log::warn!("SHORTCUT: Fell back to {} for this session", fallback);
+                            shortcuts::record_startup_notice(
+                                "fallback_hotkey",
+                                &user_hotkey,
+                                Some(fallback),
+                            );
                             true
                         } else {
                             shortcut_settings.replace_win_v = false;
-                            log::error!("SHORTCUT: No startup shortcut could be registered");
                             false
                         }
-                    };
-
-                    if let Err(save_error) = manager.save(shortcut_settings.clone()) {
-                        log::error!(
-                            "SHORTCUT: Failed to persist recovered shortcut settings: {}",
-                            save_error
-                        );
                     }
-                    recovered
                 }
             };
 
@@ -357,12 +367,17 @@ pub fn run_app() {
                     false,
                 )
                 .is_ok();
-                if let Err(save_error) = manager.save(shortcut_settings.clone()) {
-                    log::error!("WIN_V: Failed to persist disabled state: {}", save_error);
+                if shortcuts_ready {
+                    shortcuts::record_startup_notice(
+                        "win_v_disabled",
+                        &user_hotkey,
+                        Some(&shortcut_settings.hotkey),
+                    );
                 }
             }
             if !shortcuts_ready {
                 log::error!("SHORTCUT: Cubby started without a working global shortcut");
+                shortcuts::record_startup_notice("failed", &user_hotkey, None);
             }
             let handle_for_clip = app_handle.clone();
             let db_for_clip = db_for_clipboard.clone();
@@ -446,7 +461,8 @@ pub fn run_app() {
             ocr_queue::get_ocr_queue_status,
             ocr_queue::set_ocr_queue_paused,
             ocr_queue::retry_failed_ocr,
-            clipboard::get_clipboard_capture_status
+            clipboard::get_clipboard_capture_status,
+            shortcuts::get_hotkey_startup_notice
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

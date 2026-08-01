@@ -377,6 +377,117 @@ fn spawn_listener_watchdog() {
     }
 }
 
+/// Outcome of trying to ingest the clipboard for one sequence number.
+#[cfg(target_os = "windows")]
+enum CaptureAttempt {
+    /// A snapshot or clear event was queued (or the payload is unsupported);
+    /// the sequence was marked handled.
+    Handled,
+    /// Supported content is present but every clipboard open lost the race.
+    /// The sequence stays unhandled so the watchdog retries it.
+    Deferred,
+}
+
+/// Try to materialize and queue the clipboard content behind `sequence`.
+///
+/// The sequence is marked handled only after a successful materialize (or a
+/// confirmed clear / unsupported payload). A contended read leaves it
+/// unhandled: the watchdog then sees it stale after [`STALE_LISTENER_AFTER`]
+/// and restarts the listener, whose session start retries this capture instead
+/// of silently dropping the copy.
+///
+/// `Err(())` means the snapshot consumer is gone (process teardown).
+#[cfg(target_os = "windows")]
+fn capture_clipboard_update(
+    sequence: u32,
+    event_tx: &tokio::sync::mpsc::UnboundedSender<ClipboardListenerEvent>,
+) -> Result<CaptureAttempt, ()> {
+    let started = Instant::now();
+    let source_app_identity = get_clipboard_owner_identity();
+    let sensitive = clipboard_marked_sensitive();
+
+    if let Some((content, formats)) = materialize_clipboard_content() {
+        note_clipboard_event(sequence);
+        let snapshot = ClipboardSnapshot {
+            sequence,
+            source_app_identity,
+            content,
+            formats,
+            materialize_ms: started.elapsed().as_millis(),
+            sensitive,
+        };
+        return event_tx
+            .send(ClipboardListenerEvent::Content(snapshot))
+            .map(|_| CaptureAttempt::Handled)
+            .map_err(|_| ());
+    }
+
+    if clipboard_is_cleared() {
+        // Empty clipboard (or empty text with no image/files). This is
+        // the password-manager auto-clear signal; never treat a new
+        // non-empty copy as a clear.
+        note_clipboard_event(sequence);
+        return event_tx
+            .send(ClipboardListenerEvent::Cleared { sequence })
+            .map(|_| CaptureAttempt::Handled)
+            .map_err(|_| ());
+    }
+
+    if clipboard_has_supported_format() {
+        log::warn!(
+            "CLIPBOARD: Could not materialize sequence {} (clipboard contended); deferring for watchdog retry",
+            sequence
+        );
+        return Ok(CaptureAttempt::Deferred);
+    }
+
+    // Nothing we support (custom/private formats only). Mark handled so the
+    // watchdog does not treat an ignored format as a dead listener.
+    note_clipboard_event(sequence);
+    log::debug!(
+        "CLIPBOARD: Sequence {} contained no supported text or image payload",
+        sequence
+    );
+    Ok(CaptureAttempt::Handled)
+}
+
+/// True when the clipboard advertises a format `materialize_clipboard_content`
+/// can read (text, files, or an image). Used to tell "unsupported payload"
+/// (mark handled) apart from "supported but contended" (defer and retry).
+#[cfg(target_os = "windows")]
+fn clipboard_has_supported_format() -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::DataExchange::{
+        IsClipboardFormatAvailable, RegisterClipboardFormatW,
+    };
+
+    const CF_TEXT: u32 = 1;
+    const CF_BITMAP: u32 = 2;
+    const CF_DIB: u32 = 8;
+    const CF_UNICODETEXT: u32 = 13;
+    const CF_HDROP: u32 = 15;
+    const CF_DIBV5: u32 = 17;
+
+    if [
+        CF_UNICODETEXT,
+        CF_TEXT,
+        CF_HDROP,
+        CF_DIB,
+        CF_DIBV5,
+        CF_BITMAP,
+    ]
+    .into_iter()
+    .any(|format| unsafe { IsClipboardFormatAvailable(format) }.is_ok())
+    {
+        return true;
+    }
+
+    // Some producers put only a registered "PNG" entry on the clipboard.
+    let name: Vec<u16> = "PNG".encode_utf16().chain(std::iter::once(0)).collect();
+    let png_format = unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) };
+    png_format != 0 && unsafe { IsClipboardFormatAvailable(png_format) }.is_ok()
+}
+
 #[cfg(target_os = "windows")]
 fn run_listener_session(
     monitor: &mut Monitor,
@@ -385,48 +496,10 @@ fn run_listener_session(
     loop {
         match monitor.recv() {
             Ok(true) => {
-                let started = Instant::now();
                 let sequence =
                     unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
-                // Always mark the notification as seen, even when the payload is
-                // unsupported — otherwise the watchdog would treat ignored formats
-                // as a silent listener death.
-                note_clipboard_event(sequence);
-
-                let source_app_identity = get_clipboard_owner_identity();
-                let sensitive = clipboard_marked_sensitive();
-
-                if let Some((content, formats)) = materialize_clipboard_content() {
-                    let snapshot = ClipboardSnapshot {
-                        sequence,
-                        source_app_identity,
-                        content,
-                        formats,
-                        materialize_ms: started.elapsed().as_millis(),
-                        sensitive,
-                    };
-
-                    if event_tx
-                        .send(ClipboardListenerEvent::Content(snapshot))
-                        .is_err()
-                    {
-                        return ListenerSessionExit::ConsumerGone;
-                    }
-                } else if clipboard_is_cleared() {
-                    // Empty clipboard (or empty text with no image/files). This is
-                    // the password-manager auto-clear signal; never treat a new
-                    // non-empty copy as a clear.
-                    if event_tx
-                        .send(ClipboardListenerEvent::Cleared { sequence })
-                        .is_err()
-                    {
-                        return ListenerSessionExit::ConsumerGone;
-                    }
-                } else {
-                    log::debug!(
-                        "CLIPBOARD: Sequence {} contained no supported text or image payload",
-                        sequence
-                    );
+                if capture_clipboard_update(sequence, event_tx).is_err() {
+                    return ListenerSessionExit::ConsumerGone;
                 }
             }
             Ok(false) => return ListenerSessionExit::RestartRequested,
@@ -548,15 +621,19 @@ fn clipboard_only_has_placeholder_text_formats() -> bool {
 /// Tradeoffs (SOU-218):
 /// - Forever-restart + capped backoff prefers availability over giving up.
 /// - Watchdog recreates the monitor when the clipboard sequence advances but no
-///   event arrives for [`STALE_LISTENER_AFTER`]. That can miss copies for up to
-///   ~5–7s after a silent death (sleep/Explorer), but avoids power-session Win32
+///   event arrives for [`STALE_LISTENER_AFTER`]. Capture can lag up to ~5–7s
+///   after a silent death (sleep/Explorer), but avoids power-session Win32
 ///   surface area and toast spam.
+/// - Every session start after the first catches up on a sequence the previous
+///   session missed (restart window) or deferred (contended materialize), so
+///   those copies are ingested late rather than lost.
 /// - Consumer channel close stops the supervisor (process teardown).
 #[cfg(target_os = "windows")]
 fn run_native_listener(event_tx: tokio::sync::mpsc::UnboundedSender<ClipboardListenerEvent>) {
     spawn_listener_watchdog();
 
     let mut backoff = INITIAL_LISTENER_BACKOFF;
+    let mut first_session = true;
     loop {
         set_capture_state(CAPTURE_STATE_RESTARTING);
 
@@ -577,7 +654,25 @@ fn run_native_listener(event_tx: tokio::sync::mpsc::UnboundedSender<ClipboardLis
 
         let current_sequence =
             unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
-        note_clipboard_event(current_sequence);
+        if first_session {
+            // Don't ingest whatever was on the clipboard before Cubby started;
+            // only copies made while running belong in history.
+            note_clipboard_event(current_sequence);
+            first_session = false;
+        } else if current_sequence != LAST_HANDLED_SEQUENCE.load(Ordering::SeqCst) {
+            // A copy landed while the listener was down, or a previous
+            // materialize was deferred under contention. Catch up now instead
+            // of stamping the sequence handled and losing the copy.
+            log::info!(
+                "CLIPBOARD: Catching up on clipboard sequence {} missed during listener restart",
+                current_sequence
+            );
+            if capture_clipboard_update(current_sequence, &event_tx).is_err() {
+                record_capture_error("snapshot consumer stopped; capture supervisor exiting");
+                set_capture_state(CAPTURE_STATE_STOPPED);
+                return;
+            }
+        }
         set_capture_state(CAPTURE_STATE_LISTENING);
         log::info!("CLIPBOARD: Native WM_CLIPBOARDUPDATE listener started");
 

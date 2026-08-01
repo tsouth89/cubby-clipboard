@@ -53,7 +53,10 @@ export function useKeyboard(options: KeyboardOptions) {
         return;
       }
 
-      if (!isEditing && e.key === 'p' && !e.metaKey && !e.ctrlKey && current.onPin) {
+      // Ctrl+P, not bare "p": every printable key is claimed by type-to-search
+      // (App's focusSearchOnTyping), so a bare-letter binding here would fire
+      // alongside it — typing "password" used to toggle pin state.
+      if (canNavigateHistory && (e.ctrlKey || e.metaKey) && e.key === 'p' && current.onPin) {
         e.preventDefault();
         current.onPin();
         return;

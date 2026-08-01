@@ -43,6 +43,10 @@ export function ClipList({
 }: ClipListProps) {
   const { t } = useTranslation();
   const listRef = useRef<HTMLDivElement>(null);
+  // Arrow-key navigation can scroll a card under a stationary cursor and fire
+  // mouseenter. A mousemove, including the first one after opening the flyout,
+  // is direct evidence of pointer intent and may safely change selection.
+  const handleCardHover = (clipId: string) => () => onSelectClip(clipId);
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: 0 });
@@ -113,7 +117,7 @@ export function ClipList({
             clip={clip}
             density={density}
             isSelected={selectedClipId === clip.id}
-            onSelect={() => onSelectClip(clip.id)}
+            onHover={handleCardHover(clip.id)}
             onPaste={() => onPaste(clip.id)}
             onCopy={() => onCopy(clip.id)}
             onTogglePin={() => onTogglePin(clip.id)}

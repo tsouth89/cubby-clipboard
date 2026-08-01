@@ -10,7 +10,9 @@ interface ClipCardProps {
   clip: ClipboardItem;
   density: 'compact' | 'comfortable';
   isSelected: boolean;
-  onSelect: () => void;
+  /** Fired only on real mouse movement. A card sliding under a stationary
+   *  cursor during keyboard navigation must not steal selection. */
+  onHover: () => void;
   onPaste: () => void;
   onCopy: () => void;
   onTogglePin: () => void;
@@ -70,7 +72,7 @@ export const ClipCard = memo(function ClipCard({
   clip,
   density,
   isSelected,
-  onSelect,
+  onHover,
   onPaste,
   onCopy,
   onTogglePin,
@@ -130,7 +132,7 @@ export const ClipCard = memo(function ClipCard({
       data-selected={isSelected}
       role="listitem"
       aria-current={isSelected ? 'true' : undefined}
-      onMouseEnter={onSelect}
+      onMouseMove={onHover}
       onClick={onPaste}
       onContextMenu={(event) => {
         event.preventDefault();
