@@ -191,7 +191,10 @@
     "clearUnpinnedSuccess_one": "Cleared {{count}} unpinned item",
     "clearUnpinnedSuccess_other": "Cleared {{count}} unpinned items",
     "clearAllSuccess": "Clipboard history cleared",
-    "clearFailed": "Failed to clear clipboard history"
+    "clearFailed": "Failed to clear clipboard history",
+    "hotkeyFallback": "{{requested}} is in use by another app. Using {{active}} for this session — your setting is unchanged.",
+    "hotkeyWinVDisabled": "Win+V replacement is unavailable right now. Open Cubby with {{hotkey}} for this session.",
+    "hotkeyFailed": "No global hotkey could be registered. Open Cubby from the tray icon and try a different hotkey in Settings."
   },
   "clearHistory": {
     "unpinnedTitle": "Clear unpinned items?",
