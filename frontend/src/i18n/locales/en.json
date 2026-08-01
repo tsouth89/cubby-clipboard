@@ -84,6 +84,8 @@
     "startupWithWindows": "Startup with Windows",
     "startupWithWindowsDesc": "Automatically start when Windows boots",
     "startupWithWindowsPortable": "Not available in the portable version (it never touches the registry).",
+    "startupWithWindowsStore": "Not available in the Microsoft Store version. Windows manages Store app startup permissions.",
+    "startupWithWindowsError": "Cubby could not read Windows startup permissions. Restart Cubby and try again.",
     "roundCorners": "Rounded Corners",
     "roundCornersDesc": "Use rounded corners for the Cubby flyout.",
     "ignoreGhostClips": "Ignore Ghost Clips",

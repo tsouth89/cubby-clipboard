@@ -14,6 +14,25 @@ static IS_ANIMATING: AtomicBool = AtomicBool::new(false);
 static LAST_SHOW_TIME: AtomicI64 = AtomicI64::new(0);
 static SHOW_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// Releases the show/hide lock even if a worker unwinds. A detached window
+/// thread panic must not leave Cubby permanently unable to open again.
+struct AnimationGuard;
+
+impl AnimationGuard {
+    fn acquire() -> Option<Self> {
+        IS_ANIMATING
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for AnimationGuard {
+    fn drop(&mut self) {
+        IS_ANIMATING.store(false, Ordering::SeqCst);
+    }
+}
+
 mod cf_html;
 mod clipboard;
 mod commands;
@@ -114,8 +133,9 @@ pub fn run_app() {
     {
         builder = builder.plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
-            Some(vec!["--flag1", "--flag2"]),
+            None,
         ));
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     }
 
     builder
@@ -129,7 +149,6 @@ pub fn run_app() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(db_arc.clone())
         .on_window_event(|window, event| {
@@ -491,12 +510,9 @@ pub fn position_window_from_taskbar(window: &tauri::WebviewWindow) {
 }
 
 pub fn animate_window_show(window: &tauri::WebviewWindow, anchor: ShowAnchor) {
-    if IS_ANIMATING
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
+    let Some(animation_guard) = AnimationGuard::acquire() else {
         return;
-    }
+    };
 
     LAST_SHOW_TIME.store(chrono::Local::now().timestamp_millis(), Ordering::SeqCst);
     let show_generation = SHOW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
@@ -510,6 +526,7 @@ pub fn animate_window_show(window: &tauri::WebviewWindow, anchor: ShowAnchor) {
     remember_foreground_window(&window);
 
     std::thread::spawn(move || {
+        let _animation_guard = animation_guard;
         if let Some(monitor) = get_monitor_at_cursor(&window) {
             let scale_factor = monitor.scale_factor();
             let work_area = monitor.work_area();
@@ -587,7 +604,6 @@ pub fn animate_window_show(window: &tauri::WebviewWindow, anchor: ShowAnchor) {
                 watch_for_outside_click(window.clone(), show_generation);
             }
         }
-        IS_ANIMATING.store(false, Ordering::SeqCst);
     });
 }
 
@@ -630,10 +646,7 @@ pub fn animate_window_hide(
     window: &tauri::WebviewWindow,
     on_done: Option<Box<dyn FnOnce() + Send>>,
 ) {
-    if IS_ANIMATING
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
+    let Some(animation_guard) = AnimationGuard::acquire() else {
         // Another show/hide is in flight. A cosmetic hide (no callback) can be
         // skipped like before — the blur handler and outside-click watcher will
         // fire again. But a callback carries a paste's focus-restore + Ctrl+V
@@ -647,37 +660,33 @@ pub fn animate_window_hide(
         let window = window.clone();
         std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
-            let acquired = loop {
-                if IS_ANIMATING
-                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-                {
-                    break true;
+            let animation_guard = loop {
+                if let Some(guard) = AnimationGuard::acquire() {
+                    break Some(guard);
                 }
                 if std::time::Instant::now() >= deadline {
-                    break false;
+                    break None;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             };
-            if !acquired {
+            if animation_guard.is_none() {
                 log::warn!(
                     "WINDOW: Hide callback proceeding without animation lock (still held after 1s)"
                 );
             }
             let _ = window.hide();
-            if acquired {
-                IS_ANIMATING.store(false, Ordering::SeqCst);
-            }
+            drop(animation_guard);
             callback();
         });
         return;
-    }
+    };
 
     let window = window.clone();
 
     std::thread::spawn(move || {
+        let animation_guard = animation_guard;
         let _ = window.hide();
-        IS_ANIMATING.store(false, Ordering::SeqCst);
+        drop(animation_guard);
 
         if let Some(callback) = on_done {
             callback();

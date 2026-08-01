@@ -2,6 +2,19 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
+## v1.2.4
+
+### Added
+- Remote-session clipboard relay so a copy in one supported remote-control session can sync into another, with privacy gating and an opt-out in Settings
+
+### Fixed
+- Preserve valid rich HTML, exact whitespace, and retryable clipboard updates instead of silently losing or altering copied content
+- Make paste target selection, content filters, Ctrl+P pinning, held-modifier handling, and hotkey-conflict recovery behave predictably
+- Recover unreadable settings and damaged history safely, keep rolling backups refreshing on Windows, and avoid dropping paste callbacks during window transitions
+- Report failed Windows startup changes instead of showing a saved setting that Windows did not apply
+- Keep Microsoft Store builds under Store-managed startup and update behavior without unsupported in-app controls
+- Update the reachable `event-listener` dependency to the patched release for RUSTSEC-2026-0221
+
 ## v1.2.3
 
 ### Added

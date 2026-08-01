@@ -9,24 +9,52 @@ pub async fn get_settings(app: AppHandle) -> Result<serde_json::Value, String> {
     let settings = manager.get();
     let mut value = serde_json::to_value(&settings).map_err(|e| e.to_string())?;
 
-    // Portable mode never touches the registry, so autostart is unavailable.
+    // Portable and Store builds deliberately omit registry autostart. Expose
+    // capabilities explicitly so the frontend cannot offer controls that the
+    // current distribution cannot honor.
     let portable = crate::portable_data_dir().is_some();
+    let store_build = cfg!(feature = "app-store");
+    let startup_available = !portable && !store_build;
     if let Some(obj) = value.as_object_mut() {
         obj.insert("is_portable".to_string(), serde_json::json!(portable));
-        if portable {
+        obj.insert(
+            "startup_available".to_string(),
+            serde_json::json!(startup_available),
+        );
+        obj.insert(
+            "self_update_available".to_string(),
+            serde_json::json!(!store_build),
+        );
+        if !startup_available {
             obj.insert("startup_with_windows".to_string(), serde_json::json!(false));
+            obj.insert(
+                "startup_unavailable_reason".to_string(),
+                serde_json::json!(if portable { "portable" } else { "app_store" }),
+            );
         }
     }
 
     #[cfg(not(feature = "app-store"))]
     if !portable {
         use tauri_plugin_autostart::ManagerExt;
-        if let Ok(is_enabled) = app.autolaunch().is_enabled() {
-            if let Some(obj) = value.as_object_mut() {
-                obj.insert(
-                    "startup_with_windows".to_string(),
-                    serde_json::json!(is_enabled),
-                );
+        match app.autolaunch().is_enabled() {
+            Ok(is_enabled) => {
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert(
+                        "startup_with_windows".to_string(),
+                        serde_json::json!(is_enabled),
+                    );
+                }
+            }
+            Err(error) => {
+                log::error!("SETTINGS: Could not read Windows startup state: {error}");
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("startup_available".to_string(), serde_json::json!(false));
+                    obj.insert(
+                        "startup_unavailable_reason".to_string(),
+                        serde_json::json!("error"),
+                    );
+                }
             }
         }
     }
@@ -49,6 +77,26 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
     new_settings.ignored_apps = current.ignored_apps.clone();
     new_settings.default_sensitive_apps_seeded = current.default_sensitive_apps_seeded;
 
+    let portable = crate::portable_data_dir().is_some();
+    if portable || cfg!(feature = "app-store") {
+        // Never persist a capability the current build cannot apply. This also
+        // clears a stale installed-build preference after switching channels.
+        new_settings.startup_with_windows = false;
+    }
+
+    #[cfg(not(feature = "app-store"))]
+    let autostart_transition = if portable {
+        None
+    } else {
+        use tauri_plugin_autostart::ManagerExt;
+        let active = app
+            .autolaunch()
+            .is_enabled()
+            .map_err(|error| format!("Could not read Windows startup state: {error}"))?;
+        (active != new_settings.startup_with_windows)
+            .then_some((active, new_settings.startup_with_windows))
+    };
+
     let shortcut_settings_changed = new_settings.hotkey != current.hotkey
         || new_settings.replace_win_v != current.replace_win_v;
     if shortcut_settings_changed {
@@ -67,9 +115,17 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
             new_settings.replace_win_v,
             Some(new_settings.hotkey.clone()),
         ) {
-            let _ =
-                crate::shortcuts::register_shortcuts(&app, &current.hotkey, current.replace_win_v);
-            let _ = replacement.configure(current.replace_win_v, Some(current.hotkey.clone()));
+            restore_shortcut_settings(&app, &current);
+            return Err(error);
+        }
+    }
+
+    #[cfg(not(feature = "app-store"))]
+    if let Some((_, requested)) = autostart_transition {
+        if let Err(error) = set_autostart(&app, requested) {
+            if shortcut_settings_changed {
+                restore_shortcut_settings(&app, &current);
+            }
             return Err(error);
         }
     }
@@ -79,10 +135,15 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
     // a backdrop on the current system or window state.
     if let Err(error) = manager.save(new_settings.clone()) {
         if shortcut_settings_changed {
-            let _ =
-                crate::shortcuts::register_shortcuts(&app, &current.hotkey, current.replace_win_v);
-            let replacement = app.state::<Arc<crate::win_v_replacement::WinVReplacementManager>>();
-            let _ = replacement.configure(current.replace_win_v, Some(current.hotkey.clone()));
+            restore_shortcut_settings(&app, &current);
+        }
+        #[cfg(not(feature = "app-store"))]
+        if let Some((previous, _)) = autostart_transition {
+            if let Err(rollback_error) = set_autostart(&app, previous) {
+                log::error!(
+                    "SETTINGS: Could not restore Windows startup state after save failure: {rollback_error}"
+                );
+            }
         }
         return Err(error);
     }
@@ -122,27 +183,42 @@ pub async fn save_settings(app: AppHandle, settings: serde_json::Value) -> Resul
         }
     }
 
-    // Portable mode must not write to the registry, so skip autostart entirely.
-    #[cfg(not(feature = "app-store"))]
-    if crate::portable_data_dir().is_none() {
-        use tauri_plugin_autostart::ManagerExt;
-        // Check if startup changed
-        let startup = new_settings.startup_with_windows;
-        let current_state = app.autolaunch().is_enabled().unwrap_or(false);
-        if startup != current_state {
-            if startup {
-                let _ = app.autolaunch().enable();
-            } else {
-                let _ = app.autolaunch().disable();
-            }
-        }
-    }
     log::info!(
         "save_settings: language={}, theme={}",
         new_settings.language,
         new_settings.theme
     );
     Ok(())
+}
+
+fn restore_shortcut_settings(app: &AppHandle, settings: &crate::models::AppSettings) {
+    if let Err(error) =
+        crate::shortcuts::register_shortcuts(app, &settings.hotkey, settings.replace_win_v)
+    {
+        log::error!("SETTINGS: Could not restore shortcut configuration: {error}");
+    }
+    let replacement = app.state::<Arc<crate::win_v_replacement::WinVReplacementManager>>();
+    if let Err(error) = replacement.configure(settings.replace_win_v, Some(settings.hotkey.clone()))
+    {
+        log::error!("SETTINGS: Could not restore Win+V helper configuration: {error}");
+    }
+}
+
+#[cfg(not(feature = "app-store"))]
+fn set_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+
+    let result = if enabled {
+        app.autolaunch().enable()
+    } else {
+        app.autolaunch().disable()
+    };
+    result.map_err(|error| {
+        format!(
+            "Could not {} startup with Windows: {error}",
+            if enabled { "enable" } else { "disable" }
+        )
+    })
 }
 
 #[tauri::command]

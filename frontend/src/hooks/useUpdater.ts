@@ -14,12 +14,14 @@ const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
  * Any failure (offline, GitHub unreachable, dev build) is swallowed so it
  * never interrupts normal use.
  */
-export function useUpdater() {
+export function useUpdater(enabled: boolean) {
   const { t } = useTranslation();
   const checkInFlightRef = useRef(false);
   const notifiedVersionRef = useRef<string | null>(null);
 
   useEffect(() => {
+    if (!enabled) return;
+
     let active = true;
 
     const checkForUpdate = async () => {
@@ -58,7 +60,7 @@ export function useUpdater() {
       active = false;
       window.clearInterval(intervalId);
     };
-  }, [t]);
+  }, [enabled, t]);
 }
 
 async function installUpdate(update: Update, t: TFunction) {

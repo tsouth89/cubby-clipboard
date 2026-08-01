@@ -57,6 +57,8 @@ export function ContextMenu({ x, y, options, onClose }: ContextMenuProps) {
   return (
     <div
       ref={menuRef}
+      role="menu"
+      aria-label="Clipboard actions"
       className="animate-in fade-in-0 zoom-in-95 fixed z-50 max-h-[min(24rem,calc(100vh-1rem))] min-w-[12rem] overflow-y-auto rounded-lg border border-white/[0.1] bg-popover/95 p-1.5 shadow-2xl backdrop-blur-xl"
       style={style}
     >
@@ -64,6 +66,7 @@ export function ContextMenu({ x, y, options, onClose }: ContextMenuProps) {
         {options.map((option, index) => (
           <button
             key={index}
+            role="menuitem"
             disabled={option.disabled}
             onClick={() => {
               option.onClick();

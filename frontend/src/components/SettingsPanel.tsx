@@ -734,6 +734,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
             onClick={onClose}
             className="icon-button"
             onMouseDown={(e) => e.stopPropagation()}
+            aria-label="Close settings"
           >
             <X size={18} />
           </button>
@@ -861,14 +862,18 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                       <Row
                         title={t('settings.startupWithWindows')}
                         desc={
-                          settings.is_portable
-                            ? t('settings.startupWithWindowsPortable')
-                            : t('settings.startupWithWindowsDesc')
+                          settings.startup_unavailable_reason === 'error'
+                            ? t('settings.startupWithWindowsError')
+                            : settings.startup_unavailable_reason === 'app_store'
+                              ? t('settings.startupWithWindowsStore')
+                              : settings.is_portable
+                                ? t('settings.startupWithWindowsPortable')
+                                : t('settings.startupWithWindowsDesc')
                         }
                         control={
                           <Toggle
                             checked={settings.startup_with_windows}
-                            disabled={settings.is_portable}
+                            disabled={settings.startup_available === false}
                             onChange={() =>
                               updateSetting('startup_with_windows', !settings.startup_with_windows)
                             }
@@ -1446,14 +1451,16 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                             {t('settings.versionLabel', { version: appVersion || '…' })}
                           </div>
                         </div>
-                        <button
-                          onClick={handleCheckUpdates}
-                          disabled={checkingUpdate}
-                          className={ghostButton}
-                        >
-                          <RefreshCw size={14} className={checkingUpdate ? 'animate-spin' : ''} />
-                          {t('settings.checkUpdates')}
-                        </button>
+                        {settings.self_update_available !== false && (
+                          <button
+                            onClick={handleCheckUpdates}
+                            disabled={checkingUpdate}
+                            className={ghostButton}
+                          >
+                            <RefreshCw size={14} className={checkingUpdate ? 'animate-spin' : ''} />
+                            {t('settings.checkUpdates')}
+                          </button>
+                        )}
                       </div>
                       <button
                         onClick={() => openUrl(GITHUB_URL).catch(console.error)}

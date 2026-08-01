@@ -37,6 +37,7 @@ export function FlyoutHeader({
           value={searchQuery}
           onChange={(event) => onSearchChange(event.target.value)}
           placeholder="Search clipboard history"
+          aria-label="Search clipboard history"
           className="min-w-0 flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
         />
         {searchQuery && (
@@ -107,6 +108,7 @@ export function FlyoutHeader({
             onClick={onAddFolder}
             className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-white/[0.07] hover:text-foreground"
             title="New folder"
+            aria-label="New folder"
           >
             <Plus size={15} />
           </button>
@@ -124,6 +126,7 @@ export function FlyoutHeader({
             onClick={onOpenSettings}
             className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-white/[0.07] hover:text-foreground"
             title="Settings"
+            aria-label="Settings"
           >
             <Settings2 size={15} />
           </button>

@@ -1,5 +1,5 @@
 import { X, AlertTriangle } from 'lucide-react';
-import { useEffect } from 'react';
+import { useEffect, useId } from 'react';
 import { useTranslation } from 'react-i18next';
 
 interface ConfirmDialogProps {
@@ -26,6 +26,8 @@ export function ConfirmDialog({
   isBusy = false,
 }: ConfirmDialogProps) {
   const { t } = useTranslation();
+  const titleId = useId();
+  const descriptionId = useId();
 
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
@@ -41,7 +43,13 @@ export function ConfirmDialog({
 
   return (
     <div className="animate-in fade-in fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm duration-200">
-      <div className="animate-in zoom-in-95 w-full max-w-md scale-100 rounded-lg border border-border bg-background p-6 shadow-lg duration-200">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        className="animate-in zoom-in-95 w-full max-w-md scale-100 rounded-lg border border-border bg-background p-6 shadow-lg duration-200"
+      >
         <div className="mb-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div
@@ -53,23 +61,29 @@ export function ConfirmDialog({
             >
               <AlertTriangle size={18} />
             </div>
-            <h3 className="text-lg font-semibold">{title}</h3>
+            <h3 id={titleId} className="text-lg font-semibold">
+              {title}
+            </h3>
           </div>
           <button
             onClick={onCancel}
             disabled={isBusy}
+            aria-label={t('common.cancel')}
             className="text-muted-foreground hover:text-foreground disabled:opacity-40"
           >
             <X size={18} />
           </button>
         </div>
 
-        <p className="mb-6 text-sm text-muted-foreground">{message}</p>
+        <p id={descriptionId} className="mb-6 text-sm text-muted-foreground">
+          {message}
+        </p>
 
         <div className="flex justify-end gap-3">
           <button
             onClick={onCancel}
             disabled={isBusy}
+            autoFocus
             className="rounded-md border border-input bg-transparent px-4 py-2 text-sm font-medium hover:bg-accent hover:text-accent-foreground disabled:opacity-40"
           >
             {cancelText || t('common.cancel')}
