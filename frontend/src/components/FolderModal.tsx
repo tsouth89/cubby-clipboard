@@ -60,7 +60,7 @@ export function FolderModal({ isOpen, mode, initialName, onClose, onSubmit }: Fo
           defaultValue={initialName}
           className="mb-4 w-full rounded-md border border-input bg-input px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
           onKeyDown={(e) => {
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
               handleSubmit();
             } else if (e.key === 'Escape') {
               onClose();

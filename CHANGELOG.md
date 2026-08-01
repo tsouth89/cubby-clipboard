@@ -11,7 +11,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Preserve valid rich HTML, exact whitespace, and retryable clipboard updates instead of silently losing or altering copied content
 - Make paste target selection, content filters, Ctrl+P pinning, held-modifier handling, and hotkey-conflict recovery behave predictably
 - Recover unreadable settings and damaged history safely, keep rolling backups refreshing on Windows, and avoid dropping paste callbacks during window transitions
-- Report failed Windows startup changes instead of showing a saved setting that Windows did not apply
+- Report failed Windows startup changes instead of showing a saved setting that Windows did not apply, without blocking or rewriting unrelated preferences
 - Keep Microsoft Store builds under Store-managed startup and update behavior without unsupported in-app controls
 - Update the reachable `event-listener` dependency to the patched release for RUSTSEC-2026-0221
 
