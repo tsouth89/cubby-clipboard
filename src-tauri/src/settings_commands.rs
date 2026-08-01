@@ -50,6 +50,7 @@ pub async fn get_settings(app: AppHandle) -> Result<serde_json::Value, String> {
                 log::error!("SETTINGS: Could not read Windows startup state: {error}");
                 if let Some(obj) = value.as_object_mut() {
                     obj.insert("startup_available".to_string(), serde_json::json!(false));
+                    obj.insert("startup_with_windows".to_string(), serde_json::json!(false));
                     obj.insert(
                         "startup_unavailable_reason".to_string(),
                         serde_json::json!("error"),
