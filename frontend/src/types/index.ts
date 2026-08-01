@@ -53,6 +53,9 @@ export interface Settings {
   auto_delete_days: number;
   startup_with_windows: boolean;
   is_portable?: boolean;
+  startup_available?: boolean;
+  startup_unavailable_reason?: 'portable' | 'app_store' | 'error';
+  self_update_available?: boolean;
   show_in_taskbar: boolean;
   hotkey: string;
   replace_win_v: boolean;

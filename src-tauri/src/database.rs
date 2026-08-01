@@ -436,7 +436,7 @@ async fn refresh_rolling_backup(db_path: &Path) -> Result<(), String> {
     let temporary_for_rename = temporary.clone();
     let backup_for_rename = backup.clone();
     tokio::task::spawn_blocking(move || {
-        std::fs::rename(&temporary_for_rename, &backup_for_rename).inspect_err(|_| {
+        replace_backup_atomically(&temporary_for_rename, &backup_for_rename).inspect_err(|_| {
             let _ = std::fs::remove_file(&temporary_for_rename);
         })
     })
@@ -449,6 +449,40 @@ async fn refresh_rolling_backup(db_path: &Path) -> Result<(), String> {
         backup.display()
     );
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn replace_backup_atomically(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source_wide = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination_wide = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source_wide.as_ptr()),
+            PCWSTR(destination_wide.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(std::io::Error::other)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_backup_atomically(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    std::fs::rename(source, destination)
 }
 
 /// Refuse a backup refresh when it would replace a substantial backup with a
@@ -610,9 +644,9 @@ async fn add_column_if_missing(pool: &SqlitePool, sql: &str) -> Result<(), sqlx:
 #[cfg(test)]
 mod tests {
     use super::{
-        prepare_database_file, quarantine_database_files, rolling_backup_path,
-        sanitize_storage_diagnostic, should_skip_backup_refresh, verify_database_quick_check,
-        Database,
+        prepare_database_file, quarantine_database_files, replace_backup_atomically,
+        rolling_backup_path, sanitize_storage_diagnostic, should_skip_backup_refresh,
+        verify_database_quick_check, Database,
     };
     use crate::crypto::CryptoManager;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -784,6 +818,22 @@ mod tests {
             before_modified, after_modified,
             "backup younger than 24h must not be rewritten"
         );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn rolling_backup_refresh_replaces_an_existing_file() {
+        let directory = temp_dir();
+        let temporary = directory.join("cubby.db.bak.tmp");
+        let backup = directory.join("cubby.db.bak");
+        std::fs::write(&temporary, b"new backup").unwrap();
+        std::fs::write(&backup, b"old backup").unwrap();
+
+        replace_backup_atomically(&temporary, &backup)
+            .expect("an expired Windows backup should be replaceable");
+
+        assert!(!temporary.exists());
+        assert_eq!(std::fs::read(&backup).unwrap(), b"new backup");
         let _ = std::fs::remove_dir_all(directory);
     }
 

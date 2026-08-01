@@ -74,7 +74,7 @@ function App() {
 
   const effectiveTheme = useTheme(theme);
   useSystemAccent();
-  useUpdater();
+  useUpdater(settings?.self_update_available === true);
   useLanguage(settings?.language);
   const { t } = useTranslation();
   const hasRoundedCorners = settings?.round_corners ?? true;

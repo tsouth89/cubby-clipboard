@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 interface FolderModalProps {
@@ -13,6 +13,7 @@ export function FolderModal({ isOpen, mode, initialName, onClose, onSubmit }: Fo
   const { t } = useTranslation();
   const inputRef = useRef<HTMLInputElement>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const titleId = useId();
 
   useEffect(() => {
     if (isOpen) {
@@ -42,18 +43,24 @@ export function FolderModal({ isOpen, mode, initialName, onClose, onSubmit }: Fo
 
   return (
     <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-      <div className="w-80 rounded-2xl border border-border bg-card p-6 shadow-2xl">
-        <h3 className="mb-4 text-lg font-semibold text-foreground">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="w-80 rounded-2xl border border-border bg-card p-6 shadow-2xl"
+      >
+        <h3 id={titleId} className="mb-4 text-lg font-semibold text-foreground">
           {mode === 'create' ? t('folders.createFolder') : t('folders.renameFolder')}
         </h3>
         <input
           ref={inputRef}
           type="text"
           placeholder={t('folders.folderNamePlaceholder')}
+          aria-label={t('folders.folderNamePlaceholder')}
           defaultValue={initialName}
           className="mb-4 w-full rounded-md border border-input bg-input px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
           onKeyDown={(e) => {
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
               handleSubmit();
             } else if (e.key === 'Escape') {
               onClose();
