@@ -575,10 +575,13 @@ fn clipboard_contents_for_restore(
     if !plain_text {
         for (format, content) in formats {
             match format.as_str() {
-                "html" => contents.push(ClipboardContent::Html(
-                    String::from_utf8(content.clone())
+                // Stored HTML is the header-stripped document (see cf_html.rs);
+                // clipboard-rs's multi-content set() writes it raw, so re-attach
+                // a valid CF_HTML header or Office-class apps reject the paste.
+                "html" => contents.push(ClipboardContent::Html(crate::cf_html::to_cf_html(
+                    &String::from_utf8(content.clone())
                         .map_err(|_| "stored HTML is not UTF-8".to_string())?,
-                )),
+                ))),
                 "rtf" => contents.push(ClipboardContent::Rtf(
                     String::from_utf8(content.clone())
                         .map_err(|_| "stored RTF is not UTF-8".to_string())?,
@@ -594,12 +597,25 @@ fn clipboard_contents_for_restore(
     Ok(contents)
 }
 
+/// SQL restriction for the flyout's content tabs. Filtering must happen in the
+/// query — the list pages 20 rows at a time, and filtering a page client-side
+/// hides matching items that live on unfetched pages.
+fn content_filter_clause(content_filter: Option<&str>) -> &'static str {
+    match content_filter {
+        Some("images") => " AND clip_type = 'image'",
+        Some("text") => " AND clip_type = 'text'",
+        Some("files") => " AND clip_type IN ('file', 'files')",
+        _ => "",
+    }
+}
+
 #[tauri::command]
 pub async fn get_clips(
     filter_id: Option<String>,
     limit: i64,
     offset: i64,
     preview_only: Option<bool>,
+    content_filter: Option<String>,
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<Vec<ClipboardItem>, String> {
     let pool = &db.pool;
@@ -607,23 +623,23 @@ pub async fn get_clips(
     let started = Instant::now();
 
     log::info!(
-        "get_clips called with filter_id: {:?}, preview_only: {}",
+        "get_clips called with filter_id: {:?}, preview_only: {}, content_filter: {:?}",
         filter_id,
-        preview_only
+        preview_only,
+        content_filter
     );
 
+    let type_clause = content_filter_clause(content_filter.as_deref());
     let sql_started = Instant::now();
     let mut clips: Vec<Clip> = match filter_id.as_deref() {
         Some(id) => {
             let folder_id_num = id.parse::<i64>().ok();
             if let Some(numeric_id) = folder_id_num {
                 log::info!("Querying for folder_id: {}", numeric_id);
-                sqlx::query_as(
-                    r#"
-                    SELECT * FROM clips WHERE is_deleted = 0 AND folder_id = ?
-                    ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?
-                "#,
-                )
+                sqlx::query_as(&format!(
+                    "SELECT * FROM clips WHERE is_deleted = 0 AND folder_id = ?{type_clause} \
+                     ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?"
+                ))
                 .bind(numeric_id)
                 .bind(limit)
                 .bind(offset)
@@ -637,12 +653,10 @@ pub async fn get_clips(
         }
         None => {
             log::info!("Querying for items, offset: {}, limit: {}", offset, limit);
-            sqlx::query_as(
-                r#"
-                SELECT * FROM clips WHERE is_deleted = 0
-                ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?
-            "#,
-            )
+            sqlx::query_as(&format!(
+                "SELECT * FROM clips WHERE is_deleted = 0{type_clause} \
+                 ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?"
+            ))
             .bind(limit)
             .bind(offset)
             .fetch_all(pool)
@@ -751,7 +765,22 @@ async fn restore_clip(
             // Synchronize clipboard access across the app
             let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
 
-            let formats = load_clip_formats(db, &clip.uuid).await?;
+            // Normalize HTML to the document form a re-capture of our own
+            // clipboard write reads back (bare legacy fragments gain the
+            // standard container), so the ignore hash below matches it.
+            let formats = load_clip_formats(db, &clip.uuid)
+                .await?
+                .into_iter()
+                .map(|(format, content)| {
+                    if format == "html" {
+                        if let Ok(html) = std::str::from_utf8(&content) {
+                            let document = crate::cf_html::document(html);
+                            return (format, document.into_bytes());
+                        }
+                    }
+                    (format, content)
+                })
+                .collect::<Vec<_>>();
             let full_image = if clip.clip_type == "image" {
                 Some(load_full_image_content(db, &mut clip).await?)
             } else {
@@ -1108,9 +1137,10 @@ pub async fn search_clips(
     filter_id: Option<String>,
     limit: i64,
     offset: i64,
+    content_filter: Option<String>,
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<Vec<ClipboardItem>, String> {
-    search_clips_in_database(query, filter_id, limit, offset, db.inner()).await
+    search_clips_in_database(query, filter_id, limit, offset, content_filter, db.inner()).await
 }
 
 async fn search_clips_in_database(
@@ -1118,6 +1148,7 @@ async fn search_clips_in_database(
     filter_id: Option<String>,
     limit: i64,
     offset: i64,
+    content_filter: Option<String>,
     db: &Database,
 ) -> Result<Vec<ClipboardItem>, String> {
     let pool = &db.pool;
@@ -1145,27 +1176,22 @@ async fn search_clips_in_database(
     // Ordering, pinning, folder filtering, and pagination remain authoritative
     // in SQLite. Only UUIDs are scanned here; encrypted payloads are fetched and
     // decrypted for the final result page.
+    let type_clause = content_filter_clause(content_filter.as_deref());
     let sql_started = Instant::now();
     let ordered_ids: Vec<String> = if let Some(folder_id) = folder_id {
-        sqlx::query_scalar(
-            r#"
-            SELECT uuid FROM clips
-            WHERE is_deleted = 0 AND folder_id = ?
-            ORDER BY is_pinned DESC, created_at DESC
-            "#,
-        )
+        sqlx::query_scalar(&format!(
+            "SELECT uuid FROM clips WHERE is_deleted = 0 AND folder_id = ?{type_clause} \
+             ORDER BY is_pinned DESC, created_at DESC"
+        ))
         .bind(folder_id)
         .fetch_all(pool)
         .await
         .map_err(|error| error.to_string())?
     } else {
-        sqlx::query_scalar(
-            r#"
-            SELECT uuid FROM clips
-            WHERE is_deleted = 0
-            ORDER BY is_pinned DESC, created_at DESC
-            "#,
-        )
+        sqlx::query_scalar(&format!(
+            "SELECT uuid FROM clips WHERE is_deleted = 0{type_clause} \
+             ORDER BY is_pinned DESC, created_at DESC"
+        ))
         .fetch_all(pool)
         .await
         .map_err(|error| error.to_string())?
@@ -1943,7 +1969,7 @@ mod tests {
         )
         .await;
 
-        let first = search_clips_in_database("ALPHA".into(), None, 1, 0, &database)
+        let first = search_clips_in_database("ALPHA".into(), None, 1, 0, None, &database)
             .await
             .unwrap();
         assert_eq!(first[0].id, "ocr-result");
@@ -1954,7 +1980,7 @@ mod tests {
             "Alpha receipt 8372"
         );
 
-        let second = search_clips_in_database("alpha".into(), None, 1, 1, &database)
+        let second = search_clips_in_database("alpha".into(), None, 1, 1, None, &database)
             .await
             .unwrap();
         assert_eq!(second[0].id, "text-result");
@@ -1964,12 +1990,34 @@ mod tests {
             Some(folder_id.to_string()),
             10,
             0,
+            None,
             &database,
         )
         .await
         .unwrap();
         assert_eq!(folder.len(), 1);
         assert_eq!(folder[0].id, "text-result");
+
+        // Content tabs filter in the query itself so pagination stays correct.
+        let images_only = search_clips_in_database(
+            "alpha".into(),
+            None,
+            10,
+            0,
+            Some("images".into()),
+            &database,
+        )
+        .await
+        .unwrap();
+        assert_eq!(images_only.len(), 1);
+        assert_eq!(images_only[0].id, "ocr-result");
+
+        let text_only =
+            search_clips_in_database("alpha".into(), None, 10, 0, Some("text".into()), &database)
+                .await
+                .unwrap();
+        assert_eq!(text_only.len(), 1);
+        assert_eq!(text_only[0].id, "text-result");
 
         let persisted_search_tables: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE lower(name) LIKE '%search%' OR lower(sql) LIKE '%fts%'",
@@ -2252,7 +2300,14 @@ mod tests {
 
         let rich = clipboard_contents_for_restore(&clip, None, &formats, false).unwrap();
         assert!(matches!(&rich[0], ClipboardContent::Text(text) if text == "Hello"));
-        assert!(matches!(&rich[1], ClipboardContent::Html(html) if html == "<b>Hello</b>"));
+        // HTML must go out as full CF_HTML — clipboard-rs's multi-content set()
+        // writes the string raw, and Office rejects a headerless payload.
+        assert!(matches!(
+            &rich[1],
+            ClipboardContent::Html(html)
+                if html.starts_with("Version:0.9\r\nStartHTML:")
+                    && html.contains("<b>Hello</b>")
+        ));
         assert!(matches!(&rich[2], ClipboardContent::Rtf(rtf) if rtf.contains("Hello")));
 
         let plain = clipboard_contents_for_restore(&clip, None, &formats, true).unwrap();

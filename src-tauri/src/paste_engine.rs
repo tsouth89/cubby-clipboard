@@ -242,25 +242,90 @@ pub fn restore_previous_foreground_window() -> bool {
     restored
 }
 
+/// Modifiers the user may still be holding from the launch hotkey (e.g.
+/// Win+Alt+V plus a quick Enter) or from Shift+Enter. Left down, they would
+/// combine with the synthesized Ctrl+V into Ctrl+Alt+V / Ctrl+Shift+V and
+/// trigger the wrong command in the target app (Paste Special in Word).
+#[cfg(target_os = "windows")]
+fn physically_held_modifiers() -> Vec<windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RMENU, VK_RSHIFT, VK_RWIN,
+    };
+
+    [VK_LWIN, VK_RWIN, VK_LMENU, VK_RMENU, VK_LSHIFT, VK_RSHIFT]
+        .into_iter()
+        .filter(|key| unsafe { GetAsyncKeyState(key.0 as i32) } as u16 & 0x8000 != 0)
+        .collect()
+}
+
+/// The full key sequence for one synthesized paste: release held modifiers,
+/// tap Ctrl+V, restore the modifiers. `true` means key-up.
+///
+/// Restored Win/Alt would read as a lone tap when the user physically releases
+/// them later (Start menu opens / menu bar focuses), so a masking no-op key is
+/// tapped inside the restored hold — the same trick AutoHotkey uses.
+#[cfg(target_os = "windows")]
+fn paste_input_plan(
+    held_modifiers: &[windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY],
+) -> Vec<(
+    windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
+    bool,
+)> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        VK_CONTROL, VK_LMENU, VK_LWIN, VK_NONAME, VK_RMENU, VK_RWIN, VK_V,
+    };
+
+    let mut plan = Vec::new();
+    for key in held_modifiers {
+        plan.push((*key, true));
+    }
+    plan.extend([
+        (VK_CONTROL, false),
+        (VK_V, false),
+        (VK_V, true),
+        (VK_CONTROL, true),
+    ]);
+    for key in held_modifiers {
+        plan.push((*key, false));
+    }
+    if held_modifiers
+        .iter()
+        .any(|key| [VK_LWIN, VK_RWIN, VK_LMENU, VK_RMENU].contains(key))
+    {
+        plan.push((VK_NONAME, false));
+        plan.push((VK_NONAME, true));
+    }
+    plan
+}
+
 #[cfg(target_os = "windows")]
 pub fn send_paste_input(strategy: PasteStrategy) -> u32 {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, KEYEVENTF_KEYUP, VK_CONTROL, VK_V,
-    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, KEYEVENTF_KEYUP};
 
     let label = match strategy {
         PasteStrategy::Standard => "Ctrl+V",
         PasteStrategy::RemoteSession => "Ctrl+V after remote clipboard synchronization",
         PasteStrategy::NinjaRemote => return send_ninja_paste_as_keystrokes(),
     };
-    log::info!("send_paste_input: sending {label}");
+    let held_modifiers = physically_held_modifiers();
+    log::info!(
+        "send_paste_input: sending {label} (releasing {} held modifier(s) around it)",
+        held_modifiers.len()
+    );
+    let inputs: Vec<INPUT> = paste_input_plan(&held_modifiers)
+        .into_iter()
+        .map(|(key, key_up)| {
+            keyboard_input(
+                key,
+                if key_up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    Default::default()
+                },
+            )
+        })
+        .collect();
     unsafe {
-        let inputs = [
-            keyboard_input(VK_CONTROL, Default::default()),
-            keyboard_input(VK_V, Default::default()),
-            keyboard_input(VK_V, KEYEVENTF_KEYUP),
-            keyboard_input(VK_CONTROL, KEYEVENTF_KEYUP),
-        ];
         let result = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
         log::info!("send_paste_input: SendInput returned {}", result);
         result
@@ -439,5 +504,44 @@ mod tests {
 
         assert_eq!(context.target_kind, "ninja");
         assert_eq!(context.remote_paste_mode, "copy_then_paste");
+    }
+
+    #[cfg(target_os = "windows")]
+    mod paste_input_plan {
+        use super::super::paste_input_plan;
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            VK_CONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_NONAME, VK_V,
+        };
+
+        #[test]
+        fn plain_paste_is_just_ctrl_v() {
+            assert_eq!(
+                paste_input_plan(&[]),
+                vec![
+                    (VK_CONTROL, false),
+                    (VK_V, false),
+                    (VK_V, true),
+                    (VK_CONTROL, true),
+                ]
+            );
+        }
+
+        #[test]
+        fn held_modifiers_are_released_first_and_restored_after() {
+            let plan = paste_input_plan(&[VK_LWIN, VK_LMENU]);
+            assert_eq!(&plan[..2], &[(VK_LWIN, true), (VK_LMENU, true)]);
+            assert_eq!(plan[2..4], [(VK_CONTROL, false), (VK_V, false)]);
+            assert_eq!(plan[6..8], [(VK_LWIN, false), (VK_LMENU, false)]);
+            // Win/Alt restore needs the Start-menu / menu-bar mask tap.
+            assert_eq!(&plan[8..], &[(VK_NONAME, false), (VK_NONAME, true)]);
+        }
+
+        #[test]
+        fn shift_only_hold_needs_no_mask_tap() {
+            let plan = paste_input_plan(&[VK_LSHIFT]);
+            assert_eq!(plan.first(), Some(&(VK_LSHIFT, true)));
+            assert_eq!(plan.last(), Some(&(VK_LSHIFT, false)));
+            assert!(!plan.iter().any(|(key, _)| *key == VK_NONAME));
+        }
     }
 }

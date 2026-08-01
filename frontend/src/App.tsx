@@ -27,6 +27,21 @@ const assetCaptureEnabled = import.meta.env.DEV && import.meta.env.VITE_CUBBY_AS
 const IMAGE_EXPIRED_MESSAGE =
   "This screenshot's full image expired. Only its recognized text remains.";
 
+// Startup shortcut recovery result (see shortcuts.rs). Fetched once on mount
+// and surfaced as a toast the first time the flyout gains focus.
+interface HotkeyStartupNotice {
+  kind: 'fallback_hotkey' | 'win_v_disabled' | 'failed' | string;
+  requested_hotkey: string;
+  active_hotkey: string | null;
+}
+
+const matchesContentFilter = (clip: AppClipboardItem, filter: ContentFilter) => {
+  if (filter === 'images') return clip.clip_type === 'image';
+  if (filter === 'text') return clip.clip_type === 'text';
+  if (filter === 'files') return clip.clip_type === 'file' || clip.clip_type === 'files';
+  return true;
+};
+
 function App() {
   const [clips, setClips] = useState<AppClipboardItem[]>(() =>
     assetCaptureEnabled ? generateDemoClips().map((clip) => ({ ...clip, ocr_match: null })) : []
@@ -155,6 +170,37 @@ function App() {
     };
   }, []);
 
+  // Startup shortcut recovery happens before the webview loads, so pull the
+  // notice instead of listening for an event, and hold it until the flyout is
+  // actually visible — a toast fired into a hidden window would expire unseen.
+  const pendingHotkeyNotice = useRef<HotkeyStartupNotice | null>(null);
+  useEffect(() => {
+    if (assetCaptureEnabled) return;
+    invoke<HotkeyStartupNotice | null>('get_hotkey_startup_notice')
+      .then((notice) => {
+        pendingHotkeyNotice.current = notice;
+      })
+      .catch(console.error);
+  }, []);
+
+  const showPendingHotkeyNotice = useCallback(() => {
+    const notice = pendingHotkeyNotice.current;
+    if (!notice) return;
+    pendingHotkeyNotice.current = null;
+    const message =
+      notice.kind === 'fallback_hotkey'
+        ? t('notifications.hotkeyFallback', {
+            requested: notice.requested_hotkey,
+            active: notice.active_hotkey,
+          })
+        : notice.kind === 'win_v_disabled'
+          ? t('notifications.hotkeyWinVDisabled', {
+              hotkey: notice.active_hotkey ?? notice.requested_hotkey,
+            })
+          : t('notifications.hotkeyFailed');
+    toast.warning(message, { duration: 10000 });
+  }, [t]);
+
   const refreshPasteContext = useCallback(() => {
     if (assetCaptureEnabled) {
       setPasteContext({ target_kind: 'standard', remote_paste_mode: 'copy_then_paste' });
@@ -175,25 +221,27 @@ function App() {
   // every dismissal path (Esc, click-away, and post-paste hide).
   useEffect(() => {
     const unlisten = appWindow.onFocusChanged(({ payload: focused }) => {
-      if (!focused) {
-        setSearchQuery('');
-        setContentFilter('all');
-        setSelectedFolder(null);
-        // Reset selection and scroll the list back to the top, so reopening
-        // always shows your most-recent copy instead of wherever you'd scrolled.
-        setSelectedClipId(null);
-        setClipListResetToken((prev) => prev + 1);
-        // Dismiss any transient overlays so reopening lands on the clean list.
-        setContextMenu(null);
-        setClearRequest(null);
-        setShowAddFolderModal(false);
-        setNewFolderName('');
+      if (focused) {
+        showPendingHotkeyNotice();
+        return;
       }
+      setSearchQuery('');
+      setContentFilter('all');
+      setSelectedFolder(null);
+      // Reset selection and scroll the list back to the top, so reopening
+      // always shows your most-recent copy instead of wherever you'd scrolled.
+      setSelectedClipId(null);
+      setClipListResetToken((prev) => prev + 1);
+      // Dismiss any transient overlays so reopening lands on the clean list.
+      setContextMenu(null);
+      setClearRequest(null);
+      setShowAddFolderModal(false);
+      setNewFolderName('');
     });
     return () => {
       unlisten.then((dispose) => dispose()).catch(() => undefined);
     };
-  }, [appWindow]);
+  }, [appWindow, showPendingHotkeyNotice]);
 
   const openSettings = useCallback(async () => {
     // Check if settings window already exists
@@ -236,7 +284,12 @@ function App() {
   }, []);
 
   const loadClips = useCallback(
-    async (folderId: string | null, append: boolean = false, searchQuery: string = '') => {
+    async (
+      folderId: string | null,
+      append: boolean = false,
+      searchQuery: string = '',
+      filter: ContentFilter = 'all'
+    ) => {
       const perfId = ++loadPerfIdRef.current;
       const loadStart = perfLogEnabled ? performance.now() : 0;
       let invokeStart = 0;
@@ -267,7 +320,8 @@ function App() {
                 .toLocaleLowerCase();
               return searchable.includes(query);
             })
-            .map((clip) => ({ ...clip, ocr_match: query ? clip.ocr_match : null }));
+            .map((clip) => ({ ...clip, ocr_match: query ? clip.ocr_match : null }))
+            .filter((clip) => matchesContentFilter(clip, filter));
           invokeStart = performance.now();
           invokeEnd = invokeStart;
         } else if (searchQuery.trim()) {
@@ -277,6 +331,7 @@ function App() {
             filterId: folderId,
             limit: 20,
             offset: currentOffset,
+            contentFilter: filter,
           });
           if (perfLogEnabled) invokeEnd = performance.now();
         } else {
@@ -286,6 +341,7 @@ function App() {
             limit: 20,
             offset: currentOffset,
             previewOnly: true,
+            contentFilter: filter,
           });
           if (perfLogEnabled) invokeEnd = performance.now();
         }
@@ -367,8 +423,8 @@ function App() {
   }, []);
 
   const refreshCurrentFolder = useCallback(() => {
-    loadClips(selectedFolderRef.current, false, searchQuery);
-  }, [loadClips, searchQuery]);
+    loadClips(selectedFolderRef.current, false, searchQuery, contentFilter);
+  }, [loadClips, searchQuery, contentFilter]);
 
   const handleSearch = useCallback((query: string) => {
     setSearchQuery(query);
@@ -383,13 +439,9 @@ function App() {
 
   useEffect(() => {
     loadFolders();
-    if (searchQuery.trim()) {
-      loadClips(selectedFolder, false, searchQuery);
-    } else {
-      loadClips(selectedFolder);
-    }
+    loadClips(selectedFolder, false, searchQuery.trim() ? searchQuery : '', contentFilter);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedFolder, searchQuery]);
+  }, [selectedFolder, searchQuery, contentFilter]);
 
   // Total History Count
   const [totalClipCount, setTotalClipCount] = useState(0);
@@ -583,18 +635,9 @@ function App() {
     [setClips]
   );
 
-  // Keyboard navigation handlers
-  const visibleClips = useMemo(
-    () =>
-      clips.filter((clip) => {
-        if (contentFilter === 'images') return clip.clip_type === 'image';
-        if (contentFilter === 'text') return clip.clip_type === 'text';
-        if (contentFilter === 'files')
-          return clip.clip_type === 'file' || clip.clip_type === 'files';
-        return true;
-      }),
-    [clips, contentFilter]
-  );
+  // Content tabs are filtered by the backend query (paging stays correct that
+  // way), so every loaded clip is visible.
+  const visibleClips = clips;
 
   const emptyState = useMemo(() => {
     if (searchQuery.trim()) {
@@ -632,27 +675,6 @@ function App() {
       description: t('clipList.emptyDesc'),
     };
   }, [contentFilter, searchQuery, selectedFolder, t]);
-
-  useEffect(() => {
-    if (
-      contentFilter !== 'all' &&
-      clips.length > 0 &&
-      visibleClips.length === 0 &&
-      hasMore &&
-      !isLoading
-    ) {
-      loadClips(selectedFolder, true, searchQuery);
-    }
-  }, [
-    clips.length,
-    contentFilter,
-    hasMore,
-    isLoading,
-    loadClips,
-    searchQuery,
-    selectedFolder,
-    visibleClips.length,
-  ]);
 
   useEffect(() => {
     if (visibleClips.length === 0) {
@@ -792,9 +814,9 @@ function App() {
 
   const loadMore = useCallback(() => {
     if (hasMore && !isLoading) {
-      loadClips(selectedFolder, true, searchQuery);
+      loadClips(selectedFolder, true, searchQuery, contentFilter);
     }
-  }, [hasMore, isLoading, selectedFolder, loadClips, searchQuery]);
+  }, [hasMore, isLoading, selectedFolder, loadClips, searchQuery, contentFilter]);
 
   // New Folder Modal Rename Mode
   const [folderModalMode, setFolderModalMode] = useState<'create' | 'rename'>('create');
@@ -876,7 +898,7 @@ function App() {
       setSelectedClipId(null);
       setClipListResetToken((token) => token + 1);
       await Promise.all([
-        loadClips(selectedFolder, false, searchQuery),
+        loadClips(selectedFolder, false, searchQuery, contentFilter),
         loadFolders(),
         refreshTotalCount(),
       ]);

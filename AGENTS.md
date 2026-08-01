@@ -132,7 +132,7 @@ pnpm install && pnpm dev
 | `Escape` | Close window / clear search |
 | `Enter` | Paste selected item |
 | `Delete` | Delete selected item |
-| `P` | Pin/Unpin selected item |
+| `Ctrl+P` | Pin/Unpin selected item (bare letters go to type-to-search) |
 | `↑` / `↓` | Navigate items |
 
 ## Tech Stack
