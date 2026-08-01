@@ -144,15 +144,28 @@ for (const clipboardFormatGate of [
   'clip_formats',
   'get_html()',
   'get_rich_text()',
-  'get_files()',
   'ClipboardContent::Html',
   'ClipboardContent::Rtf',
-  'ClipboardContent::Files',
 ]) {
   const sources = `${databaseSource}\n${commandSource}\n${clipboardSource}`;
   if (!sources.includes(clipboardFormatGate)) {
     throw new Error(`Multi-format clipboard release gate is missing: ${clipboardFormatGate}`);
   }
+}
+
+for (const [source, fileHistoryGate] of [
+  [clipboardSource, 'clipboard_has_file_payload_format()'],
+  [databaseSource, "DELETE FROM clips WHERE clip_type IN ('file', 'files')"],
+]) {
+  if (!source.includes(fileHistoryGate)) {
+    throw new Error(`File-history removal gate is missing: ${fileHistoryGate}`);
+  }
+}
+
+if (`${clipboardSource}\n${commandSource}`.includes('ClipboardContent::Files')) {
+  throw new Error(
+    'Release product code must not restore external file references as durable history'
+  );
 }
 
 for (const sensitiveLogFragment of ['Detected self-paste for hash', 'full_path: {:?}', 'path match): {}']) {

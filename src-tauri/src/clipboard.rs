@@ -403,6 +403,21 @@ fn capture_clipboard_update(
     event_tx: &tokio::sync::mpsc::UnboundedSender<ClipboardListenerEvent>,
 ) -> Result<CaptureAttempt, ()> {
     let started = Instant::now();
+
+    // File clipboard payloads are references to external paths, not durable
+    // clipboard content. Recording them as history creates entries that can
+    // silently stop working after a move, disconnect, or target-app mismatch.
+    // Ignore both physical and virtual file payloads before reading any text
+    // fallback they may advertise.
+    if clipboard_has_file_payload_format() {
+        note_clipboard_event(sequence);
+        log::debug!(
+            "CLIPBOARD: Sequence {} contained a file payload; intentionally ignoring it",
+            sequence
+        );
+        return Ok(CaptureAttempt::Handled);
+    }
+
     let source_app_identity = get_clipboard_owner_identity();
     let sensitive = clipboard_marked_sensitive();
 
@@ -452,7 +467,7 @@ fn capture_clipboard_update(
 }
 
 /// True when the clipboard advertises a format `materialize_clipboard_content`
-/// can read (text, files, or an image). Used to tell "unsupported payload"
+/// can read (text or an image). Used to tell "unsupported payload"
 /// (mark handled) apart from "supported but contended" (defer and retry).
 #[cfg(target_os = "windows")]
 fn clipboard_has_supported_format() -> bool {
@@ -465,19 +480,11 @@ fn clipboard_has_supported_format() -> bool {
     const CF_BITMAP: u32 = 2;
     const CF_DIB: u32 = 8;
     const CF_UNICODETEXT: u32 = 13;
-    const CF_HDROP: u32 = 15;
     const CF_DIBV5: u32 = 17;
 
-    if [
-        CF_UNICODETEXT,
-        CF_TEXT,
-        CF_HDROP,
-        CF_DIB,
-        CF_DIBV5,
-        CF_BITMAP,
-    ]
-    .into_iter()
-    .any(|format| unsafe { IsClipboardFormatAvailable(format) }.is_ok())
+    if [CF_UNICODETEXT, CF_TEXT, CF_DIB, CF_DIBV5, CF_BITMAP]
+        .into_iter()
+        .any(|format| unsafe { IsClipboardFormatAvailable(format) }.is_ok())
     {
         return true;
     }
@@ -486,6 +493,37 @@ fn clipboard_has_supported_format() -> bool {
     let name: Vec<u16> = "PNG".encode_utf16().chain(std::iter::once(0)).collect();
     let png_format = unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) };
     png_format != 0 && unsafe { IsClipboardFormatAvailable(png_format) }.is_ok()
+}
+
+#[cfg(target_os = "windows")]
+fn clipboard_has_file_payload_format() -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::DataExchange::{
+        IsClipboardFormatAvailable, RegisterClipboardFormatW,
+    };
+
+    const CF_HDROP: u32 = 15;
+    if unsafe { IsClipboardFormatAvailable(CF_HDROP) }.is_ok() {
+        return true;
+    }
+
+    // OLE virtual files (for example Outlook attachments) do not necessarily
+    // expose CF_HDROP. Their descriptors still identify the update as a file
+    // payload, which Cubby deliberately does not present as durable history.
+    [
+        "FileGroupDescriptor",
+        "FileGroupDescriptorW",
+        "FileContents",
+    ]
+    .into_iter()
+    .any(|format_name| {
+        let name: Vec<u16> = format_name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let format = unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) };
+        format != 0 && unsafe { IsClipboardFormatAvailable(format) }.is_ok()
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -715,27 +753,6 @@ fn materialize_clipboard_content() -> Option<(CapturedContent, Vec<CapturedForma
 
     for attempt in 0..ATTEMPTS {
         if let Ok(ctx) = ClipboardContext::new() {
-            if let Ok(files) = ctx.get_files() {
-                if !files.is_empty() {
-                    let serialized = serde_json::to_vec(&files).ok()?;
-                    let preview = files.join("\n").chars().take(200).collect::<String>();
-                    let hash = calculate_hash(&serialized);
-                    return Some((
-                        CapturedContent::Text {
-                            content: files.join("\n").into_bytes(),
-                            preview,
-                            hash,
-                        },
-                        vec![CapturedFormat {
-                            name: "files",
-                            content: serialized,
-                        }],
-                    ));
-                }
-            }
-        }
-
-        if let Ok(ctx) = ClipboardContext::new() {
             if let Ok(text) = ctx.get_text() {
                 if let Some(content) = capture_text(text) {
                     let mut formats = Vec::new();
@@ -886,11 +903,6 @@ fn relay_remote_capture(
             "rtf" => contents.push(ClipboardContent::Rtf(
                 String::from_utf8_lossy(&format.content).to_string(),
             )),
-            "files" => {
-                if let Ok(files) = serde_json::from_slice::<Vec<String>>(&format.content) {
-                    contents.push(ClipboardContent::Files(files));
-                }
-            }
             _ => {}
         }
     }
@@ -930,31 +942,25 @@ async fn process_clipboard_snapshot(
     let sensitive = snapshot.sensitive;
     let source_app_info = resolve_source_app_info(snapshot.source_app_identity);
     let captured_formats = snapshot.formats;
-    let has_files = captured_formats.iter().any(|format| format.name == "files");
     let (clip_type, clip_content, clip_preview, _primary_hash, full_image_content, metadata) =
         match snapshot.content {
             CapturedContent::Text {
                 content,
                 preview,
                 hash,
-            } => (
-                if has_files { "files" } else { "text" },
-                content,
-                preview,
-                hash,
-                None,
-                if has_files {
-                    Some(
-                        serde_json::json!({ "file_count": captured_formats.first().and_then(|format| serde_json::from_slice::<Vec<String>>(&format.content).ok()).map(|files| files.len()).unwrap_or(0) })
-                            .to_string(),
-                    )
-                } else {
-                    let format_names: Vec<&str> =
-                        captured_formats.iter().map(|format| format.name).collect();
+            } => {
+                let format_names: Vec<&str> =
+                    captured_formats.iter().map(|format| format.name).collect();
+                (
+                    "text",
+                    content,
+                    preview,
+                    hash,
+                    None,
                     (!format_names.is_empty())
-                        .then(|| serde_json::json!({ "formats": format_names }).to_string())
-                },
-            ),
+                        .then(|| serde_json::json!({ "formats": format_names }).to_string()),
+                )
+            }
             CapturedContent::Image {
                 png_bytes,
                 width,

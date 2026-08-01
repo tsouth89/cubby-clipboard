@@ -41,6 +41,9 @@ rich-format matrix. It publishes each payload from a child process, then verifie
 exact Unicode text, raw CF_HTML and RTF bytes, decoded HTML/RTF, ordered
 `CF_HDROP` paths backed by physical files and a folder, their exact on-disk
 bytes and types, and arbitrary binary bytes with embedded NUL/high-byte values.
+The file fixture remains a low-level Windows clipboard diagnostic only; Cubby's
+product capture intentionally ignores file payloads rather than presenting
+external path references as durable history.
 
 ```powershell
 scripts/test-clipboard-formats.ps1
@@ -57,8 +60,7 @@ bounded retry principle
 used by production capture instead of treating the first contended read as data
 loss.
 
-Delayed-rendered virtual files and the real application matrix remain separate
-because these local deterministic payloads cannot establish those claims.
+Delayed-rendered virtual files are outside Cubby's stored-history contract.
 
 ## NinjaOne remote-session validation
 

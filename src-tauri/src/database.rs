@@ -268,6 +268,23 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        // Older Cubby builds stored file clipboard payloads as external path
+        // references. Those rows are not durable history: they can stop working
+        // after files move, storage disconnects, or a target rejects CF_HDROP.
+        // Remove them before the in-memory search index is built so no stale
+        // file entry remains visible in All, folders, or search.
+        let removed_file_references =
+            sqlx::query("DELETE FROM clips WHERE clip_type IN ('file', 'files')")
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        if removed_file_references > 0 {
+            log::info!(
+                "STORAGE: Removed {} legacy file-reference history items",
+                removed_file_references
+            );
+        }
+
         Ok(())
     }
 }
@@ -707,6 +724,76 @@ mod tests {
         .expect("is_pinned column should exist");
 
         assert_eq!(pin_default, 0);
+    }
+
+    #[tokio::test]
+    async fn migration_removes_legacy_file_references_and_their_formats() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory database should open");
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .expect("foreign keys should enable");
+        let database = Database {
+            pool,
+            crypto: Arc::new(CryptoManager::ephemeral()),
+            image_dir: std::env::temp_dir().join(format!("cubby-test-{}", uuid::Uuid::new_v4())),
+            search_index: Arc::new(crate::search_index::SearchIndex::default()),
+        };
+        database
+            .migrate()
+            .await
+            .expect("initial migration should succeed");
+
+        for (uuid, clip_type) in [
+            ("legacy-file", "file"),
+            ("legacy-files", "files"),
+            ("keep-text", "text"),
+            ("keep-image", "image"),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash)
+                VALUES (?, ?, x'00', '', ?)
+                "#,
+            )
+            .bind(uuid)
+            .bind(clip_type)
+            .bind(format!("hash-{uuid}"))
+            .execute(&database.pool)
+            .await
+            .expect("legacy fixture should insert");
+        }
+        for uuid in ["legacy-file", "legacy-files", "keep-text"] {
+            sqlx::query(
+                "INSERT INTO clip_formats (clip_uuid, format, content) VALUES (?, 'fixture', x'00')",
+            )
+            .bind(uuid)
+            .execute(&database.pool)
+            .await
+            .expect("format fixture should insert");
+        }
+
+        database
+            .migrate()
+            .await
+            .expect("upgrade migration should succeed");
+
+        let remaining: Vec<String> = sqlx::query_scalar("SELECT uuid FROM clips ORDER BY uuid")
+            .fetch_all(&database.pool)
+            .await
+            .expect("remaining clips should query");
+        assert_eq!(remaining, vec!["keep-image", "keep-text"]);
+
+        let remaining_formats: Vec<String> =
+            sqlx::query_scalar("SELECT clip_uuid FROM clip_formats ORDER BY clip_uuid")
+                .fetch_all(&database.pool)
+                .await
+                .expect("remaining formats should query");
+        assert_eq!(remaining_formats, vec!["keep-text"]);
     }
 
     #[tokio::test]
