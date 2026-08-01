@@ -1,7 +1,7 @@
 import { FolderItem } from '../types';
 import { ChevronDown, Filter, MoreHorizontal, Plus, Search, Settings2, X } from 'lucide-react';
 
-export type ContentFilter = 'all' | 'text' | 'images' | 'files';
+export type ContentFilter = 'all' | 'text' | 'images';
 
 interface FlyoutHeaderProps {
   searchQuery: string;
@@ -58,7 +58,6 @@ export function FlyoutHeader({
             ['all', 'All'],
             ['text', 'Text'],
             ['images', 'Images'],
-            ['files', 'Files'],
           ] as const
         ).map(([id, label]) => (
           <button

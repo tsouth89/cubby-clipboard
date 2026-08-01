@@ -1,7 +1,7 @@
 import { ClipboardItem } from '../types';
 import { clsx } from 'clsx';
 import { CLIP_TYPE_ICONS, ClipType } from '../types';
-import { FileText, Image, Code, Type, File, Link } from 'lucide-react';
+import { FileText, Image, Code, Type, Link } from 'lucide-react';
 
 // Map icon string names to Lucide components
 const IconMap: Record<string, any> = {
@@ -9,7 +9,6 @@ const IconMap: Record<string, any> = {
   Image,
   Code,
   Type,
-  File,
   Link,
 };
 

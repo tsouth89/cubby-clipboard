@@ -29,8 +29,11 @@ The first compatibility baseline covers:
 - HTML
 - RTF
 - PNG and Windows bitmap variants
-- File lists and virtual files
 - Multiple simultaneous formats representing the same copied item
+
+File clipboard payloads are intentionally ignored. Windows file copies are
+references to external paths rather than durable clipboard content, so Cubby
+does not present them as stored history.
 
 Application-specific formats should be preserved when practical and must not prevent standard formats from being captured.
 
@@ -47,7 +50,7 @@ For each client, test:
 
 - remote-to-local and local-to-remote copies
 - rapid sequences of distinct copies
-- text, rich text, HTML, images, and files where supported
+- text, rich text, HTML, and images
 - copies immediately before disconnect and immediately after reconnect
 - repeated identical content
 - clipboard redirection being disabled, enabled, or interrupted

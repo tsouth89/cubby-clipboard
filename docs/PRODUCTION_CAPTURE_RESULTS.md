@@ -33,7 +33,7 @@ Test rows were selected by their dedicated `CUBBY-PROBE-` prefix and removed aft
 
 ## Current boundary
 
-The production schema now preserves text, HTML, RTF, images, and physical file
-lists alongside the primary searchable representation. Virtual files and other
-application-specific delayed-rendered formats still require targeted fixtures
-before Cubby can claim lossless support for them.
+The production schema preserves text, HTML, RTF, and images alongside the
+primary searchable representation. File clipboard payloads are intentionally
+ignored because they reference external paths and cannot provide durable,
+trustworthy history after files move, disappear, or become inaccessible.

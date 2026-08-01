@@ -27,8 +27,7 @@ interface ImageMetadata {
 }
 
 function sourceLabel(value: string | null, type: string) {
-  if (!value)
-    return type === 'image' ? 'Image' : type === 'file' || type === 'files' ? 'Files' : 'Clipboard';
+  if (!value) return type === 'image' ? 'Image' : 'Clipboard';
   return value.replace(/\.exe$/i, '');
 }
 
@@ -49,7 +48,6 @@ function formatBytes(bytes?: number) {
 }
 
 function contentKind(content: string, clipType: string) {
-  if (clipType === 'file' || clipType === 'files') return 'Files';
   const trimmed = content.trim();
   if (clipType === 'url' || /^https?:\/\/\S+$/i.test(trimmed)) return 'URL';
   if (/^[A-Za-z]:[\\/]|^\\\\[^\\]+\\/.test(trimmed)) return 'Path';

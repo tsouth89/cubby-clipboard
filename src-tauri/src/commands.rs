@@ -586,10 +586,6 @@ fn clipboard_contents_for_restore(
                     String::from_utf8(content.clone())
                         .map_err(|_| "stored RTF is not UTF-8".to_string())?,
                 )),
-                "files" => contents.push(ClipboardContent::Files(
-                    serde_json::from_slice(content)
-                        .map_err(|_| "stored file list is invalid".to_string())?,
-                )),
                 _ => {}
             }
         }
@@ -604,7 +600,6 @@ fn content_filter_clause(content_filter: Option<&str>) -> &'static str {
     match content_filter {
         Some("images") => " AND clip_type = 'image'",
         Some("text") => " AND clip_type = 'text'",
-        Some("files") => " AND clip_type IN ('file', 'files')",
         _ => "",
     }
 }
@@ -2333,13 +2328,6 @@ mod tests {
             restore_hash_material(&clip, None, &formats, false),
             restore_hash_material(&clip, None, &formats, true)
         );
-
-        let files = vec![(
-            "files".to_string(),
-            serde_json::to_vec(&vec![r"C:\one.txt", r"C:\two.txt"]).unwrap(),
-        )];
-        let file_contents = clipboard_contents_for_restore(&clip, None, &files, false).unwrap();
-        assert!(matches!(&file_contents[1], ClipboardContent::Files(paths) if paths.len() == 2));
     }
 
     #[tokio::test]

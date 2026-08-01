@@ -15,6 +15,9 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Keep Microsoft Store builds under Store-managed startup and update behavior without unsupported in-app controls
 - Update the reachable `event-listener` dependency to the patched release for RUSTSEC-2026-0221
 
+### Changed
+- Stop presenting copied file references as durable clipboard history; file-copy events are now intentionally ignored and legacy file entries are removed
+
 ## v1.2.3
 
 ### Added

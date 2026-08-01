@@ -38,7 +38,6 @@ interface HotkeyStartupNotice {
 const matchesContentFilter = (clip: AppClipboardItem, filter: ContentFilter) => {
   if (filter === 'images') return clip.clip_type === 'image';
   if (filter === 'text') return clip.clip_type === 'text';
-  if (filter === 'files') return clip.clip_type === 'file' || clip.clip_type === 'files';
   return true;
 };
 
@@ -663,12 +662,6 @@ function App() {
       return {
         title: t('clipList.noText'),
         description: t('clipList.noTextDesc'),
-      };
-    }
-    if (contentFilter === 'files') {
-      return {
-        title: t('clipList.noFiles'),
-        description: t('clipList.noFilesDesc'),
       };
     }
     return {
