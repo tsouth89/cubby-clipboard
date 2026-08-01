@@ -497,6 +497,7 @@ fn clipboard_has_supported_format() -> bool {
 
 #[cfg(target_os = "windows")]
 fn clipboard_has_file_payload_format() -> bool {
+    use std::sync::OnceLock;
     use windows::core::PCWSTR;
     use windows::Win32::System::DataExchange::{
         IsClipboardFormatAvailable, RegisterClipboardFormatW,
@@ -510,20 +511,25 @@ fn clipboard_has_file_payload_format() -> bool {
     // OLE virtual files (for example Outlook attachments) do not necessarily
     // expose CF_HDROP. Their descriptors still identify the update as a file
     // payload, which Cubby deliberately does not present as durable history.
-    [
-        "FileGroupDescriptor",
-        "FileGroupDescriptorW",
-        "FileContents",
-    ]
-    .into_iter()
-    .any(|format_name| {
-        let name: Vec<u16> = format_name
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-        let format = unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) };
-        format != 0 && unsafe { IsClipboardFormatAvailable(format) }.is_ok()
-    })
+    static VIRTUAL_FILE_FORMATS: OnceLock<[u32; 3]> = OnceLock::new();
+    VIRTUAL_FILE_FORMATS
+        .get_or_init(|| {
+            [
+                "FileGroupDescriptor",
+                "FileGroupDescriptorW",
+                "FileContents",
+            ]
+            .map(|format_name| {
+                let name: Vec<u16> = format_name
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) }
+            })
+        })
+        .iter()
+        .copied()
+        .any(|format| format != 0 && unsafe { IsClipboardFormatAvailable(format) }.is_ok())
 }
 
 #[cfg(target_os = "windows")]
