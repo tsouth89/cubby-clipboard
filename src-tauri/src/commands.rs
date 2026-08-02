@@ -453,16 +453,13 @@ pub async fn migrate_clip_format_model(db: &Database) -> Result<u64, String> {
         } else {
             None
         };
-        let mut hash_material = Vec::new();
-        hash_material.extend_from_slice(clip.clip_type.as_bytes());
-        hash_material.push(0);
-        hash_material.extend_from_slice(full_image.as_deref().unwrap_or(&clip.content));
-        for (format, content) in formats {
-            hash_material.push(0);
-            hash_material.extend_from_slice(format.as_bytes());
-            hash_material.push(0);
-            hash_material.extend_from_slice(&content);
-        }
+        let hash_material = crate::clipboard::build_clip_hash_material(
+            &clip.clip_type,
+            full_image.as_deref().unwrap_or(&clip.content),
+            formats
+                .iter()
+                .map(|(format, content)| (format.as_str(), content.as_slice())),
+        );
         sqlx::query("UPDATE clips SET content_hash = ? WHERE uuid = ?")
             .bind(db.crypto.keyed_hash(&hash_material))
             .bind(&clip.uuid)
@@ -573,11 +570,9 @@ fn clipboard_contents_for_restore(
     } else {
         vec![ClipboardContent::Text(plain_content)]
     };
-    // Auxiliary CF_HDROP on a captured screenshot describes the producer's
-    // saved file, but replaying it makes some paste targets treat the history
-    // item as a file upload instead of an image. Image clips therefore restore
-    // only their durable bitmap; pure file and rich-text clips keep replaying
-    // their auxiliary formats.
+    // Image clips restore only their durable bitmap. Adding auxiliary rich
+    // formats can change how a paste target classifies the restored payload;
+    // HTML and RTF are therefore replayed only for text clips.
     if !plain_text && !restoring_image {
         for (format, content) in formats {
             match format.as_str() {
@@ -766,22 +761,26 @@ async fn restore_clip(
             // Synchronize clipboard access across the app
             let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
 
-            // Normalize HTML to the document form a re-capture of our own
-            // clipboard write reads back (bare legacy fragments gain the
-            // standard container), so the ignore hash below matches it.
-            let formats = load_clip_formats(db, &clip.uuid)
-                .await?
-                .into_iter()
-                .map(|(format, content)| {
-                    if format == "html" {
-                        if let Ok(html) = std::str::from_utf8(&content) {
-                            let document = crate::cf_html::document(html);
-                            return (format, document.into_bytes());
+            let formats = if clip.clip_type == "image" {
+                Vec::new()
+            } else {
+                // Normalize HTML to the document form a re-capture of our own
+                // clipboard write reads back (bare legacy fragments gain the
+                // standard container), so the ignore hash below matches it.
+                load_clip_formats(db, &clip.uuid)
+                    .await?
+                    .into_iter()
+                    .map(|(format, content)| {
+                        if format == "html" {
+                            if let Ok(html) = std::str::from_utf8(&content) {
+                                let document = crate::cf_html::document(html);
+                                return (format, document.into_bytes());
+                            }
                         }
-                    }
-                    (format, content)
-                })
-                .collect::<Vec<_>>();
+                        (format, content)
+                    })
+                    .collect::<Vec<_>>()
+            };
             let full_image = if clip.clip_type == "image" {
                 Some(load_full_image_content(db, &mut clip).await?)
             } else {
@@ -2388,6 +2387,17 @@ mod tests {
         .execute(&database.pool)
         .await
         .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash)
+            VALUES ('image', 'image', ?, ?, 'old-image-hash')
+            "#,
+        )
+        .bind(database.crypto.encrypt(b"png bytes").unwrap())
+        .bind(database.crypto.encrypt_text("Image").unwrap())
+        .execute(&database.pool)
+        .await
+        .unwrap();
         crate::clipboard::replace_clip_formats(
             &database.pool,
             &database.crypto,
@@ -2399,6 +2409,17 @@ mod tests {
         )
         .await
         .unwrap();
+        crate::clipboard::replace_clip_formats(
+            &database.pool,
+            &database.crypto,
+            "image",
+            &[CapturedFormat {
+                name: "files",
+                content: br#"["C:\\shot.png"]"#.to_vec(),
+            }],
+        )
+        .await
+        .unwrap();
         let encrypted_format: Vec<u8> =
             sqlx::query_scalar("SELECT content FROM clip_formats WHERE clip_uuid = 'rich'")
                 .fetch_one(&database.pool)
@@ -2406,7 +2427,7 @@ mod tests {
                 .unwrap();
         assert!(database.crypto.is_encrypted(&encrypted_format));
 
-        assert_eq!(migrate_clip_format_model(&database).await.unwrap(), 1);
+        assert_eq!(migrate_clip_format_model(&database).await.unwrap(), 2);
         assert_eq!(migrate_clip_format_model(&database).await.unwrap(), 0);
         let hash: String = sqlx::query_scalar("SELECT content_hash FROM clips WHERE uuid = 'rich'")
             .fetch_one(&database.pool)
@@ -2416,6 +2437,12 @@ mod tests {
             .crypto
             .keyed_hash(b"text\0Hello\0html\0<b>Hello</b>");
         assert_eq!(hash, expected);
+        let image_hash: String =
+            sqlx::query_scalar("SELECT content_hash FROM clips WHERE uuid = 'image'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(image_hash, database.crypto.keyed_hash(b"image\0png bytes"));
     }
 
     #[tokio::test]
