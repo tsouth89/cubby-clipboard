@@ -13,6 +13,13 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    # TypeScript 7 removes tsconfig options Cubby currently uses, and i18next
+    # 25 declares support for TypeScript 5 and 6 only. Keep receiving 5.x/6.x
+    # updates while deferring this major until the frontend stack supports it.
+    ignore:
+      - dependency-name: typescript
+        versions:
+          - ">=7 <8"
     open-pull-requests-limit: 10
 
   - package-ecosystem: cargo
