@@ -2,6 +2,11 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
+## v1.2.6
+
+### Changed
+- Refreshed the interface icon set. The filter, settings, shield, play, pause, file, and flask icons are redrawn with the same meanings and slightly different shapes
+
 ## v1.2.5
 
 ### Fixed
