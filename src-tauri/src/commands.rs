@@ -765,7 +765,7 @@ async fn restore_clip(
             // Synchronize clipboard access across the app
             let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
 
-            let formats = if clip.clip_type == "image" {
+            let formats = if clip.clip_type == "image" || plain_text {
                 Vec::new()
             } else {
                 // Normalize HTML to the document form a re-capture of our own
