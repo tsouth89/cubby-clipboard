@@ -13,13 +13,25 @@ updates:
         update-types:
           - "minor"
           - "patch"
-    # TypeScript 7 removes tsconfig options Cubby currently uses, and i18next
-    # 25 declares support for TypeScript 5 and 6 only. Keep receiving 5.x/6.x
-    # updates while deferring this major until the frontend stack supports it.
+    # The tsconfig half of this deferral is now resolved: `baseUrl` is gone and
+    # tsc 7.0.2 type-checks the project clean. What still blocks the major is
+    # i18next 25.x declaring `typescript: ^5 || ^6` as a peer. Lift this once
+    # the i18n stack moves (see below) or is removed.
+    #
+    # Cubby is English-only; the i18next stack is inherited PastePaw legacy and
+    # is a removal candidate, not something to keep current. react-i18next 17
+    # additionally requires i18next >= 26.2.0, so taking it means two majors on
+    # a dependency we intend to delete. Hold both at their current majors.
     ignore:
       - dependency-name: typescript
         versions:
           - ">=7 <8"
+      - dependency-name: react-i18next
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: i18next
+        update-types:
+          - "version-update:semver-major"
     open-pull-requests-limit: 10
 
   - package-ecosystem: cargo
