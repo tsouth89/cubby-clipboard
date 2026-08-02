@@ -2,6 +2,12 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
+## v1.2.5
+
+### Fixed
+- Capture screenshots from tools such as Matteshot that publish image data alongside a saved-file reference, while continuing to ignore ordinary file copies
+- Paste large screenshots from history much faster by restoring their original PNG data with a compatible Windows bitmap, with safer failure handling that prevents duplicate self-captures
+
 ## v1.2.4
 
 ### Added
