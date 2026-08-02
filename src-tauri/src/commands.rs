@@ -447,22 +447,23 @@ pub async fn migrate_clip_format_model(db: &Database) -> Result<u64, String> {
         .map_err(|e| e.to_string())?;
     for clip in &mut clips {
         decrypt_clip_fields(db, clip)?;
-        let formats = load_clip_formats(db, &clip.uuid).await?;
+        let formats = if clip.clip_type == "image" {
+            Vec::new()
+        } else {
+            load_clip_formats(db, &clip.uuid).await?
+        };
         let full_image = if clip.clip_type == "image" {
             Some(load_full_image_content(db, clip).await?)
         } else {
             None
         };
-        let mut hash_material = Vec::new();
-        hash_material.extend_from_slice(clip.clip_type.as_bytes());
-        hash_material.push(0);
-        hash_material.extend_from_slice(full_image.as_deref().unwrap_or(&clip.content));
-        for (format, content) in formats {
-            hash_material.push(0);
-            hash_material.extend_from_slice(format.as_bytes());
-            hash_material.push(0);
-            hash_material.extend_from_slice(&content);
-        }
+        let hash_material = crate::clipboard::build_clip_hash_material(
+            &clip.clip_type,
+            full_image.as_deref().unwrap_or(&clip.content),
+            formats
+                .iter()
+                .map(|(format, content)| (format.as_str(), content.as_slice())),
+        );
         sqlx::query("UPDATE clips SET content_hash = ? WHERE uuid = ?")
             .bind(db.crypto.keyed_hash(&hash_material))
             .bind(&clip.uuid)
@@ -565,6 +566,7 @@ fn clipboard_contents_for_restore(
     plain_text: bool,
 ) -> Result<Vec<ClipboardContent>, String> {
     let plain_content = String::from_utf8_lossy(&clip.content).to_string();
+    let restoring_image = full_image.is_some();
     let mut contents = if let Some(image) = full_image {
         vec![ClipboardContent::Image(
             RustImageData::from_bytes(image).map_err(|e| e.to_string())?,
@@ -572,7 +574,10 @@ fn clipboard_contents_for_restore(
     } else {
         vec![ClipboardContent::Text(plain_content)]
     };
-    if !plain_text {
+    // Image clips restore only their durable bitmap. Adding auxiliary rich
+    // formats can change how a paste target classifies the restored payload;
+    // HTML and RTF are therefore replayed only for text clips.
+    if !plain_text && !restoring_image {
         for (format, content) in formats {
             match format.as_str() {
                 // Stored HTML is the header-stripped document (see cf_html.rs);
@@ -717,24 +722,21 @@ fn restore_hash_material(
     formats: &[(String, Vec<u8>)],
     plain_text: bool,
 ) -> Vec<u8> {
-    let mut material = Vec::new();
     if plain_text {
+        let mut material = Vec::new();
         material.extend_from_slice(b"text");
         material.push(0);
         material.extend_from_slice(&clip.content);
         return material;
     }
 
-    material.extend_from_slice(clip.clip_type.as_bytes());
-    material.push(0);
-    material.extend_from_slice(full_image.unwrap_or(&clip.content));
-    for (format, content) in formats {
-        material.push(0);
-        material.extend_from_slice(format.as_bytes());
-        material.push(0);
-        material.extend_from_slice(content);
-    }
-    material
+    crate::clipboard::build_clip_hash_material(
+        &clip.clip_type,
+        full_image.unwrap_or(&clip.content),
+        formats
+            .iter()
+            .map(|(format, content)| (format.as_str(), content.as_slice())),
+    )
 }
 
 async fn restore_clip(
@@ -744,6 +746,7 @@ async fn restore_clip(
     window: &tauri::WebviewWindow,
     db: &Database,
 ) -> Result<(), String> {
+    let restore_started = Instant::now();
     let pool = &db.pool;
 
     let clip: Option<Clip> = sqlx::query_as(r#"SELECT * FROM clips WHERE uuid = ?"#)
@@ -762,22 +765,26 @@ async fn restore_clip(
             // Synchronize clipboard access across the app
             let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
 
-            // Normalize HTML to the document form a re-capture of our own
-            // clipboard write reads back (bare legacy fragments gain the
-            // standard container), so the ignore hash below matches it.
-            let formats = load_clip_formats(db, &clip.uuid)
-                .await?
-                .into_iter()
-                .map(|(format, content)| {
-                    if format == "html" {
-                        if let Ok(html) = std::str::from_utf8(&content) {
-                            let document = crate::cf_html::document(html);
-                            return (format, document.into_bytes());
+            let formats = if clip.clip_type == "image" || plain_text {
+                Vec::new()
+            } else {
+                // Normalize HTML to the document form a re-capture of our own
+                // clipboard write reads back (bare legacy fragments gain the
+                // standard container), so the ignore hash below matches it.
+                load_clip_formats(db, &clip.uuid)
+                    .await?
+                    .into_iter()
+                    .map(|(format, content)| {
+                        if format == "html" {
+                            if let Ok(html) = std::str::from_utf8(&content) {
+                                let document = crate::cf_html::document(html);
+                                return (format, document.into_bytes());
+                            }
                         }
-                    }
-                    (format, content)
-                })
-                .collect::<Vec<_>>();
+                        (format, content)
+                    })
+                    .collect::<Vec<_>>()
+            };
             let full_image = if clip.clip_type == "image" {
                 Some(load_full_image_content(db, &mut clip).await?)
             } else {
@@ -788,13 +795,29 @@ async fn restore_clip(
             let content_hash = crate::clipboard::calculate_hash(&hash_material);
             let uuid = clip.uuid.clone();
 
-            let clipboard_contents =
-                clipboard_contents_for_restore(&clip, full_image.as_deref(), &formats, plain_text)?;
-
-            crate::clipboard::set_ignore_hash(content_hash);
-            let final_res = ClipboardContext::new()
-                .and_then(|context| context.set(clipboard_contents))
-                .map_err(|error| format!("Failed to restore clipboard formats: {error}"));
+            crate::clipboard::set_ignore_hash(content_hash.clone());
+            let clipboard_write_started = Instant::now();
+            let final_res = if let Some(image) = full_image.as_deref() {
+                crate::clipboard::set_clipboard_image_png(image)
+                    .map_err(|error| format!("Failed to restore clipboard image: {error}"))
+            } else {
+                let clipboard_contents =
+                    clipboard_contents_for_restore(&clip, None, &formats, plain_text)?;
+                ClipboardContext::new()
+                    .and_then(|context| context.set(clipboard_contents))
+                    .map_err(|error| format!("Failed to restore clipboard formats: {error}"))
+            };
+            log::info!(
+                "[perf][restore_clip] type={} image_bytes={} clipboard_write_ms={} total_ms={} success={}",
+                clip.clip_type,
+                full_image.as_ref().map_or(0, Vec::len),
+                clipboard_write_started.elapsed().as_millis(),
+                restore_started.elapsed().as_millis(),
+                final_res.is_ok(),
+            );
+            if final_res.is_err() {
+                crate::clipboard::clear_ignore_hash_if_matches(&content_hash);
+            }
 
             // Manually perform the LRU bump (update created_at)
             let _ =
@@ -874,10 +897,14 @@ async fn restore_recognized_text(
     let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
     let mut hash_material = b"text\0".to_vec();
     hash_material.extend_from_slice(text.as_bytes());
-    crate::clipboard::set_ignore_hash(crate::clipboard::calculate_hash(&hash_material));
-    ClipboardContext::new()
+    let content_hash = crate::clipboard::calculate_hash(&hash_material);
+    crate::clipboard::set_ignore_hash(content_hash.clone());
+    if let Err(error) = ClipboardContext::new()
         .and_then(|context| context.set(vec![ClipboardContent::Text(text.clone())]))
-        .map_err(|error| format!("Failed to copy recognized text: {error}"))?;
+    {
+        crate::clipboard::clear_ignore_hash_if_matches(&content_hash);
+        return Err(format!("Failed to copy recognized text: {error}"));
+    }
 
     let _ = sqlx::query("UPDATE clips SET created_at = CURRENT_TIMESTAMP WHERE uuid = ?")
         .bind(id)
@@ -2328,6 +2355,26 @@ mod tests {
             restore_hash_material(&clip, None, &formats, false),
             restore_hash_material(&clip, None, &formats, true)
         );
+        let mut image_clip = clip.clone();
+        image_clip.clip_type = "image".to_string();
+        let files = vec![("files".to_string(), br#"["C:\\one.png"]"#.to_vec())];
+        let other_files = vec![("files".to_string(), br#"["D:\\other-shot.png"]"#.to_vec())];
+        assert_eq!(
+            restore_hash_material(&image_clip, Some(b"full image"), &files, false),
+            restore_hash_material(&image_clip, Some(b"full image"), &other_files, false),
+        );
+
+        let mut png = Vec::new();
+        image::DynamicImage::new_rgba8(1, 1)
+            .write_to(
+                &mut std::io::Cursor::new(&mut png),
+                image::ImageOutputFormat::Png,
+            )
+            .unwrap();
+        let image_contents =
+            clipboard_contents_for_restore(&image_clip, Some(&png), &files, false).unwrap();
+        assert_eq!(image_contents.len(), 1);
+        assert!(matches!(&image_contents[0], ClipboardContent::Image(_)));
     }
 
     #[tokio::test]
@@ -2344,6 +2391,17 @@ mod tests {
         .execute(&database.pool)
         .await
         .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash)
+            VALUES ('image', 'image', ?, ?, 'old-image-hash')
+            "#,
+        )
+        .bind(database.crypto.encrypt(b"png bytes").unwrap())
+        .bind(database.crypto.encrypt_text("Image").unwrap())
+        .execute(&database.pool)
+        .await
+        .unwrap();
         crate::clipboard::replace_clip_formats(
             &database.pool,
             &database.crypto,
@@ -2355,6 +2413,17 @@ mod tests {
         )
         .await
         .unwrap();
+        crate::clipboard::replace_clip_formats(
+            &database.pool,
+            &database.crypto,
+            "image",
+            &[CapturedFormat {
+                name: "files",
+                content: br#"["C:\\shot.png"]"#.to_vec(),
+            }],
+        )
+        .await
+        .unwrap();
         let encrypted_format: Vec<u8> =
             sqlx::query_scalar("SELECT content FROM clip_formats WHERE clip_uuid = 'rich'")
                 .fetch_one(&database.pool)
@@ -2362,7 +2431,7 @@ mod tests {
                 .unwrap();
         assert!(database.crypto.is_encrypted(&encrypted_format));
 
-        assert_eq!(migrate_clip_format_model(&database).await.unwrap(), 1);
+        assert_eq!(migrate_clip_format_model(&database).await.unwrap(), 2);
         assert_eq!(migrate_clip_format_model(&database).await.unwrap(), 0);
         let hash: String = sqlx::query_scalar("SELECT content_hash FROM clips WHERE uuid = 'rich'")
             .fetch_one(&database.pool)
@@ -2372,6 +2441,12 @@ mod tests {
             .crypto
             .keyed_hash(b"text\0Hello\0html\0<b>Hello</b>");
         assert_eq!(hash, expected);
+        let image_hash: String =
+            sqlx::query_scalar("SELECT content_hash FROM clips WHERE uuid = 'image'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(image_hash, database.crypto.keyed_hash(b"image\0png bytes"));
     }
 
     #[tokio::test]
