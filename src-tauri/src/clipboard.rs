@@ -18,6 +18,8 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+#[cfg(target_os = "windows")]
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 #[cfg(target_os = "windows")]
@@ -69,6 +71,8 @@ pub static CLIPBOARD_SYNC: Lazy<Arc<tokio::sync::Mutex<()>>> =
 /// Password-manager extensions typically clear within tens of seconds. Keep this
 /// short so a deliberate later clear does not erase an intentional keep.
 const CLIPBOARD_CLEAR_FORGET_WINDOW: Duration = Duration::from_secs(90);
+#[cfg(target_os = "windows")]
+const CF_DIB_FORMAT: u32 = 8;
 
 #[derive(Clone, Debug)]
 struct RecentCapture {
@@ -556,25 +560,32 @@ fn clipboard_has_file_payload_format() -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn clipboard_has_image_format() -> bool {
+fn registered_png_format() -> u32 {
     use windows::core::PCWSTR;
-    use windows::Win32::System::DataExchange::{
-        IsClipboardFormatAvailable, RegisterClipboardFormatW,
-    };
+    use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+
+    static PNG_FORMAT: OnceLock<u32> = OnceLock::new();
+    *PNG_FORMAT.get_or_init(|| {
+        let name: Vec<u16> = "PNG".encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) }
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn clipboard_has_image_format() -> bool {
+    use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
 
     const CF_BITMAP: u32 = 2;
-    const CF_DIB: u32 = 8;
     const CF_DIBV5: u32 = 17;
 
-    if [CF_DIBV5, CF_DIB, CF_BITMAP]
+    if [CF_DIBV5, CF_DIB_FORMAT, CF_BITMAP]
         .into_iter()
         .any(|format| unsafe { IsClipboardFormatAvailable(format) }.is_ok())
     {
         return true;
     }
 
-    let name: Vec<u16> = "PNG".encode_utf16().chain(std::iter::once(0)).collect();
-    let png_format = unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) };
+    let png_format = registered_png_format();
     png_format != 0 && unsafe { IsClipboardFormatAvailable(png_format) }.is_ok()
 }
 
@@ -946,13 +957,9 @@ fn read_registered_png_fast() -> Result<ClipboardImageRead, String> {
 
 #[cfg(target_os = "windows")]
 fn clipboard_has_registered_png() -> bool {
-    use windows::core::PCWSTR;
-    use windows::Win32::System::DataExchange::{
-        IsClipboardFormatAvailable, RegisterClipboardFormatW,
-    };
+    use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
 
-    let name: Vec<u16> = "PNG".encode_utf16().chain(std::iter::once(0)).collect();
-    let format = unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) };
+    let format = registered_png_format();
     format != 0 && unsafe { IsClipboardFormatAvailable(format) }.is_ok()
 }
 
@@ -1024,8 +1031,10 @@ pub(crate) fn set_clipboard_image_png(png_bytes: &[u8]) -> Result<(), String> {
             .map_err(|e| e.to_string())?
             .into_rgba8();
         let dib = rgba_to_cf_dib(rgba.width(), rgba.height(), rgba.as_raw())?;
-        let png_format = clipboard_win::register_format("PNG")
-            .ok_or_else(|| "could not register the PNG clipboard format".to_string())?;
+        let png_format = registered_png_format();
+        if png_format == 0 {
+            return Err("could not register the PNG clipboard format".to_string());
+        }
         let _clipboard = clipboard_win::Clipboard::new_attempts(10)
             .map_err(|e| format!("could not open clipboard: {e}"))?;
         clipboard_win::raw::empty().map_err(|e| format!("could not clear clipboard: {e}"))?;
@@ -1034,9 +1043,9 @@ pub(crate) fn set_clipboard_image_png(png_bytes: &[u8]) -> Result<(), String> {
         // paste targets, so it must succeed before this write can be reported
         // as successful. Writing it first also avoids leaving a PNG-only
         // clipboard behind when the required format fails.
-        clipboard_win::raw::set_without_clear(8, &dib)
+        clipboard_win::raw::set_without_clear(CF_DIB_FORMAT, &dib)
             .map_err(|error| format!("could not set CF_DIB: {error}"))?;
-        if let Err(error) = clipboard_win::raw::set_without_clear(png_format.get(), png_bytes) {
+        if let Err(error) = clipboard_win::raw::set_without_clear(png_format, png_bytes) {
             log::warn!("CLIPBOARD: CF_DIB set succeeded but PNG failed: {error}");
         }
         Ok(())
