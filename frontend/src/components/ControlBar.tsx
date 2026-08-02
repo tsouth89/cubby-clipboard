@@ -262,6 +262,8 @@ export function ControlBar({
             <button
               data-el="search-close-btn"
               onClick={onSearchClick}
+              title="Close search"
+              aria-label="Close search"
               className="rounded-full p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             >
               <X size={16} />
@@ -271,6 +273,8 @@ export function ControlBar({
           <button
             data-el="search-btn"
             onClick={onSearchClick}
+            title="Search clipboard history"
+            aria-label="Search clipboard history"
             className="rounded-lg p-2 text-blue-400 transition-colors hover:bg-blue-500/10"
           >
             <Search size={20} />
@@ -359,6 +363,8 @@ export function ControlBar({
         <button
           data-el="add-folder-btn"
           onClick={onAddClick}
+          title="New folder"
+          aria-label="New folder"
           className="rounded-lg p-2 text-emerald-400 transition-colors hover:bg-emerald-500/10"
         >
           <Plus size={20} />
@@ -366,6 +372,8 @@ export function ControlBar({
         <button
           data-el="settings-btn"
           onClick={onMoreClick}
+          title="Settings"
+          aria-label="Settings"
           className="rounded-lg p-2 text-amber-400 transition-colors hover:bg-amber-500/10"
         >
           <MoreHorizontal size={20} />
