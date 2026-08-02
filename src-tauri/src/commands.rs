@@ -447,7 +447,11 @@ pub async fn migrate_clip_format_model(db: &Database) -> Result<u64, String> {
         .map_err(|e| e.to_string())?;
     for clip in &mut clips {
         decrypt_clip_fields(db, clip)?;
-        let formats = load_clip_formats(db, &clip.uuid).await?;
+        let formats = if clip.clip_type == "image" {
+            Vec::new()
+        } else {
+            load_clip_formats(db, &clip.uuid).await?
+        };
         let full_image = if clip.clip_type == "image" {
             Some(load_full_image_content(db, clip).await?)
         } else {

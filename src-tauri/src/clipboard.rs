@@ -1039,14 +1039,19 @@ pub(crate) fn set_clipboard_image_png(png_bytes: &[u8]) -> Result<(), String> {
             .map_err(|e| format!("could not open clipboard: {e}"))?;
         clipboard_win::raw::empty().map_err(|e| format!("could not clear clipboard: {e}"))?;
 
-        // CF_DIB is the compatibility format used by many traditional Windows
-        // paste targets, so it must succeed before this write can be reported
-        // as successful. Writing it first also avoids leaving a PNG-only
-        // clipboard behind when the required format fails.
-        clipboard_win::raw::set_without_clear(CF_DIB_FORMAT, &dib)
-            .map_err(|error| format!("could not set CF_DIB: {error}"))?;
-        if let Err(error) = clipboard_win::raw::set_without_clear(png_format, png_bytes) {
-            log::warn!("CLIPBOARD: CF_DIB set succeeded but PNG failed: {error}");
+        // Both formats are required: PNG preserves byte-stable image identity
+        // for self-write suppression, while CF_DIB supports traditional
+        // Windows paste targets. If the second write fails, clear the partial
+        // clipboard rather than reporting success with an inconsistent payload.
+        clipboard_win::raw::set_without_clear(png_format, png_bytes)
+            .map_err(|error| format!("could not set PNG: {error}"))?;
+        if let Err(dib_error) = clipboard_win::raw::set_without_clear(CF_DIB_FORMAT, &dib) {
+            return match clipboard_win::raw::empty() {
+                Ok(()) => Err(format!("could not set CF_DIB: {dib_error}")),
+                Err(cleanup_error) => Err(format!(
+                    "could not set CF_DIB ({dib_error}) or clear partial PNG ({cleanup_error})"
+                )),
+            };
         }
         Ok(())
     }
