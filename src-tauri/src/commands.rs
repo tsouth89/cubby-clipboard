@@ -792,7 +792,7 @@ async fn restore_clip(
             let content_hash = crate::clipboard::calculate_hash(&hash_material);
             let uuid = clip.uuid.clone();
 
-            crate::clipboard::set_ignore_hash(content_hash);
+            crate::clipboard::set_ignore_hash(content_hash.clone());
             let clipboard_write_started = Instant::now();
             let final_res = if let Some(image) = full_image.as_deref() {
                 crate::clipboard::set_clipboard_image_png(image)
@@ -812,6 +812,9 @@ async fn restore_clip(
                 restore_started.elapsed().as_millis(),
                 final_res.is_ok(),
             );
+            if final_res.is_err() {
+                crate::clipboard::clear_ignore_hash_if_matches(&content_hash);
+            }
 
             // Manually perform the LRU bump (update created_at)
             let _ =
@@ -891,10 +894,14 @@ async fn restore_recognized_text(
     let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
     let mut hash_material = b"text\0".to_vec();
     hash_material.extend_from_slice(text.as_bytes());
-    crate::clipboard::set_ignore_hash(crate::clipboard::calculate_hash(&hash_material));
-    ClipboardContext::new()
+    let content_hash = crate::clipboard::calculate_hash(&hash_material);
+    crate::clipboard::set_ignore_hash(content_hash.clone());
+    if let Err(error) = ClipboardContext::new()
         .and_then(|context| context.set(vec![ClipboardContent::Text(text.clone())]))
-        .map_err(|error| format!("Failed to copy recognized text: {error}"))?;
+    {
+        crate::clipboard::clear_ignore_hash_if_matches(&content_hash);
+        return Err(format!("Failed to copy recognized text: {error}"));
+    }
 
     let _ = sqlx::query("UPDATE clips SET created_at = CURRENT_TIMESTAMP WHERE uuid = ?")
         .bind(id)

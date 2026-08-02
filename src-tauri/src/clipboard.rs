@@ -133,7 +133,7 @@ pub fn set_ignore_hash(hash: String) {
     *lock = Some(hash);
 }
 
-fn clear_ignore_hash_if_matches(hash: &str) {
+pub(crate) fn clear_ignore_hash_if_matches(hash: &str) {
     let mut lock = IGNORE_HASH.lock();
     if lock.as_deref() == Some(hash) {
         lock.take();
@@ -1003,7 +1003,10 @@ fn rgba_to_cf_dib(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, Strin
 
     for source_row in rgba.chunks_exact(row_bytes).rev() {
         for pixel in source_row.chunks_exact(4) {
-            dib.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+            dib.push(pixel[2]);
+            dib.push(pixel[1]);
+            dib.push(pixel[0]);
+            dib.push(pixel[3]);
         }
     }
     Ok(dib)
@@ -1027,22 +1030,16 @@ pub(crate) fn set_clipboard_image_png(png_bytes: &[u8]) -> Result<(), String> {
             .map_err(|e| format!("could not open clipboard: {e}"))?;
         clipboard_win::raw::empty().map_err(|e| format!("could not clear clipboard: {e}"))?;
 
-        let png_result = clipboard_win::raw::set_without_clear(png_format.get(), png_bytes);
-        let dib_result = clipboard_win::raw::set_without_clear(8, &dib); // CF_DIB
-        match (png_result, dib_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Ok(()), Err(error)) => {
-                log::warn!("CLIPBOARD: PNG set succeeded but CF_DIB failed: {error}");
-                Ok(())
-            }
-            (Err(error), Ok(())) => {
-                log::warn!("CLIPBOARD: CF_DIB set succeeded but PNG failed: {error}");
-                Ok(())
-            }
-            (Err(png_error), Err(dib_error)) => Err(format!(
-                "could not set PNG ({png_error}) or CF_DIB ({dib_error})"
-            )),
+        // CF_DIB is the compatibility format used by many traditional Windows
+        // paste targets, so it must succeed before this write can be reported
+        // as successful. Writing it first also avoids leaving a PNG-only
+        // clipboard behind when the required format fails.
+        clipboard_win::raw::set_without_clear(8, &dib)
+            .map_err(|error| format!("could not set CF_DIB: {error}"))?;
+        if let Err(error) = clipboard_win::raw::set_without_clear(png_format.get(), png_bytes) {
+            log::warn!("CLIPBOARD: CF_DIB set succeeded but PNG failed: {error}");
         }
+        Ok(())
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1082,14 +1079,15 @@ fn relay_remote_capture(
     captured_formats: &[CapturedFormat],
     clip_hash: &str,
 ) {
-    let mut contents = if clip_type == "image" {
+    let image_content = if clip_type == "image" {
         let Some(png_bytes) = full_image_content else {
             return;
         };
-        if let Err(error) = image::load_from_memory(png_bytes) {
-            log::warn!("CLIPBOARD: Relay skipped, image decode failed: {error}");
-            return;
-        }
+        Some(png_bytes)
+    } else {
+        None
+    };
+    let mut contents = if image_content.is_some() {
         Vec::new()
     } else {
         vec![ClipboardContent::Text(
@@ -1116,8 +1114,8 @@ fn relay_remote_capture(
         *last = Some(clip_hash.to_string());
     }
     set_ignore_hash(clip_hash.to_string());
-    let set_result = if clip_type == "image" {
-        set_clipboard_image_png(full_image_content.unwrap_or_default())
+    let set_result = if let Some(png_bytes) = image_content {
+        set_clipboard_image_png(png_bytes)
     } else {
         ClipboardContext::new()
             .and_then(|context| context.set(contents))
@@ -2277,9 +2275,10 @@ unsafe fn extract_icon(path: &str) -> Option<String> {
 mod tests {
     use super::{
         build_clip_hash_material, calculate_hash, capture_state_name, capture_text,
-        clipboard_retry_delay, next_listener_backoff, rgba_to_cf_dib, should_forget_recent_capture,
-        should_relay_capture, CapturedContent, CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING,
-        CAPTURE_STATE_STOPPED, CLIPBOARD_CLEAR_FORGET_WINDOW,
+        clear_ignore_hash_if_matches, clipboard_retry_delay, next_listener_backoff, rgba_to_cf_dib,
+        set_ignore_hash, should_forget_recent_capture, should_relay_capture, CapturedContent,
+        CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED,
+        CLIPBOARD_CLEAR_FORGET_WINDOW, IGNORE_HASH,
     };
     use std::time::{Duration, Instant};
 
@@ -2414,6 +2413,16 @@ mod tests {
             &dib[40..],
             &[11, 10, 9, 12, 15, 14, 13, 16, 3, 2, 1, 4, 7, 6, 5, 8]
         );
+    }
+
+    #[test]
+    fn failed_write_cleanup_only_clears_its_own_ignore_hash() {
+        set_ignore_hash("expected".to_string());
+        clear_ignore_hash_if_matches("different");
+        assert_eq!(IGNORE_HASH.lock().as_deref(), Some("expected"));
+
+        clear_ignore_hash_if_matches("expected");
+        assert!(IGNORE_HASH.lock().is_none());
     }
 
     #[test]
