@@ -562,7 +562,7 @@ function App() {
         await invoke('paste_clip', { id: clipId, plainText });
       } catch (error) {
         console.error('Failed to paste clip:', error);
-        toast.error('Failed to paste clip');
+        toast.error(`Failed to paste clip: ${String(error)}`);
       }
     },
     [clips]

@@ -3,7 +3,9 @@ use tauri::{AppHandle, Emitter};
 use crate::database::Database;
 #[cfg(target_os = "windows")]
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use clipboard_rs::common::{RustImage, RustImageData};
+use clipboard_rs::common::RustImage;
+#[cfg(not(target_os = "windows"))]
+use clipboard_rs::common::RustImageData;
 use clipboard_rs::{Clipboard, ClipboardContent, ClipboardContext};
 #[cfg(target_os = "windows")]
 use clipboard_win::Monitor;
@@ -408,8 +410,12 @@ fn capture_clipboard_update(
     // clipboard content. Recording them as history creates entries that can
     // silently stop working after a move, disconnect, or target-app mismatch.
     // Ignore both physical and virtual file payloads before reading any text
-    // fallback they may advertise.
-    if clipboard_has_file_payload_format() {
+    // fallback they may advertise. Screenshot tools are the exception: they
+    // intentionally add CF_HDROP beside real image data, which Cubby retains
+    // as an image rather than as an unreliable file reference.
+    let has_file_payload = clipboard_has_file_payload_format();
+    let has_image_payload = clipboard_has_image_format();
+    if has_file_payload && !has_image_payload {
         note_clipboard_event(sequence);
         log::debug!(
             "CLIPBOARD: Sequence {} contained a file payload; intentionally ignoring it",
@@ -435,6 +441,18 @@ fn capture_clipboard_update(
             .send(ClipboardListenerEvent::Content(snapshot))
             .map(|_| CaptureAttempt::Handled)
             .map_err(|_| ());
+    }
+
+    if has_file_payload && has_image_payload {
+        // The hybrid image was advertised but remained unreadable after all
+        // bounded attempts. Do not fall through to its path-like text or keep
+        // restarting the listener forever for malformed image data.
+        note_clipboard_event(sequence);
+        log::warn!(
+            "CLIPBOARD: Sequence {} advertised a file-backed image but its image data was unreadable",
+            sequence
+        );
+        return Ok(CaptureAttempt::Handled);
     }
 
     if clipboard_is_cleared() {
@@ -530,6 +548,39 @@ fn clipboard_has_file_payload_format() -> bool {
         .iter()
         .copied()
         .any(|format| format != 0 && unsafe { IsClipboardFormatAvailable(format) }.is_ok())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clipboard_has_file_payload_format() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn clipboard_has_image_format() -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::DataExchange::{
+        IsClipboardFormatAvailable, RegisterClipboardFormatW,
+    };
+
+    const CF_BITMAP: u32 = 2;
+    const CF_DIB: u32 = 8;
+    const CF_DIBV5: u32 = 17;
+
+    if [CF_DIBV5, CF_DIB, CF_BITMAP]
+        .into_iter()
+        .any(|format| unsafe { IsClipboardFormatAvailable(format) }.is_ok())
+    {
+        return true;
+    }
+
+    let name: Vec<u16> = "PNG".encode_utf16().chain(std::iter::once(0)).collect();
+    let png_format = unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) };
+    png_format != 0 && unsafe { IsClipboardFormatAvailable(png_format) }.is_ok()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clipboard_has_image_format() -> bool {
+    false
 }
 
 #[cfg(target_os = "windows")]
@@ -758,6 +809,24 @@ fn materialize_clipboard_content() -> Option<(CapturedContent, Vec<CapturedForma
     const ATTEMPTS: u32 = 10;
 
     for attempt in 0..ATTEMPTS {
+        // Screenshot tools commonly expose both a bitmap and CF_HDROP for the
+        // saved image. Treat that as an image in Cubby. If the advertised image
+        // is still being rendered, do not let the easier file read mask it
+        // immediately; retry the image for the complete bounded window.
+        if clipboard_has_image_format() && clipboard_has_file_payload_format() {
+            if let Ok(image) = read_clipboard_image_fast(attempt + 1 == ATTEMPTS) {
+                return Some((captured_image(image), Vec::new()));
+            }
+
+            if attempt + 1 < ATTEMPTS {
+                std::thread::sleep(clipboard_retry_delay(attempt));
+                continue;
+            }
+            // The caller records this hybrid update as handled. Do not fall
+            // through to text, where the path could be captured as a text clip.
+            return None;
+        }
+
         if let Ok(ctx) = ClipboardContext::new() {
             if let Ok(text) = ctx.get_text() {
                 if let Some(content) = capture_text(text) {
@@ -783,18 +852,8 @@ fn materialize_clipboard_content() -> Option<(CapturedContent, Vec<CapturedForma
             }
         }
 
-        if let Ok(image) = read_clipboard_image_fast() {
-            return Some((
-                CapturedContent::Image {
-                    png_bytes: image.png_bytes,
-                    width: image.width,
-                    height: image.height,
-                    hash: image.raw_hash,
-                    decode_ms: image.decode_ms,
-                    source_type: image.source_type,
-                },
-                Vec::new(),
-            ));
+        if let Ok(image) = read_clipboard_image_fast(attempt + 1 == ATTEMPTS) {
+            return Some((captured_image(image), Vec::new()));
         }
 
         if attempt + 1 < ATTEMPTS {
@@ -803,6 +862,17 @@ fn materialize_clipboard_content() -> Option<(CapturedContent, Vec<CapturedForma
     }
 
     None
+}
+
+fn captured_image(image: ClipboardImageRead) -> CapturedContent {
+    CapturedContent::Image {
+        png_bytes: image.png_bytes,
+        width: image.width,
+        height: image.height,
+        hash: image.raw_hash,
+        decode_ms: image.decode_ms,
+        source_type: image.source_type,
+    }
 }
 
 fn clipboard_retry_delay(attempt: u32) -> std::time::Duration {
@@ -853,8 +923,135 @@ fn read_clipboard_image_with_clipboard_rs(
     })
 }
 
-fn read_clipboard_image_fast() -> Result<ClipboardImageRead, String> {
+#[cfg(target_os = "windows")]
+fn read_registered_png_fast() -> Result<ClipboardImageRead, String> {
+    use std::io::Cursor;
+
+    let ctx = ClipboardContext::new().map_err(|e| e.to_string())?;
+    let png_bytes = ctx.get_buffer("PNG").map_err(|e| e.to_string())?;
+    let reader = image::io::Reader::new(Cursor::new(&png_bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let (width, height) = reader.into_dimensions().map_err(|e| e.to_string())?;
+
+    Ok(ClipboardImageRead {
+        raw_hash: calculate_hash(&png_bytes),
+        png_bytes,
+        width,
+        height,
+        decode_ms: 0,
+        source_type: "registered-png",
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn clipboard_has_registered_png() -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::DataExchange::{
+        IsClipboardFormatAvailable, RegisterClipboardFormatW,
+    };
+
+    let name: Vec<u16> = "PNG".encode_utf16().chain(std::iter::once(0)).collect();
+    let format = unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) };
+    format != 0 && unsafe { IsClipboardFormatAvailable(format) }.is_ok()
+}
+
+fn read_clipboard_image_fast(allow_slow_fallback: bool) -> Result<ClipboardImageRead, String> {
+    #[cfg(target_os = "windows")]
+    if clipboard_has_registered_png() {
+        match read_registered_png_fast() {
+            Ok(image) => return Ok(image),
+            Err(error) if !allow_slow_fallback => return Err(error),
+            Err(_) => {}
+        }
+    }
+
     read_clipboard_image_with_clipboard_rs("clipboard-rs-image")
+}
+
+fn rgba_to_cf_dib(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    const HEADER_SIZE: usize = 40;
+    let row_bytes = (width as usize)
+        .checked_mul(4)
+        .ok_or_else(|| "clipboard image row is too large".to_string())?;
+    let pixel_bytes = row_bytes
+        .checked_mul(height as usize)
+        .ok_or_else(|| "clipboard image is too large".to_string())?;
+    if rgba.len() != pixel_bytes {
+        return Err("clipboard image pixel buffer has an invalid length".to_string());
+    }
+    let width_i32 = i32::try_from(width).map_err(|_| "clipboard image is too wide".to_string())?;
+    let height_i32 =
+        i32::try_from(height).map_err(|_| "clipboard image is too tall".to_string())?;
+    let image_size =
+        u32::try_from(pixel_bytes).map_err(|_| "clipboard image is too large".to_string())?;
+
+    let mut dib = Vec::with_capacity(HEADER_SIZE + pixel_bytes);
+    dib.extend_from_slice(&(HEADER_SIZE as u32).to_le_bytes());
+    dib.extend_from_slice(&width_i32.to_le_bytes());
+    // Positive DIB heights are bottom-up and have the broadest compatibility
+    // with older Win32 paste targets.
+    dib.extend_from_slice(&height_i32.to_le_bytes());
+    dib.extend_from_slice(&1_u16.to_le_bytes());
+    dib.extend_from_slice(&32_u16.to_le_bytes());
+    dib.extend_from_slice(&0_u32.to_le_bytes()); // BI_RGB
+    dib.extend_from_slice(&image_size.to_le_bytes());
+    dib.extend_from_slice(&0_i32.to_le_bytes());
+    dib.extend_from_slice(&0_i32.to_le_bytes());
+    dib.extend_from_slice(&0_u32.to_le_bytes());
+    dib.extend_from_slice(&0_u32.to_le_bytes());
+
+    for source_row in rgba.chunks_exact(row_bytes).rev() {
+        for pixel in source_row.chunks_exact(4) {
+            dib.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+        }
+    }
+    Ok(dib)
+}
+
+/// Put stored PNG bytes on the clipboard without recompressing them.
+/// `clipboard-rs::set_image` encodes PNG a second time before producing a
+/// bitmap, which costs several seconds for multi-megapixel screenshots in dev
+/// builds. The original PNG remains the lossless representation while CF_DIB
+/// is generated with a linear RGBA-to-BGRA conversion for traditional apps.
+pub(crate) fn set_clipboard_image_png(png_bytes: &[u8]) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let rgba = image::load_from_memory(png_bytes)
+            .map_err(|e| e.to_string())?
+            .into_rgba8();
+        let dib = rgba_to_cf_dib(rgba.width(), rgba.height(), rgba.as_raw())?;
+        let png_format = clipboard_win::register_format("PNG")
+            .ok_or_else(|| "could not register the PNG clipboard format".to_string())?;
+        let _clipboard = clipboard_win::Clipboard::new_attempts(10)
+            .map_err(|e| format!("could not open clipboard: {e}"))?;
+        clipboard_win::raw::empty().map_err(|e| format!("could not clear clipboard: {e}"))?;
+
+        let png_result = clipboard_win::raw::set_without_clear(png_format.get(), png_bytes);
+        let dib_result = clipboard_win::raw::set_without_clear(8, &dib); // CF_DIB
+        match (png_result, dib_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Ok(()), Err(error)) => {
+                log::warn!("CLIPBOARD: PNG set succeeded but CF_DIB failed: {error}");
+                Ok(())
+            }
+            (Err(error), Ok(())) => {
+                log::warn!("CLIPBOARD: CF_DIB set succeeded but PNG failed: {error}");
+                Ok(())
+            }
+            (Err(png_error), Err(dib_error)) => Err(format!(
+                "could not set PNG ({png_error}) or CF_DIB ({dib_error})"
+            )),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let image = RustImageData::from_bytes(png_bytes).map_err(|e| e.to_string())?;
+        ClipboardContext::new()
+            .and_then(|context| context.set_image(image))
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// Relay only captures owned by a remote-control viewer, and never
@@ -889,13 +1086,11 @@ fn relay_remote_capture(
         let Some(png_bytes) = full_image_content else {
             return;
         };
-        match RustImageData::from_bytes(png_bytes) {
-            Ok(image) => vec![ClipboardContent::Image(image)],
-            Err(error) => {
-                log::warn!("CLIPBOARD: Relay skipped, image decode failed: {error}");
-                return;
-            }
+        if let Err(error) = image::load_from_memory(png_bytes) {
+            log::warn!("CLIPBOARD: Relay skipped, image decode failed: {error}");
+            return;
         }
+        Vec::new()
     } else {
         vec![ClipboardContent::Text(
             String::from_utf8_lossy(clip_content).to_string(),
@@ -921,7 +1116,14 @@ fn relay_remote_capture(
         *last = Some(clip_hash.to_string());
     }
     set_ignore_hash(clip_hash.to_string());
-    match ClipboardContext::new().and_then(|context| context.set(contents)) {
+    let set_result = if clip_type == "image" {
+        set_clipboard_image_png(full_image_content.unwrap_or_default())
+    } else {
+        ClipboardContext::new()
+            .and_then(|context| context.set(contents))
+            .map_err(|error| error.to_string())
+    };
+    match set_result {
         Ok(()) => log::info!("CLIPBOARD: Relayed remote-session capture under Cubby ownership"),
         Err(error) => {
             clear_ignore_hash_if_matches(clip_hash);
@@ -1004,16 +1206,13 @@ async fn process_clipboard_snapshot(
                 )
             }
         };
-    let mut hash_material = Vec::new();
-    hash_material.extend_from_slice(clip_type.as_bytes());
-    hash_material.push(0);
-    hash_material.extend_from_slice(full_image_content.as_deref().unwrap_or(&clip_content));
-    for format in &captured_formats {
-        hash_material.push(0);
-        hash_material.extend_from_slice(format.name.as_bytes());
-        hash_material.push(0);
-        hash_material.extend_from_slice(&format.content);
-    }
+    let hash_material = build_clip_hash_material(
+        clip_type,
+        full_image_content.as_deref().unwrap_or(&clip_content),
+        captured_formats
+            .iter()
+            .map(|format| (format.name, format.content.as_slice())),
+    );
     let clip_hash = calculate_hash(&hash_material);
 
     // Ignore our own clipboard writes. When a clip is pasted or reused from
@@ -1639,6 +1838,30 @@ pub(crate) fn calculate_hash(content: &[u8]) -> String {
     format!("{:x}", result)
 }
 
+/// Build the stable identity used for capture deduplication and self-write
+/// suppression. Auxiliary representations are part of rich text identity, but
+/// an image is identified by its stored bitmap rather than a screenshot tool's
+/// saved file path.
+pub(crate) fn build_clip_hash_material<'a>(
+    clip_type: &str,
+    primary_content: &[u8],
+    formats: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> Vec<u8> {
+    let mut material = Vec::new();
+    material.extend_from_slice(clip_type.as_bytes());
+    material.push(0);
+    material.extend_from_slice(primary_content);
+    if clip_type != "image" {
+        for (name, content) in formats {
+            material.push(0);
+            material.extend_from_slice(name.as_bytes());
+            material.push(0);
+            material.extend_from_slice(content);
+        }
+    }
+    material
+}
+
 pub(crate) async fn replace_clip_formats(
     pool: &sqlx::SqlitePool,
     crypto: &crate::crypto::CryptoManager,
@@ -2053,10 +2276,10 @@ unsafe fn extract_icon(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        calculate_hash, capture_state_name, capture_text, clipboard_retry_delay,
-        next_listener_backoff, should_forget_recent_capture, should_relay_capture, CapturedContent,
-        CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED,
-        CLIPBOARD_CLEAR_FORGET_WINDOW,
+        build_clip_hash_material, calculate_hash, capture_state_name, capture_text,
+        clipboard_retry_delay, next_listener_backoff, rgba_to_cf_dib, should_forget_recent_capture,
+        should_relay_capture, CapturedContent, CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING,
+        CAPTURE_STATE_STOPPED, CLIPBOARD_CLEAR_FORGET_WINDOW,
     };
     use std::time::{Duration, Instant};
 
@@ -2145,6 +2368,52 @@ mod tests {
 
         assert_eq!(delays, vec![1, 2, 4, 8, 16, 32, 64, 64, 64, 64]);
         assert_eq!(delays.iter().sum::<u128>(), 319);
+        assert_eq!(delays[..9].iter().sum::<u128>(), 255);
+    }
+
+    #[test]
+    fn image_identity_ignores_auxiliary_file_path() {
+        let first = build_clip_hash_material(
+            "image",
+            b"same pixels",
+            [("files", b"[\"C:/shots/first.png\"]".as_slice())],
+        );
+        let second = build_clip_hash_material(
+            "image",
+            b"same pixels",
+            [("files", b"[\"D:/archive/second.png\"]".as_slice())],
+        );
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn non_image_identity_preserves_auxiliary_formats() {
+        let html = build_clip_hash_material(
+            "text",
+            b"same text",
+            [("html", b"<b>same text</b>".as_slice())],
+        );
+        let plain = build_clip_hash_material("text", b"same text", []);
+
+        assert_ne!(html, plain);
+    }
+
+    #[test]
+    fn cf_dib_conversion_writes_bottom_up_bgra_pixels() {
+        let rgba = [
+            1, 2, 3, 4, 5, 6, 7, 8, // top row
+            9, 10, 11, 12, 13, 14, 15, 16, // bottom row
+        ];
+        let dib = rgba_to_cf_dib(2, 2, &rgba).unwrap();
+
+        assert_eq!(&dib[0..4], &40_u32.to_le_bytes());
+        assert_eq!(&dib[4..8], &2_i32.to_le_bytes());
+        assert_eq!(&dib[8..12], &2_i32.to_le_bytes());
+        assert_eq!(
+            &dib[40..],
+            &[11, 10, 9, 12, 15, 14, 13, 16, 3, 2, 1, 4, 7, 6, 5, 8]
+        );
     }
 
     #[test]

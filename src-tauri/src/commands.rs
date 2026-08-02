@@ -565,6 +565,7 @@ fn clipboard_contents_for_restore(
     plain_text: bool,
 ) -> Result<Vec<ClipboardContent>, String> {
     let plain_content = String::from_utf8_lossy(&clip.content).to_string();
+    let restoring_image = full_image.is_some();
     let mut contents = if let Some(image) = full_image {
         vec![ClipboardContent::Image(
             RustImageData::from_bytes(image).map_err(|e| e.to_string())?,
@@ -572,7 +573,12 @@ fn clipboard_contents_for_restore(
     } else {
         vec![ClipboardContent::Text(plain_content)]
     };
-    if !plain_text {
+    // Auxiliary CF_HDROP on a captured screenshot describes the producer's
+    // saved file, but replaying it makes some paste targets treat the history
+    // item as a file upload instead of an image. Image clips therefore restore
+    // only their durable bitmap; pure file and rich-text clips keep replaying
+    // their auxiliary formats.
+    if !plain_text && !restoring_image {
         for (format, content) in formats {
             match format.as_str() {
                 // Stored HTML is the header-stripped document (see cf_html.rs);
@@ -717,24 +723,21 @@ fn restore_hash_material(
     formats: &[(String, Vec<u8>)],
     plain_text: bool,
 ) -> Vec<u8> {
-    let mut material = Vec::new();
     if plain_text {
+        let mut material = Vec::new();
         material.extend_from_slice(b"text");
         material.push(0);
         material.extend_from_slice(&clip.content);
         return material;
     }
 
-    material.extend_from_slice(clip.clip_type.as_bytes());
-    material.push(0);
-    material.extend_from_slice(full_image.unwrap_or(&clip.content));
-    for (format, content) in formats {
-        material.push(0);
-        material.extend_from_slice(format.as_bytes());
-        material.push(0);
-        material.extend_from_slice(content);
-    }
-    material
+    crate::clipboard::build_clip_hash_material(
+        &clip.clip_type,
+        full_image.unwrap_or(&clip.content),
+        formats
+            .iter()
+            .map(|(format, content)| (format.as_str(), content.as_slice())),
+    )
 }
 
 async fn restore_clip(
@@ -744,6 +747,7 @@ async fn restore_clip(
     window: &tauri::WebviewWindow,
     db: &Database,
 ) -> Result<(), String> {
+    let restore_started = Instant::now();
     let pool = &db.pool;
 
     let clip: Option<Clip> = sqlx::query_as(r#"SELECT * FROM clips WHERE uuid = ?"#)
@@ -788,13 +792,26 @@ async fn restore_clip(
             let content_hash = crate::clipboard::calculate_hash(&hash_material);
             let uuid = clip.uuid.clone();
 
-            let clipboard_contents =
-                clipboard_contents_for_restore(&clip, full_image.as_deref(), &formats, plain_text)?;
-
             crate::clipboard::set_ignore_hash(content_hash);
-            let final_res = ClipboardContext::new()
-                .and_then(|context| context.set(clipboard_contents))
-                .map_err(|error| format!("Failed to restore clipboard formats: {error}"));
+            let clipboard_write_started = Instant::now();
+            let final_res = if let Some(image) = full_image.as_deref() {
+                crate::clipboard::set_clipboard_image_png(image)
+                    .map_err(|error| format!("Failed to restore clipboard image: {error}"))
+            } else {
+                let clipboard_contents =
+                    clipboard_contents_for_restore(&clip, None, &formats, plain_text)?;
+                ClipboardContext::new()
+                    .and_then(|context| context.set(clipboard_contents))
+                    .map_err(|error| format!("Failed to restore clipboard formats: {error}"))
+            };
+            log::info!(
+                "[perf][restore_clip] type={} image_bytes={} clipboard_write_ms={} total_ms={} success={}",
+                clip.clip_type,
+                full_image.as_ref().map_or(0, Vec::len),
+                clipboard_write_started.elapsed().as_millis(),
+                restore_started.elapsed().as_millis(),
+                final_res.is_ok(),
+            );
 
             // Manually perform the LRU bump (update created_at)
             let _ =
@@ -2328,6 +2345,26 @@ mod tests {
             restore_hash_material(&clip, None, &formats, false),
             restore_hash_material(&clip, None, &formats, true)
         );
+        let mut image_clip = clip.clone();
+        image_clip.clip_type = "image".to_string();
+        let files = vec![("files".to_string(), br#"["C:\\one.png"]"#.to_vec())];
+        let other_files = vec![("files".to_string(), br#"["D:\\other-shot.png"]"#.to_vec())];
+        assert_eq!(
+            restore_hash_material(&image_clip, Some(b"full image"), &files, false),
+            restore_hash_material(&image_clip, Some(b"full image"), &other_files, false),
+        );
+
+        let mut png = Vec::new();
+        image::DynamicImage::new_rgba8(1, 1)
+            .write_to(
+                &mut std::io::Cursor::new(&mut png),
+                image::ImageOutputFormat::Png,
+            )
+            .unwrap();
+        let image_contents =
+            clipboard_contents_for_restore(&image_clip, Some(&png), &files, false).unwrap();
+        assert_eq!(image_contents.len(), 1);
+        assert!(matches!(&image_contents[0], ClipboardContent::Image(_)));
     }
 
     #[tokio::test]
