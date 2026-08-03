@@ -50,6 +50,31 @@ windows = { version = "0.62.2", features = ["UI_ViewManagement", "Win32_UI_Acces
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 app-store = []
+# Test-only diagnostic executables. Off by default so `tauri build` never
+# produces them: anything cargo emits into target/release is picked up by the
+# bundler and shipped next to cubby.exe, and an unexplained extra binary in the
+# install directory is both dead weight and a heuristic red flag for Defender.
+# The scripts under scripts/test-*.ps1 enable this feature explicitly.
+dev-harness = []
+
+# Declared explicitly (instead of relying on cargo's src/bin auto-discovery) so
+# each one can be gated behind dev-harness.
+[[bin]]
+name = "clipboard_probe"
+path = "src/bin/clipboard_probe.rs"
+required-features = ["dev-harness"]
+
+[[bin]]
+name = "paste_compat"
+path = "src/bin/paste_compat.rs"
+required-features = ["dev-harness"]
+
+# Note: win_v_helper.rs is also compiled into cubby.exe via `#[path]` in
+# main.rs. This target only builds it as a standalone exe for the test scripts.
+[[bin]]
+name = "win_v_helper"
+path = "src/bin/win_v_helper.rs"
+required-features = ["dev-harness"]
 
 [profile.release]
 panic = "abort"

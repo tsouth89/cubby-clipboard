@@ -11,7 +11,7 @@ $helperPath = Join-Path $tauriRoot "target\debug\win_v_helper.exe"
 if (-not $SkipBuild) {
     Push-Location $tauriRoot
     try {
-        cargo build --bin win_v_helper
+        cargo build --features dev-harness --bin win_v_helper
         if ($LASTEXITCODE -ne 0) {
             throw "win_v_helper build failed"
         }

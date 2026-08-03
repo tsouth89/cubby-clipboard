@@ -54,8 +54,10 @@ jobs:
       - shell: pwsh
         run: ./scripts/audit-rust.ps1
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      # dev-harness is enabled here (but never for release bundles) so the
+      # feature-gated diagnostic binaries stay compiled and linted.
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --features dev-harness --all-targets
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --features dev-harness --all-targets -- -D warnings
 
   create-release:
     name: Create GitHub release
@@ -205,6 +207,24 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # Azure sign-in and the signing CLI must both be ready BEFORE any bundle
+      # is built: tauri.conf.json's signCommand signs cubby.exe and the NSIS
+      # uninstaller as part of the build, which is the only point at which
+      # those files can still be signed before they are packed into the
+      # installer.
+      - name: Sign in to Azure with GitHub OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Not available via taiki-e/install-action (it is not in that action's
+      # supported tool list), so it is compiled here. Version-pinned because
+      # this binary is what signs the shipped executables.
+      - name: Install trusted-signing-cli
+        run: cargo install trusted-signing-cli --version 0.11.0 --locked
+
       - name: Build NSIS installer
         uses: tauri-apps/tauri-action@v1
         env:
@@ -213,6 +233,13 @@ jobs:
           # after Trusted Signing below so it matches the bytes users download.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Consumed by scripts/sign-windows.ps1 via signCommand.
+          ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT_NAME: ${{ vars.ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          # Fail the build rather than silently shipping unsigned binaries if
+          # any of the three variables above is missing.
+          CUBBY_REQUIRE_SIGNING: "1"
         with:
           projectPath: .
           args: --target ${{ matrix.target }} --bundles nsis
@@ -230,6 +257,27 @@ jobs:
           $stagedPath = Join-Path $env:RUNNER_TEMP $name
           Copy-Item $file.FullName $stagedPath -Force
           $binary = Resolve-Path "src-tauri/target/${{ matrix.target }}/release/cubby.exe"
+
+          # This is the exact binary NSIS packed into the installer above, so
+          # it is the last point where an unsigned cubby.exe can be caught
+          # before it ships to users' AppData.
+          $appSignature = Get-AuthenticodeSignature -LiteralPath $binary
+          if ($appSignature.Status -ne "Valid") {
+            Write-Error "cubby.exe is '$($appSignature.Status)' - signCommand did not run. $($appSignature.StatusMessage)"
+            exit 1
+          }
+          Write-Host "cubby.exe signed by $($appSignature.SignerCertificate.Subject)"
+
+          # The dev-harness bins are feature-gated off, so nothing but the app
+          # binary should be bundled. Catch any new stray executable that would
+          # otherwise ride along into the install directory unsigned.
+          $stray = Get-ChildItem "src-tauri/target/${{ matrix.target }}/release/*.exe" |
+            Where-Object { $_.Name -ne "cubby.exe" }
+          if ($stray) {
+            Write-Error "Unexpected executables in the release directory: $($stray.Name -join ', ')"
+            exit 1
+          }
+
           $stagedBinary = Join-Path $env:RUNNER_TEMP "cubby-${{ matrix.arch }}.exe"
           Copy-Item $binary $stagedBinary -Force
           # Stage the slim installer before the Store build overwrites Tauri's
@@ -240,6 +288,11 @@ jobs:
 
       - name: Build offline Microsoft Store installer
         shell: pwsh
+        env:
+          ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT_NAME: ${{ vars.ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          CUBBY_REQUIRE_SIGNING: "1"
         run: |
           pnpm tauri build `
             --ci `
@@ -267,13 +320,9 @@ jobs:
           "path=$stagedPath" >> $env:GITHUB_OUTPUT
           "name=$name" >> $env:GITHUB_OUTPUT
 
-      - name: Sign in to Azure with GitHub OIDC
-        uses: azure/login@v3
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
+      # The installers themselves are signed here rather than by signCommand,
+      # because the Store installer is copied out to a staging path after the
+      # build and the updater .sig has to be regenerated over the final bytes.
       - name: Sign the installers with Trusted Signing
         uses: Azure/artifact-signing-action@v2
         with:

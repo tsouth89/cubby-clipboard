@@ -11,7 +11,7 @@ $harnessPath = Join-Path $tauriRoot "target\debug\paste_compat.exe"
 if (-not $SkipBuild) {
     Push-Location $tauriRoot
     try {
-        cargo build --bin paste_compat
+        cargo build --features dev-harness --bin paste_compat
         if ($LASTEXITCODE -ne 0) {
             throw "paste_compat build failed"
         }

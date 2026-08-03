@@ -49,12 +49,40 @@
     "targets": [
       "nsis"
     ],
+    "publisher": "Brandon South",
+    "copyright": "Copyright © 2026 Brandon South",
+    "homepage": "https://cubbyclipboard.com",
+    "shortDescription": "Clipboard history for Windows 11",
+    "longDescription": "Cubby is a native-feeling clipboard history replacement for Windows 11. History is stored locally in an encrypted SQLite database and never leaves the machine.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ],
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "windows": {
+      "signCommand": {
+        "cmd": "pwsh",
+        "args": [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "../scripts/sign-windows.ps1",
+          "-Path",
+          "%1"
+        ]
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "English"
+        ],
+        "displayLanguageSelector": false,
+        "compression": "lzma",
+        "installerHooks": "installer-hooks.nsh"
+      }
+    }
   }
 }
