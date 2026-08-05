@@ -94,6 +94,25 @@ describe('startUpdateChecks', () => {
     stop();
   });
 
+  it('does not re-announce a version the latest release has fallen back to', async () => {
+    // A yanked 1.4.0 puts 1.3.0 back at the top. The user has already been
+    // prompted about 1.3.0 and should not be prompted about it a second time.
+    const check = vi
+      .fn()
+      .mockResolvedValueOnce({ available: true, version: '1.3.0' })
+      .mockResolvedValueOnce({ available: true, version: '1.4.0' })
+      .mockResolvedValue({ available: true, version: '1.3.0' });
+    const announce = vi.fn();
+    const stop = startUpdateChecks({ check, announce });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(UPDATE_CHECK_INTERVAL_MS * 2);
+
+    expect(check).toHaveBeenCalledTimes(3);
+    expect(announce).toHaveBeenCalledTimes(2);
+    expect(announce).toHaveBeenLastCalledWith({ available: true, version: '1.4.0' });
+    stop();
+  });
+
   it('does not announce when there is no update', async () => {
     const announce = vi.fn();
     const stop = startUpdateChecks({

@@ -31,7 +31,10 @@ export function startUpdateChecks(deps: UpdateScheduleDeps): () => void {
 
   let active = true;
   let inFlight = false;
-  let notifiedVersion: string | null = null;
+  // Every version announced so far, not just the last one: if a release is
+  // yanked the latest version can go backwards, and remembering only the most
+  // recent would re-prompt for a version the user already dismissed.
+  const notifiedVersions = new Set<string>();
 
   const runCheck = async () => {
     // The in-flight guard matters on a slow network: the interval keeps firing
@@ -49,9 +52,9 @@ export function startUpdateChecks(deps: UpdateScheduleDeps): () => void {
     }
 
     // Re-read `active`: stop may have been called while the check was awaiting.
-    if (!active || !update?.available || notifiedVersion === update.version) return;
+    if (!active || !update?.available || notifiedVersions.has(update.version)) return;
 
-    notifiedVersion = update.version;
+    notifiedVersions.add(update.version);
     announce(update);
   };
 
