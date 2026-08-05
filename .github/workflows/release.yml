@@ -267,15 +267,10 @@ jobs:
           Copy-Item $file.FullName $stagedPath -Force
           $binary = Resolve-Path "src-tauri/target/${{ matrix.target }}/release/cubby.exe"
 
-          # This is the exact binary NSIS packed into the installer above, so
-          # it is the last point where an unsigned cubby.exe can be caught
-          # before it ships to users' AppData.
-          $appSignature = Get-AuthenticodeSignature -LiteralPath $binary
-          if ($appSignature.Status -ne "Valid") {
-            Write-Error "cubby.exe is '$($appSignature.Status)' - signCommand did not run. $($appSignature.StatusMessage)"
-            exit 1
-          }
-          Write-Host "cubby.exe signed by $($appSignature.SignerCertificate.Subject)"
+          # Verify the cubby.exe inside the installer, not the one on disk:
+          # Tauri restores the unsigned original to target/release after packing
+          # the signed copy, so the file here is NotSigned even on a good build.
+          ./scripts/verify-installer-signature.ps1 -Installer $stagedPath -ExpectedSubject "CN=Brandon South"
 
           # The dev-harness bins are feature-gated off, so nothing but the app
           # binary should be bundled. Catch any new stray executable that would
@@ -326,6 +321,9 @@ jobs:
             Write-Error "Store installer is too small to contain the offline WebView2 runtime"
             exit 1
           }
+          # The Store build is a second `tauri build`, so it runs signCommand
+          # again over its own copy of the app binary. Verify it independently.
+          ./scripts/verify-installer-signature.ps1 -Installer $stagedPath -ExpectedSubject "CN=Brandon South"
           "path=$stagedPath" >> $env:GITHUB_OUTPUT
           "name=$name" >> $env:GITHUB_OUTPUT
 
