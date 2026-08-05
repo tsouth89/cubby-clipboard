@@ -8,7 +8,8 @@
     "loading": "Loading...",
     "copied": "Copied to clipboard",
     "pause": "Pause",
-    "resume": "Resume"
+    "resume": "Resume",
+    "clipActions": "Clip actions"
   },
   "clipList": {
     "empty": "No clips yet",

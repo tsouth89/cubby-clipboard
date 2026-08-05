@@ -15,7 +15,7 @@ under test.
 
 Copy this block into the results section and fill it in:
 
-```
+```text
 Date:            YYYY-MM-DD
 Windows version: (winver → e.g. 11 24H2 26100.1234)
 Cubby version:   (Settings → About)
@@ -76,7 +76,9 @@ Unplug or ignore the mouse for this section.
 Test at 100%, 150%, and 200% display scaling, and separately at 200% text
 scaling (Settings → Accessibility → Text size).
 
-- No clipped or overlapping text in the flyout, control bar, or Settings.
+- No clipped or overlapping text in the flyout header or Settings. (The
+  `ControlBar` component is not rendered — see finding 8 — so there is no
+  control bar to check until that is resolved.)
 - The flyout still fits its monitor's work area and stays on screen.
 - Scroll works when content exceeds the window.
 

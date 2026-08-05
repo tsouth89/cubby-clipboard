@@ -1055,7 +1055,14 @@ function App() {
 
           <FlyoutHeader
             searchQuery={searchQuery}
-            selectedClipId={selectedClipId}
+            // Only point aria-activedescendant at a clip that is actually
+            // rendered. After a delete or a filter change the selected id can
+            // outlive its option by a render, and a dangling reference is worse
+            // than none.
+            selectedClipId={
+              visibleClips.some((clip) => clip.id === selectedClipId) ? selectedClipId : null
+            }
+            hasClipListbox={visibleClips.length > 0}
             onSearchChange={handleSearch}
             contentFilter={contentFilter}
             onContentFilterChange={(filter) => {

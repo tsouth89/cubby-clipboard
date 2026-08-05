@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 interface ContextMenuProps {
   x: number;
@@ -10,11 +11,14 @@ interface ContextMenuProps {
     disabled?: boolean;
   }[];
   onClose: () => void;
-  /** Accessible name for the menu. Screen readers announce this on open. */
+  /** Accessible name for the menu. Screen readers announce this on open.
+   *  Defaults to a translated string rather than a literal, since this is
+   *  user-facing text like every other string in the app. */
   label?: string;
 }
 
-export function ContextMenu({ x, y, options, onClose, label = 'Clip actions' }: ContextMenuProps) {
+export function ContextMenu({ x, y, options, onClose, label }: ContextMenuProps) {
+  const { t } = useTranslation();
   const menuRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const [position, setPosition] = useState({ x, y });
@@ -106,6 +110,10 @@ export function ContextMenu({ x, y, options, onClose, label = 'Clip actions' }: 
           break;
         case 'Tab':
           // A menu is a single stop, not a tab sequence: Tab dismisses it.
+          // preventDefault matters -- without it the browser also advances
+          // focus, which races the focus restore in the unmount cleanup and
+          // makes where focus ends up depend on ordering.
+          event.preventDefault();
           onClose();
           break;
       }
@@ -128,7 +136,7 @@ export function ContextMenu({ x, y, options, onClose, label = 'Clip actions' }: 
     <div
       ref={menuRef}
       role="menu"
-      aria-label={label}
+      aria-label={label ?? t('common.clipActions')}
       tabIndex={-1}
       className="animate-in fade-in-0 zoom-in-95 fixed z-50 max-h-[min(24rem,calc(100vh-1rem))] min-w-[12rem] overflow-y-auto rounded-lg border border-white/[0.1] bg-popover/95 p-1.5 shadow-2xl backdrop-blur-xl"
       style={style}

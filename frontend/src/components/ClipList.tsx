@@ -114,11 +114,15 @@ export function ClipList({
       {/* presentation so the options stay direct children of the listbox in the
           accessibility tree; an intervening generic would make them invalid. */}
       <div role="presentation" className="space-y-1.5">
-        {clips.map((clip) => (
+        {clips.map((clip, index) => (
           <ClipCard
             key={clip.id}
             clip={clip}
             density={density}
+            posInSet={index + 1}
+            // -1 is the ARIA value for "total unknown", which is the honest
+            // answer while more pages remain unloaded.
+            setSize={hasMore ? -1 : clips.length}
             isSelected={selectedClipId === clip.id}
             onHover={handleCardHover(clip.id)}
             onPaste={() => onPaste(clip.id)}
