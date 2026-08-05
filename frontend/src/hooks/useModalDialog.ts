@@ -69,7 +69,17 @@ export function useModalDialog<T extends HTMLElement>(onEscape?: () => void, ena
       const last = candidates[candidates.length - 1];
       const active = document.activeElement;
 
-      if (event.shiftKey && (active === first || !container.contains(active))) {
+      // Focus can sit outside the dialog despite the trap -- a mousedown on
+      // background content moves it there without a Tab we could intercept.
+      // Pull it back in on the next Tab, in whichever direction was pressed,
+      // rather than letting that Tab walk further away.
+      if (!container.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
+
+      if (event.shiftKey && active === first) {
         event.preventDefault();
         last.focus();
       } else if (!event.shiftKey && active === last) {

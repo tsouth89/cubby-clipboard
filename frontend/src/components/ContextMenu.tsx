@@ -74,16 +74,27 @@ export function ContextMenu({ x, y, options, onClose, label = 'Clip actions' }: 
       if (enabledIndices.length === 0) return;
 
       const active = document.activeElement;
+      // -1 when focus is not on a menu item at all, e.g. it landed on the menu
+      // container. Treat that as "no current item" and jump to the end the
+      // arrow points at, instead of letting it fall out of the modulo
+      // arithmetic (ArrowUp from -1 lands second-to-last, not last).
       const current = enabledIndices.indexOf(itemRefs.current.findIndex((item) => item === active));
+      const last = enabledIndices.length - 1;
 
       switch (event.key) {
         case 'ArrowDown':
           event.preventDefault();
-          focusItem(enabledIndices[(current + 1) % enabledIndices.length]);
+          focusItem(
+            current === -1 ? enabledIndices[0] : enabledIndices[(current + 1) % (last + 1)]
+          );
           break;
         case 'ArrowUp':
           event.preventDefault();
-          focusItem(enabledIndices[(current - 1 + enabledIndices.length) % enabledIndices.length]);
+          focusItem(
+            current === -1
+              ? enabledIndices[last]
+              : enabledIndices[(current - 1 + last + 1) % (last + 1)]
+          );
           break;
         case 'Home':
           event.preventDefault();
