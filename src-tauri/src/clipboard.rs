@@ -111,11 +111,20 @@ const INITIAL_LISTENER_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_LISTENER_BACKOFF: Duration = Duration::from_secs(30);
 const WATCHDOG_INTERVAL: Duration = Duration::from_secs(2);
 const STALE_LISTENER_AFTER: Duration = Duration::from_secs(5);
+/// How many times one clipboard sequence may be deferred under contention
+/// before the copy is written off. Each deferral costs roughly
+/// `STALE_LISTENER_AFTER` plus a listener restart, so this bounds a stuck
+/// clipboard owner to about twelve seconds of retrying instead of forever.
+const MAX_DEFERRALS_PER_SEQUENCE: u32 = 3;
 
 static CAPTURE_STATE: AtomicU8 = AtomicU8::new(CAPTURE_STATE_STOPPED);
 static LAST_CLIPBOARD_EVENT_UNIX_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_HANDLED_SEQUENCE: AtomicU32 = AtomicU32::new(0);
 static LISTENER_RESTART_COUNT: AtomicU64 = AtomicU64::new(0);
+/// The sequence currently being retried, and how many times it has been
+/// deferred. Only ever touched from the listener thread.
+static DEFERRED_SEQUENCE: AtomicU32 = AtomicU32::new(0);
+static DEFERRED_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
 static LAST_CAPTURE_ERROR: Lazy<parking_lot::Mutex<Option<String>>> =
     Lazy::new(|| parking_lot::Mutex::new(None));
 #[cfg(target_os = "windows")]
@@ -385,6 +394,7 @@ fn spawn_listener_watchdog() {
 
 /// Outcome of trying to ingest the clipboard for one sequence number.
 #[cfg(target_os = "windows")]
+#[derive(Debug, PartialEq, Eq)]
 enum CaptureAttempt {
     /// A snapshot or clear event was queued (or the payload is unsupported);
     /// the sequence was marked handled.
@@ -402,6 +412,33 @@ enum CaptureAttempt {
 /// and restarts the listener, whose session start retries this capture instead
 /// of silently dropping the copy.
 ///
+/// Count a deferral against `sequence` and decide whether it earns another try.
+///
+/// Returns the attempt count to remember, and `Handled` once the sequence has
+/// used up `max_attempts`. Without that ceiling a clipboard owner that never
+/// releases the lock keeps the sequence permanently unhandled, and the watchdog
+/// restarts the listener every few seconds for the rest of the session.
+#[cfg(target_os = "windows")]
+fn deferral_decision(
+    tracked_sequence: u32,
+    tracked_attempts: u32,
+    sequence: u32,
+    max_attempts: u32,
+) -> (u32, CaptureAttempt) {
+    let attempts = if tracked_sequence == sequence {
+        tracked_attempts.saturating_add(1)
+    } else {
+        // A different copy: this one starts its own budget.
+        1
+    };
+
+    if attempts >= max_attempts {
+        (attempts, CaptureAttempt::Handled)
+    } else {
+        (attempts, CaptureAttempt::Deferred)
+    }
+}
+
 /// `Err(())` means the snapshot consumer is gone (process teardown).
 #[cfg(target_os = "windows")]
 fn capture_clipboard_update(
@@ -471,11 +508,39 @@ fn capture_clipboard_update(
     }
 
     if clipboard_has_supported_format() {
-        log::warn!(
-            "CLIPBOARD: Could not materialize sequence {} (clipboard contended); deferring for watchdog retry",
-            sequence
+        let (attempts, decision) = deferral_decision(
+            DEFERRED_SEQUENCE.load(Ordering::SeqCst),
+            DEFERRED_ATTEMPTS.load(Ordering::SeqCst),
+            sequence,
+            MAX_DEFERRALS_PER_SEQUENCE,
         );
-        return Ok(CaptureAttempt::Deferred);
+        DEFERRED_SEQUENCE.store(sequence, Ordering::SeqCst);
+        DEFERRED_ATTEMPTS.store(attempts, Ordering::SeqCst);
+
+        if decision == CaptureAttempt::Deferred {
+            log::warn!(
+                "CLIPBOARD: Could not materialize sequence {} (clipboard contended); deferring for watchdog retry (attempt {} of {})",
+                sequence,
+                attempts,
+                MAX_DEFERRALS_PER_SEQUENCE
+            );
+            return Ok(CaptureAttempt::Deferred);
+        }
+
+        // The owner never released the clipboard. Mark the sequence handled so
+        // the watchdog stops restarting the listener over one lost copy, and
+        // record it: the contract is that a failed capture is visible in
+        // diagnostics rather than silently reported as a success.
+        note_clipboard_event(sequence);
+        record_capture_error(format!(
+            "clipboard sequence {sequence} stayed locked across {attempts} attempts; that copy was not captured"
+        ));
+        log::warn!(
+            "CLIPBOARD: Giving up on sequence {} after {} contended attempts",
+            sequence,
+            attempts
+        );
+        return Ok(CaptureAttempt::Handled);
     }
 
     // Nothing we support (custom/private formats only). Mark handled so the
@@ -2295,6 +2360,58 @@ mod tests {
         CLIPBOARD_CLEAR_FORGET_WINDOW, IGNORE_HASH,
     };
     use std::time::{Duration, Instant};
+
+    #[cfg(target_os = "windows")]
+    mod deferral {
+        use super::super::{deferral_decision, CaptureAttempt, MAX_DEFERRALS_PER_SEQUENCE};
+
+        #[test]
+        fn retries_a_contended_sequence_until_the_budget_runs_out() {
+            // First contention on sequence 42, nothing tracked yet.
+            assert_eq!(
+                deferral_decision(0, 0, 42, 3),
+                (1, CaptureAttempt::Deferred)
+            );
+            assert_eq!(
+                deferral_decision(42, 1, 42, 3),
+                (2, CaptureAttempt::Deferred)
+            );
+            // Third attempt exhausts the budget: write the copy off instead of
+            // leaving the watchdog to restart the listener forever.
+            assert_eq!(
+                deferral_decision(42, 2, 42, 3),
+                (3, CaptureAttempt::Handled)
+            );
+        }
+
+        #[test]
+        fn a_new_sequence_starts_its_own_budget() {
+            // The previous copy burned every attempt; a fresh copy must not
+            // inherit that and be dropped on its first contended read.
+            assert_eq!(
+                deferral_decision(42, 3, 43, 3),
+                (1, CaptureAttempt::Deferred)
+            );
+        }
+
+        #[test]
+        fn saturates_instead_of_overflowing() {
+            assert_eq!(
+                deferral_decision(42, u32::MAX, 42, 3),
+                (u32::MAX, CaptureAttempt::Handled)
+            );
+        }
+
+        #[test]
+        fn the_shipped_budget_allows_more_than_one_try() {
+            // A budget of 1 would give up on the first contended read, which
+            // defeats the deferral mechanism entirely.
+            assert_eq!(
+                deferral_decision(0, 0, 42, MAX_DEFERRALS_PER_SEQUENCE),
+                (1, CaptureAttempt::Deferred)
+            );
+        }
+    }
 
     #[test]
     fn relays_only_remote_viewer_captures() {
