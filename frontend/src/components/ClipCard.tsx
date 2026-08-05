@@ -128,8 +128,13 @@ export const ClipCard = memo(function ClipCard({
       data-el="clip-card"
       data-clip-id={clip.id}
       data-selected={isSelected}
-      role="listitem"
-      aria-current={isSelected ? 'true' : undefined}
+      // The list is single-select and keyboard-navigated, so option/aria-selected
+      // is what conveys the selection. aria-current on a listitem does not: a
+      // screen reader announces neither which clip is selected nor its position.
+      // The id is the aria-activedescendant target the search input points at.
+      id={`clip-option-${clip.id}`}
+      role="option"
+      aria-selected={isSelected}
       onMouseMove={onHover}
       onClick={onPaste}
       onContextMenu={(event) => {

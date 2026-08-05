@@ -1055,6 +1055,7 @@ function App() {
 
           <FlyoutHeader
             searchQuery={searchQuery}
+            selectedClipId={selectedClipId}
             onSearchChange={handleSearch}
             contentFilter={contentFilter}
             onContentFilterChange={(filter) => {

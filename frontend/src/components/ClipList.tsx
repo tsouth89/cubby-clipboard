@@ -99,7 +99,8 @@ export function ClipList({
     <div
       ref={listRef}
       data-el="clip-list"
-      role="list"
+      id="clip-listbox"
+      role="listbox"
       aria-label="Clipboard history"
       className="no-scrollbar h-full overflow-y-auto px-2 pb-2"
       onScroll={(event) => {
@@ -110,7 +111,9 @@ export function ClipList({
         }
       }}
     >
-      <div className="space-y-1.5">
+      {/* presentation so the options stay direct children of the listbox in the
+          accessibility tree; an intervening generic would make them invalid. */}
+      <div role="presentation" className="space-y-1.5">
         {clips.map((clip) => (
           <ClipCard
             key={clip.id}
@@ -126,7 +129,7 @@ export function ClipList({
         ))}
       </div>
       {isLoading && (
-        <div className="flex justify-center py-3">
+        <div role="presentation" className="flex justify-center py-3">
           <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary/25 border-t-primary" />
         </div>
       )}

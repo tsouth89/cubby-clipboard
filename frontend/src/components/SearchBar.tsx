@@ -39,19 +39,11 @@ export function SearchBar({ query, onQueryChange, onClear }: SearchBarProps) {
         value={query}
         onChange={(e) => onQueryChange(e.target.value)}
         placeholder={`Search clips... (Ctrl+F)`}
-        // The placeholder is not an accessible name, and it disappears as soon
-        // as the user types, so the field needs a name of its own.
-        aria-label="Search clips"
         className="search-input pl-10 pr-20"
       />
       <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
         {query && (
-          <button
-            onClick={onClear}
-            className="icon-button p-1"
-            title="Clear search"
-            aria-label="Clear search"
-          >
+          <button onClick={onClear} className="icon-button p-1" title="Clear search">
             <X size={14} />
           </button>
         )}

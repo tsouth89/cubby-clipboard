@@ -116,14 +116,24 @@ Findings, worst first:
 | # | Component | Finding | Checklist |
 |---|---|---|---|
 | 1 | `ClipList` / `ClipCard` | `role="list"` + `role="listitem"` with `aria-current` for the selected clip. The list is keyboard-navigated with a moving selection, so it needs `listbox` + `option` + `aria-selected`. As written, Narrator announces neither selection nor position. | 2 |
-| 2 | `SearchBar` | The input has only a `placeholder` and no `aria-label` or `<label>`, so it has no reliable accessible name, and the placeholder disappears once typing starts. | 1 |
+| ~~2~~ | `SearchBar` | **Withdrawn.** Recorded against `SearchBar.tsx`, which is not rendered anywhere. The live search input is in `FlyoutHeader`, and it already has `aria-label` on both the field and its clear button. | 1 |
 | 3 | `WelcomeOverlay` | No `role`, no accessible name, and no Escape, on what is the first surface a new user sees. It does carry `autoFocus` on its dismiss button, so focus does land inside it. | 3 |
 | 4 | `ConfirmDialog` | Declares `aria-modal="true"` but never moves focus into itself. None of the three dialogs trap Tab or restore focus to the invoking control on close. | 3 |
 | 5 | `ContextMenu` | No `role="menu"` / `role="menuitem"`, no arrow-key navigation, and focus is not moved into the menu on open, so reaching it means tabbing through the page. | 4 |
 | 6 | `SettingsPanel` | Tabs are plain buttons with no `role="tablist"` / `role="tab"` / `aria-selected`, so their tab nature and selected state are not conveyed. | 4 |
 | ~~7~~ | App-wide | **Withdrawn.** Recorded as "no `aria-live` region anywhere", which was wrong: grepping the app source found none, but `sonner` renders one in its own container, and copy, delete, and pin all raise toasts through it. | 5 |
 
-Fixed on branch `a11y/flyout-accessibility-pass`: 2, 3, 4, 5, 6. Finding 7 was
-withdrawn as a false positive. Finding 1 remains, and the assistive-technology
-half of this document is still unrun — that is what issue #45 needs next, and
-finding 1 is the item most worth confirming with Narrator once it is fixed.
+| 8 | `SearchBar`, `ControlBar`, `DragPreview` | None of these three components is imported anywhere. They are dead code, and auditing them produced two of the false positives above. `ControlBar` matters most: PR #130 added accessible names to its icon-only buttons, so that accessibility work never reached users. | — |
+
+Fixed on branch `a11y/flyout-accessibility-pass`: 1, 3, 4, 5, 6. Findings 2 and 7
+were withdrawn as false positives. Finding 8 is a live-code question rather than
+an accessibility defect and wants its own decision.
+
+Lesson worth keeping: grep the render tree before auditing a component. Two of
+seven findings were against code that does not ship, and the audit only caught it
+when wiring `aria-activedescendant` revealed `SearchBar` had no call site.
+
+The assistive-technology half of this document is still unrun, and that is what
+issue #45 needs next. The listbox change in finding 1 is the item most worth
+confirming with Narrator, since `aria-activedescendant` is exactly the kind of
+thing that reads correctly in the DOM and still fails in practice.
