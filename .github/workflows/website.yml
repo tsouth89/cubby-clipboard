@@ -33,4 +33,4 @@ jobs:
         with:
           node-version: 24
       - run: node .github/scripts/check-site.mjs
-      - run: node --test product_pages/worker.test.mjs
+      - run: node --test product_pages/worker.test.mjs product_pages/analytics.test.mjs
