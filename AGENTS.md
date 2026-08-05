@@ -101,6 +101,9 @@ cargo test           # tests
 
 # Frontend only (in frontend/)
 pnpm install && pnpm dev
+
+# Frontend tests (vitest, from the repo root)
+pnpm run test
 ```
 
 ## Code Style

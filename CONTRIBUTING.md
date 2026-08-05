@@ -35,6 +35,7 @@ pnpm run format:check
 pnpm run release:check
 pnpm run build
 node .github/scripts/check-site.mjs
+pnpm run test
 node --test product_pages/worker.test.mjs
 
 Push-Location src-tauri

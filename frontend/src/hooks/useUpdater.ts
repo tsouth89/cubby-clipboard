@@ -1,11 +1,10 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { toast } from 'sonner';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-
-const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+import { startUpdateChecks } from './updateSchedule';
 
 /**
  * Checks for an app update on startup and every 30 minutes while Cubby is
@@ -13,53 +12,32 @@ const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
  * lets the user choose when to install.
  * Any failure (offline, GitHub unreachable, dev build) is swallowed so it
  * never interrupts normal use.
+ *
+ * The scheduling itself lives in `updateSchedule.ts`, free of React and Tauri
+ * so it can be regression-tested; this hook only wires it to the real plugin
+ * and the toast.
  */
 export function useUpdater(enabled: boolean) {
   const { t } = useTranslation();
-  const checkInFlightRef = useRef(false);
-  const notifiedVersionRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!enabled) return;
 
-    let active = true;
-
-    const checkForUpdate = async () => {
-      if (!active || checkInFlightRef.current) return;
-      checkInFlightRef.current = true;
-
-      let update: Update | null = null;
-      try {
-        update = await check();
-      } catch (error) {
-        console.error('Update check failed:', error);
-      } finally {
-        checkInFlightRef.current = false;
-      }
-
-      if (!active || !update?.available || notifiedVersionRef.current === update.version) {
-        return;
-      }
-
-      notifiedVersionRef.current = update.version;
-
-      const available = update;
-      toast(t('updater.available', { version: available.version }), {
-        duration: Infinity,
-        action: {
-          label: t('updater.install'),
-          onClick: () => void installUpdate(available, t),
-        },
-      });
-    };
-
-    void checkForUpdate();
-    const intervalId = window.setInterval(() => void checkForUpdate(), UPDATE_CHECK_INTERVAL_MS);
-
-    return () => {
-      active = false;
-      window.clearInterval(intervalId);
-    };
+    return startUpdateChecks({
+      check,
+      announce: (update) => {
+        // Safe: the scheduler only announces an update it got from check().
+        const available = update as Update;
+        toast(t('updater.available', { version: available.version }), {
+          duration: Infinity,
+          action: {
+            label: t('updater.install'),
+            onClick: () => void installUpdate(available, t),
+          },
+        });
+      },
+      onError: (error) => console.error('Update check failed:', error),
+    });
   }, [enabled, t]);
 }
 
