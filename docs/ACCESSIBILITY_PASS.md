@@ -108,6 +108,8 @@ Passing:
 - `ContextMenu` items are real `<button>` elements, so they are focusable and
   activatable, and it handles Escape.
 - Icon-only ControlBar buttons have `aria-label` (added in #130).
+- Status changes are announced. `sonner` renders its toast container with
+  `aria-live="polite"`, and copy, delete, and pin all raise a toast.
 
 Findings, worst first:
 
@@ -119,7 +121,9 @@ Findings, worst first:
 | 4 | `ConfirmDialog` | Declares `aria-modal="true"` but never moves focus into itself. None of the three dialogs trap Tab or restore focus to the invoking control on close. | 3 |
 | 5 | `ContextMenu` | No `role="menu"` / `role="menuitem"`, no arrow-key navigation, and focus is not moved into the menu on open, so reaching it means tabbing through the page. | 4 |
 | 6 | `SettingsPanel` | Tabs are plain buttons with no `role="tablist"` / `role="tab"` / `aria-selected`, so their tab nature and selected state are not conveyed. | 4 |
-| 7 | App-wide | No `aria-live` region anywhere, so copy, delete, and pin produce no announcement. | 5 |
+| ~~7~~ | App-wide | **Withdrawn.** Recorded as "no `aria-live` region anywhere", which was wrong: grepping the app source found none, but `sonner` renders one in its own container, and copy, delete, and pin all raise toasts through it. | 5 |
 
-Fixed on branch `a11y/flyout-accessibility-pass`: 2, 3, 4, 6. Findings 1, 5, and 7
-remain, and the assistive-technology half of this document is still unrun.
+Fixed on branch `a11y/flyout-accessibility-pass`: 2, 3, 4, 5, 6. Finding 7 was
+withdrawn as a false positive. Finding 1 remains, and the assistive-technology
+half of this document is still unrun — that is what issue #45 needs next, and
+finding 1 is the item most worth confirming with Narrator once it is fixed.

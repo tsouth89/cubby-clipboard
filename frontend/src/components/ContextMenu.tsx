@@ -10,10 +10,13 @@ interface ContextMenuProps {
     disabled?: boolean;
   }[];
   onClose: () => void;
+  /** Accessible name for the menu. Screen readers announce this on open. */
+  label?: string;
 }
 
-export function ContextMenu({ x, y, options, onClose }: ContextMenuProps) {
+export function ContextMenu({ x, y, options, onClose, label = 'Clip actions' }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const [position, setPosition] = useState({ x, y });
 
   useLayoutEffect(() => {
@@ -28,16 +31,76 @@ export function ContextMenu({ x, y, options, onClose }: ContextMenuProps) {
     });
   }, [x, y, options.length]);
 
+  // Indices of items a keyboard user can land on. Disabled items are skipped
+  // rather than focused-and-inert, which is what a menu widget is expected to do.
+  const enabledIndices = options
+    .map((option, index) => (option.disabled ? -1 : index))
+    .filter((index) => index >= 0);
+
+  const focusItem = (index: number) => itemRefs.current[index]?.focus();
+
+  useEffect(() => {
+    // Move focus into the menu on open, and put it back where it came from on
+    // close. Without this the menu is reachable only by tabbing through
+    // everything behind it, which for a right-click menu means not at all.
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    if (enabledIndices.length > 0) {
+      focusItem(enabledIndices[0]);
+    } else {
+      menuRef.current?.focus();
+    }
+
+    return () => {
+      if (previouslyFocused?.isConnected) {
+        previouslyFocused.focus();
+      }
+    };
+    // Open-time behaviour only; re-running on option changes would yank focus
+    // back to the first item mid-navigation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
         onClose();
       }
     }
-    // Handle Escape key
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
         onClose();
+        return;
+      }
+      if (enabledIndices.length === 0) return;
+
+      const active = document.activeElement;
+      const current = enabledIndices.indexOf(
+        itemRefs.current.findIndex((item) => item === active)
+      );
+
+      switch (event.key) {
+        case 'ArrowDown':
+          event.preventDefault();
+          focusItem(enabledIndices[(current + 1) % enabledIndices.length]);
+          break;
+        case 'ArrowUp':
+          event.preventDefault();
+          focusItem(
+            enabledIndices[(current - 1 + enabledIndices.length) % enabledIndices.length]
+          );
+          break;
+        case 'Home':
+          event.preventDefault();
+          focusItem(enabledIndices[0]);
+          break;
+        case 'End':
+          event.preventDefault();
+          focusItem(enabledIndices[enabledIndices.length - 1]);
+          break;
+        case 'Tab':
+          // A menu is a single stop, not a tab sequence: Tab dismisses it.
+          onClose();
+          break;
       }
     }
 
@@ -47,7 +110,7 @@ export function ContextMenu({ x, y, options, onClose }: ContextMenuProps) {
       document.removeEventListener('mousedown', handleClickOutside);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [onClose]);
+  }, [onClose, enabledIndices.join(',')]);
 
   const style = {
     top: position.y,
@@ -57,6 +120,9 @@ export function ContextMenu({ x, y, options, onClose }: ContextMenuProps) {
   return (
     <div
       ref={menuRef}
+      role="menu"
+      aria-label={label}
+      tabIndex={-1}
       className="animate-in fade-in-0 zoom-in-95 fixed z-50 max-h-[min(24rem,calc(100vh-1rem))] min-w-[12rem] overflow-y-auto rounded-lg border border-white/[0.1] bg-popover/95 p-1.5 shadow-2xl backdrop-blur-xl"
       style={style}
     >
@@ -64,6 +130,12 @@ export function ContextMenu({ x, y, options, onClose }: ContextMenuProps) {
         {options.map((option, index) => (
           <button
             key={index}
+            role="menuitem"
+            // Roving focus: the menu is one Tab stop and arrows move within it.
+            tabIndex={-1}
+            ref={(element) => {
+              itemRefs.current[index] = element;
+            }}
             disabled={option.disabled}
             onClick={() => {
               option.onClick();
