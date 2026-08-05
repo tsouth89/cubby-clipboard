@@ -13,6 +13,12 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Pinned so the audit tool cannot change under us on an unrelated run, and so
+  # the cache key below is tied to an exact version. Bumping this string is what
+  # forces a fresh compile.
+  CARGO_AUDIT_VERSION: 0.22.2
+
 jobs:
   test:
     runs-on: windows-latest
@@ -49,7 +55,32 @@ jobs:
       - run: pnpm run test
       - run: node --test product_pages/worker.test.mjs product_pages/analytics.test.mjs
       - run: pnpm audit --prod
-      - run: cargo install cargo-audit --locked
+      # Compiling cargo-audit from source took 5m55s of a 9m17s job, to then run
+      # for 7 seconds. Cache the built binary instead. The key pins the exact
+      # version, so the only way to get a stale tool is to change the pin, which
+      # misses the cache and rebuilds.
+      - name: Cache cargo-audit
+        id: cargo-audit-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-audit.exe
+          key: ${{ runner.os }}-cargo-audit-${{ env.CARGO_AUDIT_VERSION }}
+
+      - if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --locked --version ${{ env.CARGO_AUDIT_VERSION }}
+
+      # Cheap insurance that a cache hit actually restored the tool we pinned,
+      # so a bad entry fails here with a clear message rather than somewhere
+      # inside the audit.
+      - name: Verify cargo-audit
+        shell: pwsh
+        run: |
+          $actual = (cargo audit --version | Out-String).Trim()
+          if ($actual -notmatch [regex]::Escape($env:CARGO_AUDIT_VERSION)) {
+            throw "Expected cargo-audit $env:CARGO_AUDIT_VERSION on PATH, got: $actual"
+          }
+          Write-Host "cargo-audit verified: $actual"
+
       - shell: pwsh
         run: ./scripts/audit-rust.ps1
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
