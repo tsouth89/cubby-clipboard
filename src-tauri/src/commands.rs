@@ -843,7 +843,17 @@ async fn restore_clip(
                         window,
                         Some(Box::new(move || {
                             let strategy = crate::paste_engine::previous_paste_strategy();
-                            crate::restore_previous_foreground_window();
+                            if !crate::restore_previous_foreground_window() {
+                                // Synthesizing Ctrl+V now would paste into
+                                // whatever window happens to hold focus, which
+                                // is not the one the user chose. The clip is
+                                // already on the clipboard, so leave it for a
+                                // manual paste instead of guessing a target.
+                                log::warn!(
+                                    "PASTE: focus was not restored; clipboard is ready for a manual Ctrl+V"
+                                );
+                                return;
+                            }
                             if !crate::paste_engine::should_auto_paste_with_mode(
                                 strategy,
                                 &remote_paste_mode,
@@ -921,7 +931,14 @@ async fn restore_recognized_text(
             window,
             Some(Box::new(move || {
                 let strategy = crate::paste_engine::previous_paste_strategy();
-                crate::restore_previous_foreground_window();
+                if !crate::restore_previous_foreground_window() {
+                    // See the note in restore_clip: pasting into an unknown
+                    // foreground window is worse than not pasting at all.
+                    log::warn!(
+                        "PASTE: focus was not restored; recognized text is ready for a manual Ctrl+V"
+                    );
+                    return;
+                }
                 if !crate::paste_engine::should_auto_paste_with_mode(strategy, &remote_paste_mode) {
                     log::info!("PASTE: Recognized text is ready; waiting for physical Ctrl+V");
                     return;
