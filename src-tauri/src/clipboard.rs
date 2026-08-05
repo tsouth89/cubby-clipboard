@@ -562,11 +562,6 @@ fn capture_clipboard_update(
         record_capture_error(format!(
             "clipboard sequence {sequence} stayed locked across {attempts} attempts; that copy was not captured"
         ));
-        log::warn!(
-            "CLIPBOARD: Giving up on sequence {} after {} contended attempts",
-            sequence,
-            attempts
-        );
         return Ok(CaptureAttempt::Handled);
     }
 
@@ -1473,12 +1468,30 @@ async fn process_clipboard_snapshot(
     };
 
     let db_lookup_started = std::time::Instant::now();
-    let existing_uuid: Option<String> =
-        sqlx::query_scalar::<_, String>(r#"SELECT uuid FROM clips WHERE content_hash = ?"#)
-            .bind(&storage_hash)
-            .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
+    // A failed lookup must not be read as "no such row". content_hash carries a
+    // plain index and no UNIQUE constraint, so falling through to the insert
+    // branch would succeed and silently leave two rows for one clip. Since we
+    // cannot tell whether the clip already exists, skip this capture and say so:
+    // one recorded miss beats a duplicate the user has to notice and clean up.
+    let existing_uuid: Option<String> = match sqlx::query_scalar::<_, String>(
+        r#"SELECT uuid FROM clips WHERE content_hash = ?"#,
+    )
+    .bind(&storage_hash)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(found) => found,
+        Err(error) => {
+            // record_capture_error both logs and stores, so the whole reason
+            // belongs in one message: last_error is what
+            // get_clipboard_capture_status surfaces, and "lookup failed" on its
+            // own does not explain why the copy was dropped.
+            record_capture_error(format!(
+                "could not check whether sequence {sequence} was already stored, so it was skipped to avoid a duplicate row: {error}"
+            ));
+            return;
+        }
+    };
     let db_lookup_ms = db_lookup_started.elapsed().as_millis();
 
     let db_write_started = std::time::Instant::now();
