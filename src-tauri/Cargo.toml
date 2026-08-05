@@ -6,6 +6,11 @@ authors = ["SouthForge AI", "PastePaw contributors"]
 license = "GPL-3.0"
 edition = "2021"
 default-run = "cubby"
+# Without this cargo still auto-discovers every src/bin/*.rs as a default
+# target, so the explicit [[bin]] blocks below would gate only the files that
+# happen to be listed there and a newly added one would ship unsigned next to
+# cubby.exe. Adding a diagnostic binary now requires declaring it explicitly.
+autobins = false
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -57,7 +62,13 @@ app-store = []
 # The scripts under scripts/test-*.ps1 enable this feature explicitly.
 dev-harness = []
 
-# Declared explicitly (instead of relying on cargo's src/bin auto-discovery) so
+# The app itself. `autobins = false` turns off discovery of src/main.rs too,
+# so this has to be declared alongside the diagnostic targets below.
+[[bin]]
+name = "cubby"
+path = "src/main.rs"
+
+# Declared explicitly (auto-discovery is off via `autobins = false` above) so
 # each one can be gated behind dev-harness.
 [[bin]]
 name = "clipboard_probe"
