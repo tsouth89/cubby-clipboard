@@ -1267,6 +1267,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                           value={newIgnoredApp}
                           onChange={(e) => setNewIgnoredApp(e.target.value)}
                           placeholder="notepad.exe"
+                          aria-label="Executable to ignore"
                           className="flex-1 rounded-lg border border-border bg-input px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                           onKeyDown={(e) => e.key === 'Enter' && handleAddIgnoredApp()}
                         />
@@ -1274,6 +1275,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                           onClick={handleBrowseFile}
                           className={ghostButton}
                           title="Browse executable"
+                          aria-label="Browse executable"
                         >
                           <FolderOpen size={14} />
                         </button>
