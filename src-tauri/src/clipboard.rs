@@ -52,7 +52,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 // GLOBAL STATE: Store the hash of the clip we just pasted ourselves.
 // If the next clipboard change matches this hash, we ignore it (don't update timestamp).
-static IGNORE_HASH: Lazy<parking_lot::Mutex<Option<String>>> =
+/// Hash of a clipboard write Cubby made itself, with the time it was written.
+/// Consumed by the capture of that write so a self-paste is not re-recorded.
+static IGNORE_HASH: Lazy<parking_lot::Mutex<Option<(String, Instant)>>> =
     Lazy::new(|| parking_lot::Mutex::new(None));
 static LAST_STABLE_HASH: Lazy<parking_lot::Mutex<Option<String>>> =
     Lazy::new(|| parking_lot::Mutex::new(None));
@@ -71,6 +73,13 @@ pub static CLIPBOARD_SYNC: Lazy<Arc<tokio::sync::Mutex<()>>> =
 /// Password-manager extensions typically clear within tens of seconds. Keep this
 /// short so a deliberate later clear does not erase an intentional keep.
 const CLIPBOARD_CLEAR_FORGET_WINDOW: Duration = Duration::from_secs(90);
+/// How long a self-write marker stays valid. The capture of our own write
+/// normally arrives within milliseconds, so this is generous. It exists because
+/// an unbounded marker is never cleaned up when that capture never arrives at
+/// all -- the read lost every race, or a remote client rewrote the clipboard
+/// before we could read it -- and a stale marker silently swallows the next
+/// legitimate copy of the same content.
+const IGNORE_HASH_TTL: Duration = Duration::from_secs(5);
 #[cfg(target_os = "windows")]
 const CF_DIB_FORMAT: u32 = 8;
 
@@ -111,11 +120,20 @@ const INITIAL_LISTENER_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_LISTENER_BACKOFF: Duration = Duration::from_secs(30);
 const WATCHDOG_INTERVAL: Duration = Duration::from_secs(2);
 const STALE_LISTENER_AFTER: Duration = Duration::from_secs(5);
+/// How many times one clipboard sequence may be deferred under contention
+/// before the copy is written off. Each deferral costs roughly
+/// `STALE_LISTENER_AFTER` plus a listener restart, so this bounds a stuck
+/// clipboard owner to about twelve seconds of retrying instead of forever.
+const MAX_DEFERRALS_PER_SEQUENCE: u32 = 3;
 
 static CAPTURE_STATE: AtomicU8 = AtomicU8::new(CAPTURE_STATE_STOPPED);
 static LAST_CLIPBOARD_EVENT_UNIX_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_HANDLED_SEQUENCE: AtomicU32 = AtomicU32::new(0);
 static LISTENER_RESTART_COUNT: AtomicU64 = AtomicU64::new(0);
+/// The sequence currently being retried, and how many times it has been
+/// deferred. Only ever touched from the listener thread.
+static DEFERRED_SEQUENCE: AtomicU32 = AtomicU32::new(0);
+static DEFERRED_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
 static LAST_CAPTURE_ERROR: Lazy<parking_lot::Mutex<Option<String>>> =
     Lazy::new(|| parking_lot::Mutex::new(None));
 #[cfg(target_os = "windows")]
@@ -134,14 +152,32 @@ pub struct ClipboardCaptureStatus {
 
 pub fn set_ignore_hash(hash: String) {
     let mut lock = IGNORE_HASH.lock();
-    *lock = Some(hash);
+    *lock = Some((hash, Instant::now()));
 }
 
 pub(crate) fn clear_ignore_hash_if_matches(hash: &str) {
     let mut lock = IGNORE_HASH.lock();
-    if lock.as_deref() == Some(hash) {
+    if lock.as_ref().is_some_and(|(marked, _)| marked == hash) {
         lock.take();
     }
+}
+
+/// Whether a self-write marker still applies to `hash`.
+///
+/// A marker that has outlived `ttl` is treated as absent: the write it
+/// described was never observed, and honouring it would drop a real copy.
+fn ignore_marker_applies(
+    marker: Option<&(String, Instant)>,
+    hash: &str,
+    now: Instant,
+    ttl: Duration,
+) -> bool {
+    marker.is_some_and(|(marked, marked_at)| {
+        marked == hash
+            && now
+                .checked_duration_since(*marked_at)
+                .is_some_and(|elapsed| elapsed <= ttl)
+    })
 }
 
 /// Forget the consecutive-duplicate marker after history is deleted. Without
@@ -385,6 +421,7 @@ fn spawn_listener_watchdog() {
 
 /// Outcome of trying to ingest the clipboard for one sequence number.
 #[cfg(target_os = "windows")]
+#[derive(Debug, PartialEq, Eq)]
 enum CaptureAttempt {
     /// A snapshot or clear event was queued (or the payload is unsupported);
     /// the sequence was marked handled.
@@ -402,6 +439,33 @@ enum CaptureAttempt {
 /// and restarts the listener, whose session start retries this capture instead
 /// of silently dropping the copy.
 ///
+/// Count a deferral against `sequence` and decide whether it earns another try.
+///
+/// Returns the attempt count to remember, and `Handled` once the sequence has
+/// used up `max_attempts`. Without that ceiling a clipboard owner that never
+/// releases the lock keeps the sequence permanently unhandled, and the watchdog
+/// restarts the listener every few seconds for the rest of the session.
+#[cfg(target_os = "windows")]
+fn deferral_decision(
+    tracked_sequence: u32,
+    tracked_attempts: u32,
+    sequence: u32,
+    max_attempts: u32,
+) -> (u32, CaptureAttempt) {
+    let attempts = if tracked_sequence == sequence {
+        tracked_attempts.saturating_add(1)
+    } else {
+        // A different copy: this one starts its own budget.
+        1
+    };
+
+    if attempts >= max_attempts {
+        (attempts, CaptureAttempt::Handled)
+    } else {
+        (attempts, CaptureAttempt::Deferred)
+    }
+}
+
 /// `Err(())` means the snapshot consumer is gone (process teardown).
 #[cfg(target_os = "windows")]
 fn capture_clipboard_update(
@@ -471,11 +535,39 @@ fn capture_clipboard_update(
     }
 
     if clipboard_has_supported_format() {
-        log::warn!(
-            "CLIPBOARD: Could not materialize sequence {} (clipboard contended); deferring for watchdog retry",
-            sequence
+        let (attempts, decision) = deferral_decision(
+            DEFERRED_SEQUENCE.load(Ordering::SeqCst),
+            DEFERRED_ATTEMPTS.load(Ordering::SeqCst),
+            sequence,
+            MAX_DEFERRALS_PER_SEQUENCE,
         );
-        return Ok(CaptureAttempt::Deferred);
+        DEFERRED_SEQUENCE.store(sequence, Ordering::SeqCst);
+        DEFERRED_ATTEMPTS.store(attempts, Ordering::SeqCst);
+
+        if decision == CaptureAttempt::Deferred {
+            log::warn!(
+                "CLIPBOARD: Could not materialize sequence {} (clipboard contended); deferring for watchdog retry (attempt {} of {})",
+                sequence,
+                attempts,
+                MAX_DEFERRALS_PER_SEQUENCE
+            );
+            return Ok(CaptureAttempt::Deferred);
+        }
+
+        // The owner never released the clipboard. Mark the sequence handled so
+        // the watchdog stops restarting the listener over one lost copy, and
+        // record it: the contract is that a failed capture is visible in
+        // diagnostics rather than silently reported as a success.
+        note_clipboard_event(sequence);
+        record_capture_error(format!(
+            "clipboard sequence {sequence} stayed locked across {attempts} attempts; that copy was not captured"
+        ));
+        log::warn!(
+            "CLIPBOARD: Giving up on sequence {} after {} contended attempts",
+            sequence,
+            attempts
+        );
+        return Ok(CaptureAttempt::Handled);
     }
 
     // Nothing we support (custom/private formats only). Mark handled so the
@@ -1235,7 +1327,12 @@ async fn process_clipboard_snapshot(
     // source, so skip processing it entirely.
     {
         let mut lock = IGNORE_HASH.lock();
-        if lock.as_deref() == Some(clip_hash.as_str()) {
+        if ignore_marker_applies(
+            lock.as_ref(),
+            clip_hash.as_str(),
+            Instant::now(),
+            IGNORE_HASH_TTL,
+        ) {
             // Only consume the marker on a match. Clearing it for an
             // intermediate, non-matching snapshot would lose it before our own
             // write arrives, letting the self-paste be persisted after all.
@@ -1326,6 +1423,15 @@ async fn process_clipboard_snapshot(
             }
         }
     }
+
+    // Past this point every early return is a failed capture, and a failure must
+    // not leave the *previous* clip as the clear-forget target: copy password A,
+    // fail to store password B, and the manager's auto-clear would then delete A.
+    // Clearing here rather than at each error return means new failure paths get
+    // this for free. Success re-establishes the marker at the end of the
+    // function, so the only cost is that a failure forgets a clear target that
+    // was about to be replaced anyway.
+    discard_clear_target();
 
     // DB Logic
     let pool = &db.pool;
@@ -2289,12 +2395,64 @@ unsafe fn extract_icon(path: &str) -> Option<String> {
 mod tests {
     use super::{
         build_clip_hash_material, calculate_hash, capture_state_name, capture_text,
-        clear_ignore_hash_if_matches, clipboard_retry_delay, next_listener_backoff, rgba_to_cf_dib,
-        set_ignore_hash, should_forget_recent_capture, should_relay_capture, CapturedContent,
-        CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED,
-        CLIPBOARD_CLEAR_FORGET_WINDOW, IGNORE_HASH,
+        clear_ignore_hash_if_matches, clipboard_retry_delay, ignore_marker_applies,
+        next_listener_backoff, rgba_to_cf_dib, set_ignore_hash, should_forget_recent_capture,
+        should_relay_capture, CapturedContent, CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING,
+        CAPTURE_STATE_STOPPED, CLIPBOARD_CLEAR_FORGET_WINDOW, IGNORE_HASH, IGNORE_HASH_TTL,
     };
     use std::time::{Duration, Instant};
+
+    #[cfg(target_os = "windows")]
+    mod deferral {
+        use super::super::{deferral_decision, CaptureAttempt, MAX_DEFERRALS_PER_SEQUENCE};
+
+        #[test]
+        fn retries_a_contended_sequence_until_the_budget_runs_out() {
+            // First contention on sequence 42, nothing tracked yet.
+            assert_eq!(
+                deferral_decision(0, 0, 42, 3),
+                (1, CaptureAttempt::Deferred)
+            );
+            assert_eq!(
+                deferral_decision(42, 1, 42, 3),
+                (2, CaptureAttempt::Deferred)
+            );
+            // Third attempt exhausts the budget: write the copy off instead of
+            // leaving the watchdog to restart the listener forever.
+            assert_eq!(
+                deferral_decision(42, 2, 42, 3),
+                (3, CaptureAttempt::Handled)
+            );
+        }
+
+        #[test]
+        fn a_new_sequence_starts_its_own_budget() {
+            // The previous copy burned every attempt; a fresh copy must not
+            // inherit that and be dropped on its first contended read.
+            assert_eq!(
+                deferral_decision(42, 3, 43, 3),
+                (1, CaptureAttempt::Deferred)
+            );
+        }
+
+        #[test]
+        fn saturates_instead_of_overflowing() {
+            assert_eq!(
+                deferral_decision(42, u32::MAX, 42, 3),
+                (u32::MAX, CaptureAttempt::Handled)
+            );
+        }
+
+        #[test]
+        fn the_shipped_budget_allows_more_than_one_try() {
+            // A budget of 1 would give up on the first contended read, which
+            // defeats the deferral mechanism entirely.
+            assert_eq!(
+                deferral_decision(0, 0, 42, MAX_DEFERRALS_PER_SEQUENCE),
+                (1, CaptureAttempt::Deferred)
+            );
+        }
+    }
 
     #[test]
     fn relays_only_remote_viewer_captures() {
@@ -2433,10 +2591,53 @@ mod tests {
     fn failed_write_cleanup_only_clears_its_own_ignore_hash() {
         set_ignore_hash("expected".to_string());
         clear_ignore_hash_if_matches("different");
-        assert_eq!(IGNORE_HASH.lock().as_deref(), Some("expected"));
+        assert_eq!(
+            IGNORE_HASH.lock().as_ref().map(|(hash, _)| hash.as_str()),
+            Some("expected")
+        );
 
         clear_ignore_hash_if_matches("expected");
         assert!(IGNORE_HASH.lock().is_none());
+    }
+
+    #[test]
+    fn ignore_marker_applies_to_a_fresh_matching_write() {
+        let now = Instant::now();
+        let marker = ("hash-a".to_string(), now);
+        assert!(ignore_marker_applies(
+            Some(&marker),
+            "hash-a",
+            now + Duration::from_millis(50),
+            IGNORE_HASH_TTL
+        ));
+    }
+
+    #[test]
+    fn ignore_marker_never_applies_to_other_content() {
+        let now = Instant::now();
+        let marker = ("hash-a".to_string(), now);
+        assert!(!ignore_marker_applies(
+            Some(&marker),
+            "hash-b",
+            now,
+            IGNORE_HASH_TTL
+        ));
+        assert!(!ignore_marker_applies(None, "hash-a", now, IGNORE_HASH_TTL));
+    }
+
+    #[test]
+    fn a_stale_marker_stops_swallowing_real_copies() {
+        // The self-write was never observed (contended read, or a remote client
+        // rewrote the clipboard first). Copying that same content later is a
+        // genuine copy and must still be captured.
+        let now = Instant::now();
+        let marker = ("hash-a".to_string(), now);
+        assert!(!ignore_marker_applies(
+            Some(&marker),
+            "hash-a",
+            now + IGNORE_HASH_TTL + Duration::from_millis(1),
+            IGNORE_HASH_TTL
+        ));
     }
 
     #[test]

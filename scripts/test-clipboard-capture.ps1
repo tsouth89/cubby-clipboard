@@ -14,7 +14,7 @@ $probePath = Join-Path $tauriRoot "target\debug\clipboard_probe.exe"
 if (-not $SkipBuild) {
     Push-Location $tauriRoot
     try {
-        cargo build --bin clipboard_probe
+        cargo build --features dev-harness --bin clipboard_probe
         if ($LASTEXITCODE -ne 0) {
             throw "clipboard_probe build failed"
         }

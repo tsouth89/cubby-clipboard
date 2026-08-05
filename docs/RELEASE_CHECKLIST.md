@@ -125,6 +125,17 @@ payload. A Settings/About surface for this status is still optional.
 ## Public-release decisions
 
 - Installers are signed with Azure Trusted Signing in CI; confirm SmartScreen reputation is acceptable for the channel you are announcing.
+- After installing the built artifact, confirm every executable in the install
+  directory is signed and that nothing unexpected shipped alongside the app:
+
+  ```powershell
+  Get-ChildItem "$env:LOCALAPPDATA\Cubby Clipboard\*.exe" |
+    ForEach-Object { [PSCustomObject]@{ Name = $_.Name; Status = (Get-AuthenticodeSignature $_).Status } }
+  ```
+
+  Expect exactly `cubby.exe` and `uninstall.exe`, both `Valid`. An extra binary
+  means a `src/bin` target lost its `required-features = ["dev-harness"]` gate;
+  a `NotSigned` result means `signCommand` did not run.
 - Do not enable Winget publishing until `SouthForgeAI.CubbyClipboard` is reserved and the installer identity is final.
 - Do not submit to Microsoft Store until Partner Center identity, signing, privacy text, and clean upgrade/uninstall behavior are verified.
 - Keep GPL-3.0 source, `NOTICE.md`, and PastePaw attribution available with every release.
