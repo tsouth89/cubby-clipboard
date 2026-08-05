@@ -36,7 +36,7 @@ pnpm run release:check
 pnpm run build
 node .github/scripts/check-site.mjs
 pnpm run test
-node --test product_pages/worker.test.mjs
+node --test product_pages/worker.test.mjs product_pages/analytics.test.mjs
 
 Push-Location src-tauri
 cargo fmt --check
