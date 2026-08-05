@@ -74,9 +74,7 @@ export function ContextMenu({ x, y, options, onClose, label = 'Clip actions' }: 
       if (enabledIndices.length === 0) return;
 
       const active = document.activeElement;
-      const current = enabledIndices.indexOf(
-        itemRefs.current.findIndex((item) => item === active)
-      );
+      const current = enabledIndices.indexOf(itemRefs.current.findIndex((item) => item === active));
 
       switch (event.key) {
         case 'ArrowDown':
@@ -85,9 +83,7 @@ export function ContextMenu({ x, y, options, onClose, label = 'Clip actions' }: 
           break;
         case 'ArrowUp':
           event.preventDefault();
-          focusItem(
-            enabledIndices[(current - 1 + enabledIndices.length) % enabledIndices.length]
-          );
+          focusItem(enabledIndices[(current - 1 + enabledIndices.length) % enabledIndices.length]);
           break;
         case 'Home':
           event.preventDefault();
