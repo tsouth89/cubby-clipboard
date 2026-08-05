@@ -562,11 +562,6 @@ fn capture_clipboard_update(
         record_capture_error(format!(
             "clipboard sequence {sequence} stayed locked across {attempts} attempts; that copy was not captured"
         ));
-        log::warn!(
-            "CLIPBOARD: Giving up on sequence {} after {} contended attempts",
-            sequence,
-            attempts
-        );
         return Ok(CaptureAttempt::Handled);
     }
 
@@ -1487,12 +1482,13 @@ async fn process_clipboard_snapshot(
     {
         Ok(found) => found,
         Err(error) => {
+            // record_capture_error both logs and stores, so the whole reason
+            // belongs in one message: last_error is what
+            // get_clipboard_capture_status surfaces, and "lookup failed" on its
+            // own does not explain why the copy was dropped.
             record_capture_error(format!(
-                "could not check whether sequence {sequence} was already stored: {error}"
+                "could not check whether sequence {sequence} was already stored, so it was skipped to avoid a duplicate row: {error}"
             ));
-            log::error!(
-                    "CLIPBOARD: Existing-clip lookup failed for sequence {sequence}; skipping to avoid a duplicate row: {error}"
-                );
             return;
         }
     };
