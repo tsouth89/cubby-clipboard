@@ -1424,6 +1424,15 @@ async fn process_clipboard_snapshot(
         }
     }
 
+    // Past this point every early return is a failed capture, and a failure must
+    // not leave the *previous* clip as the clear-forget target: copy password A,
+    // fail to store password B, and the manager's auto-clear would then delete A.
+    // Clearing here rather than at each error return means new failure paths get
+    // this for free. Success re-establishes the marker at the end of the
+    // function, so the only cost is that a failure forgets a clear target that
+    // was about to be replaced anyway.
+    discard_clear_target();
+
     // DB Logic
     let pool = &db.pool;
     let storage_hash = db.crypto.keyed_hash(&hash_material);
