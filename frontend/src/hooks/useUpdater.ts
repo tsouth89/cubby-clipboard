@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { toast } from 'sonner';
@@ -20,6 +20,16 @@ import { startUpdateChecks } from './updateSchedule';
 export function useUpdater(enabled: boolean) {
   const { t } = useTranslation();
 
+  // Read through a ref so `t` can stay out of the effect's dependencies. It is
+  // a new identity after every language change, and restarting the effect
+  // restarts the scheduler -- which would reset the "already announced this
+  // version" state and prompt again about an update the user has already been
+  // told about, as well as pushing the next scheduled check out by 30 minutes.
+  const tRef = useRef(t);
+  useEffect(() => {
+    tRef.current = t;
+  }, [t]);
+
   useEffect(() => {
     if (!enabled) return;
 
@@ -28,17 +38,18 @@ export function useUpdater(enabled: boolean) {
       announce: (update) => {
         // Safe: the scheduler only announces an update it got from check().
         const available = update as Update;
-        toast(t('updater.available', { version: available.version }), {
+        const translate = tRef.current;
+        toast(translate('updater.available', { version: available.version }), {
           duration: Infinity,
           action: {
-            label: t('updater.install'),
-            onClick: () => void installUpdate(available, t),
+            label: translate('updater.install'),
+            onClick: () => void installUpdate(available, tRef.current),
           },
         });
       },
       onError: (error) => console.error('Update check failed:', error),
     });
-  }, [enabled, t]);
+  }, [enabled]);
 }
 
 async function installUpdate(update: Update, t: TFunction) {
