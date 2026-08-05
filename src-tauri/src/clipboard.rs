@@ -52,7 +52,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 // GLOBAL STATE: Store the hash of the clip we just pasted ourselves.
 // If the next clipboard change matches this hash, we ignore it (don't update timestamp).
-static IGNORE_HASH: Lazy<parking_lot::Mutex<Option<String>>> =
+/// Hash of a clipboard write Cubby made itself, with the time it was written.
+/// Consumed by the capture of that write so a self-paste is not re-recorded.
+static IGNORE_HASH: Lazy<parking_lot::Mutex<Option<(String, Instant)>>> =
     Lazy::new(|| parking_lot::Mutex::new(None));
 static LAST_STABLE_HASH: Lazy<parking_lot::Mutex<Option<String>>> =
     Lazy::new(|| parking_lot::Mutex::new(None));
@@ -71,6 +73,13 @@ pub static CLIPBOARD_SYNC: Lazy<Arc<tokio::sync::Mutex<()>>> =
 /// Password-manager extensions typically clear within tens of seconds. Keep this
 /// short so a deliberate later clear does not erase an intentional keep.
 const CLIPBOARD_CLEAR_FORGET_WINDOW: Duration = Duration::from_secs(90);
+/// How long a self-write marker stays valid. The capture of our own write
+/// normally arrives within milliseconds, so this is generous. It exists because
+/// an unbounded marker is never cleaned up when that capture never arrives at
+/// all -- the read lost every race, or a remote client rewrote the clipboard
+/// before we could read it -- and a stale marker silently swallows the next
+/// legitimate copy of the same content.
+const IGNORE_HASH_TTL: Duration = Duration::from_secs(5);
 #[cfg(target_os = "windows")]
 const CF_DIB_FORMAT: u32 = 8;
 
@@ -143,14 +152,32 @@ pub struct ClipboardCaptureStatus {
 
 pub fn set_ignore_hash(hash: String) {
     let mut lock = IGNORE_HASH.lock();
-    *lock = Some(hash);
+    *lock = Some((hash, Instant::now()));
 }
 
 pub(crate) fn clear_ignore_hash_if_matches(hash: &str) {
     let mut lock = IGNORE_HASH.lock();
-    if lock.as_deref() == Some(hash) {
+    if lock.as_ref().is_some_and(|(marked, _)| marked == hash) {
         lock.take();
     }
+}
+
+/// Whether a self-write marker still applies to `hash`.
+///
+/// A marker that has outlived `ttl` is treated as absent: the write it
+/// described was never observed, and honouring it would drop a real copy.
+fn ignore_marker_applies(
+    marker: Option<&(String, Instant)>,
+    hash: &str,
+    now: Instant,
+    ttl: Duration,
+) -> bool {
+    marker.is_some_and(|(marked, marked_at)| {
+        marked == hash
+            && now
+                .checked_duration_since(*marked_at)
+                .is_some_and(|elapsed| elapsed <= ttl)
+    })
 }
 
 /// Forget the consecutive-duplicate marker after history is deleted. Without
@@ -1300,7 +1327,12 @@ async fn process_clipboard_snapshot(
     // source, so skip processing it entirely.
     {
         let mut lock = IGNORE_HASH.lock();
-        if lock.as_deref() == Some(clip_hash.as_str()) {
+        if ignore_marker_applies(
+            lock.as_ref(),
+            clip_hash.as_str(),
+            Instant::now(),
+            IGNORE_HASH_TTL,
+        ) {
             // Only consume the marker on a match. Clearing it for an
             // intermediate, non-matching snapshot would lose it before our own
             // write arrives, letting the self-paste be persisted after all.
@@ -2354,10 +2386,10 @@ unsafe fn extract_icon(path: &str) -> Option<String> {
 mod tests {
     use super::{
         build_clip_hash_material, calculate_hash, capture_state_name, capture_text,
-        clear_ignore_hash_if_matches, clipboard_retry_delay, next_listener_backoff, rgba_to_cf_dib,
-        set_ignore_hash, should_forget_recent_capture, should_relay_capture, CapturedContent,
-        CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED,
-        CLIPBOARD_CLEAR_FORGET_WINDOW, IGNORE_HASH,
+        clear_ignore_hash_if_matches, clipboard_retry_delay, ignore_marker_applies,
+        next_listener_backoff, rgba_to_cf_dib, set_ignore_hash, should_forget_recent_capture,
+        should_relay_capture, CapturedContent, CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING,
+        CAPTURE_STATE_STOPPED, CLIPBOARD_CLEAR_FORGET_WINDOW, IGNORE_HASH, IGNORE_HASH_TTL,
     };
     use std::time::{Duration, Instant};
 
@@ -2550,10 +2582,53 @@ mod tests {
     fn failed_write_cleanup_only_clears_its_own_ignore_hash() {
         set_ignore_hash("expected".to_string());
         clear_ignore_hash_if_matches("different");
-        assert_eq!(IGNORE_HASH.lock().as_deref(), Some("expected"));
+        assert_eq!(
+            IGNORE_HASH.lock().as_ref().map(|(hash, _)| hash.as_str()),
+            Some("expected")
+        );
 
         clear_ignore_hash_if_matches("expected");
         assert!(IGNORE_HASH.lock().is_none());
+    }
+
+    #[test]
+    fn ignore_marker_applies_to_a_fresh_matching_write() {
+        let now = Instant::now();
+        let marker = ("hash-a".to_string(), now);
+        assert!(ignore_marker_applies(
+            Some(&marker),
+            "hash-a",
+            now + Duration::from_millis(50),
+            IGNORE_HASH_TTL
+        ));
+    }
+
+    #[test]
+    fn ignore_marker_never_applies_to_other_content() {
+        let now = Instant::now();
+        let marker = ("hash-a".to_string(), now);
+        assert!(!ignore_marker_applies(
+            Some(&marker),
+            "hash-b",
+            now,
+            IGNORE_HASH_TTL
+        ));
+        assert!(!ignore_marker_applies(None, "hash-a", now, IGNORE_HASH_TTL));
+    }
+
+    #[test]
+    fn a_stale_marker_stops_swallowing_real_copies() {
+        // The self-write was never observed (contended read, or a remote client
+        // rewrote the clipboard first). Copying that same content later is a
+        // genuine copy and must still be captured.
+        let now = Instant::now();
+        let marker = ("hash-a".to_string(), now);
+        assert!(!ignore_marker_applies(
+            Some(&marker),
+            "hash-a",
+            now + IGNORE_HASH_TTL + Duration::from_millis(1),
+            IGNORE_HASH_TTL
+        ));
     }
 
     #[test]
