@@ -5,8 +5,6 @@ use std::time::Duration;
 #[cfg(target_os = "windows")]
 static PREVIOUS_FOREGROUND_WINDOW: AtomicIsize = AtomicIsize::new(0);
 #[cfg(target_os = "windows")]
-static PREVIOUS_INPUT_WINDOW: AtomicIsize = AtomicIsize::new(0);
-#[cfg(target_os = "windows")]
 static PREVIOUS_PASTE_STRATEGY: AtomicU8 = AtomicU8::new(PasteStrategy::Standard as u8);
 #[cfg(target_os = "windows")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +45,6 @@ pub fn remember_foreground_window(excluded_hwnd: Option<isize>) -> Option<isize>
     }
 
     PREVIOUS_FOREGROUND_WINDOW.store(value, Ordering::SeqCst);
-    let input_window = focused_input_window(value).unwrap_or(value);
-    PREVIOUS_INPUT_WINDOW.store(input_window, Ordering::SeqCst);
     let process_name = process_name_for_window(value);
     let strategy = process_name
         .as_deref()
@@ -56,7 +52,7 @@ pub fn remember_foreground_window(excluded_hwnd: Option<isize>) -> Option<isize>
         .unwrap_or(PasteStrategy::Standard);
     PREVIOUS_PASTE_STRATEGY.store(strategy as u8, Ordering::SeqCst);
     log::info!(
-        "PASTE: remembered target hwnd={value:#x}, input_hwnd={input_window:#x}, process={:?}, strategy={:?}",
+        "PASTE: remembered target hwnd={value:#x}, process={:?}, strategy={:?}",
         process_name,
         strategy
     );
@@ -71,30 +67,7 @@ pub fn set_previous_foreground_window(hwnd: isize) {
 #[cfg(target_os = "windows")]
 pub fn set_previous_target(hwnd: isize, strategy: PasteStrategy) {
     PREVIOUS_FOREGROUND_WINDOW.store(hwnd, Ordering::SeqCst);
-    PREVIOUS_INPUT_WINDOW.store(focused_input_window(hwnd).unwrap_or(hwnd), Ordering::SeqCst);
     PREVIOUS_PASTE_STRATEGY.store(strategy as u8, Ordering::SeqCst);
-}
-
-#[cfg(target_os = "windows")]
-fn focused_input_window(hwnd: isize) -> Option<isize> {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO,
-    };
-
-    unsafe {
-        let thread_id = GetWindowThreadProcessId(HWND(hwnd as _), None);
-        if thread_id == 0 {
-            return None;
-        }
-
-        let mut info = GUITHREADINFO {
-            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-            ..Default::default()
-        };
-        GetGUIThreadInfo(thread_id, &mut info).ok()?;
-        (info.hwndFocus.0 as isize != 0).then_some(info.hwndFocus.0 as isize)
-    }
 }
 
 #[cfg(target_os = "windows")]

@@ -1473,12 +1473,29 @@ async fn process_clipboard_snapshot(
     };
 
     let db_lookup_started = std::time::Instant::now();
-    let existing_uuid: Option<String> =
-        sqlx::query_scalar::<_, String>(r#"SELECT uuid FROM clips WHERE content_hash = ?"#)
-            .bind(&storage_hash)
-            .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
+    // A failed lookup must not be read as "no such row". content_hash carries a
+    // plain index and no UNIQUE constraint, so falling through to the insert
+    // branch would succeed and silently leave two rows for one clip. Since we
+    // cannot tell whether the clip already exists, skip this capture and say so:
+    // one recorded miss beats a duplicate the user has to notice and clean up.
+    let existing_uuid: Option<String> = match sqlx::query_scalar::<_, String>(
+        r#"SELECT uuid FROM clips WHERE content_hash = ?"#,
+    )
+    .bind(&storage_hash)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(found) => found,
+        Err(error) => {
+            record_capture_error(format!(
+                "could not check whether sequence {sequence} was already stored: {error}"
+            ));
+            log::error!(
+                    "CLIPBOARD: Existing-clip lookup failed for sequence {sequence}; skipping to avoid a duplicate row: {error}"
+                );
+            return;
+        }
+    };
     let db_lookup_ms = db_lookup_started.elapsed().as_millis();
 
     let db_write_started = std::time::Instant::now();
