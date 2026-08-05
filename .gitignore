@@ -28,6 +28,14 @@ data/
 # Don't know why this file is always created...
 nul
 
+# Local marketing scratch work. Listed file by file on purpose: the rest of
+# docs/assets/store/ is tracked, so a directory-wide rule here would quietly
+# hide real store art later.
+docs/assets/store/cubby-store-box-art-1080.png
+docs/assets/store/cubby-store-poster-1440x2160.png
+docs/assets/store/cubby-store-poster.svg
+docs/cubby_15s_search_demo_v2.mp4
+
 # Tauri updater signing keys — the private key must NEVER be committed.
 # It belongs in a GitHub Actions secret (TAURI_SIGNING_PRIVATE_KEY), not the repo.
 cubby-updater.key
