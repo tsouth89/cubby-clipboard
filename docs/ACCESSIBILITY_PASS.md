@@ -76,9 +76,7 @@ Unplug or ignore the mouse for this section.
 Test at 100%, 150%, and 200% display scaling, and separately at 200% text
 scaling (Settings → Accessibility → Text size).
 
-- No clipped or overlapping text in the flyout header or Settings. (The
-  `ControlBar` component is not rendered — see finding 8 — so there is no
-  control bar to check until that is resolved.)
+- No clipped or overlapping text in the flyout header or Settings.
 - The flyout still fits its monitor's work area and stays on screen.
 - Scroll works when content exceeds the window.
 
@@ -109,7 +107,10 @@ Passing:
 - Settings toggles use `role="switch"` with `aria-checked`.
 - `ContextMenu` items are real `<button>` elements, so they are focusable and
   activatable, and it handles Escape.
-- Icon-only ControlBar buttons have `aria-label` (added in #130).
+- Every icon-only button in a rendered component has an accessible name. The
+  scan for this is: find `<button>` elements whose body is nothing but
+  self-closing icon components, and check for `aria-label` or `aria-labelledby`.
+  Do not count `title` alone.
 - Status changes are announced. `sonner` renders its toast container with
   `aria-live="polite"`, and copy, delete, and pin all raise a toast.
 
@@ -125,7 +126,7 @@ Findings, worst first:
 | 6 | `SettingsPanel` | Tabs are plain buttons with no `role="tablist"` / `role="tab"` / `aria-selected`, so their tab nature and selected state are not conveyed. | 4 |
 | ~~7~~ | App-wide | **Withdrawn.** Recorded as "no `aria-live` region anywhere", which was wrong: grepping the app source found none, but `sonner` renders one in its own container, and copy, delete, and pin all raise toasts through it. | 5 |
 
-| 8 | `SearchBar`, `ControlBar`, `DragPreview` | None of these three components is imported anywhere. They are dead code, and auditing them produced two of the false positives above. `ControlBar` matters most: PR #130 added accessible names to its icon-only buttons, so that accessibility work never reached users. | — |
+| 8 | `SearchBar`, `ControlBar`, `DragPreview` | **Resolved — deleted.** None of the three was imported anywhere, and auditing them produced two of the false positives above. They were superseded when `FlyoutHeader` replaced the old control bar in #4. PR #130 had already noted `ControlBar` having no consumers and deliberately left removal as a separate call; this is that call. Before deleting, the live components were re-scanned for icon-only buttons without an accessible name, which found one real gap in `SettingsPanel` (now fixed). | — |
 
 Fixed on branch `a11y/flyout-accessibility-pass`: 1, 3, 4, 5, 6. Findings 2 and 7
 were withdrawn as false positives. Finding 8 is a live-code question rather than
