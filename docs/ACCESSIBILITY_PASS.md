@@ -115,8 +115,11 @@ Findings, worst first:
 |---|---|---|---|
 | 1 | `ClipList` / `ClipCard` | `role="list"` + `role="listitem"` with `aria-current` for the selected clip. The list is keyboard-navigated with a moving selection, so it needs `listbox` + `option` + `aria-selected`. As written, Narrator announces neither selection nor position. | 2 |
 | 2 | `SearchBar` | The input has only a `placeholder` and no `aria-label` or `<label>`, so it has no reliable accessible name, and the placeholder disappears once typing starts. | 1 |
-| 3 | `WelcomeOverlay` | No `role`, no accessible name, no focus management, on what is the first surface a new user sees. | 3 |
-| 4 | `ConfirmDialog` | Declares `aria-modal="true"` but never moves focus into itself. Neither dialog traps Tab or restores focus to the invoking control on close. | 3 |
+| 3 | `WelcomeOverlay` | No `role`, no accessible name, and no Escape, on what is the first surface a new user sees. It does carry `autoFocus` on its dismiss button, so focus does land inside it. | 3 |
+| 4 | `ConfirmDialog` | Declares `aria-modal="true"` but never moves focus into itself. None of the three dialogs trap Tab or restore focus to the invoking control on close. | 3 |
 | 5 | `ContextMenu` | No `role="menu"` / `role="menuitem"`, no arrow-key navigation, and focus is not moved into the menu on open, so reaching it means tabbing through the page. | 4 |
 | 6 | `SettingsPanel` | Tabs are plain buttons with no `role="tablist"` / `role="tab"` / `aria-selected`, so their tab nature and selected state are not conveyed. | 4 |
 | 7 | App-wide | No `aria-live` region anywhere, so copy, delete, and pin produce no announcement. | 5 |
+
+Fixed on branch `a11y/flyout-accessibility-pass`: 2, 3, 4, 6. Findings 1, 5, and 7
+remain, and the assistive-technology half of this document is still unrun.

@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useModalDialog } from '../hooks/useModalDialog';
 
 interface FolderModalProps {
   isOpen: boolean;
@@ -14,6 +15,7 @@ export function FolderModal({ isOpen, mode, initialName, onClose, onSubmit }: Fo
   const inputRef = useRef<HTMLInputElement>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const titleId = useId();
+  const dialogRef = useModalDialog<HTMLDivElement>(onClose, isOpen);
 
   useEffect(() => {
     if (isOpen) {
@@ -44,6 +46,8 @@ export function FolderModal({ isOpen, mode, initialName, onClose, onSubmit }: Fo
   return (
     <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -60,10 +64,10 @@ export function FolderModal({ isOpen, mode, initialName, onClose, onSubmit }: Fo
           defaultValue={initialName}
           className="mb-4 w-full rounded-md border border-input bg-input px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
           onKeyDown={(e) => {
+            // Escape is handled dialog-wide by useModalDialog, so it works from
+            // the buttons too, not only while the input has focus.
             if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
               handleSubmit();
-            } else if (e.key === 'Escape') {
-              onClose();
             }
           }}
         />
