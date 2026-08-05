@@ -14,6 +14,12 @@ interface FlyoutHeaderProps {
   onAddFolder: () => void;
   onOpenHistoryMenu: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onOpenSettings: () => void;
+  /** Id of the currently selected clip, or null. Drives aria-activedescendant. */
+  selectedClipId: string | null;
+  /** Whether the listbox is actually rendered. ClipList returns loading, empty,
+   *  and error markup instead of the list, and aria-controls must not point at
+   *  an id that is not in the document. */
+  hasClipListbox: boolean;
 }
 
 export function FlyoutHeader({
@@ -27,6 +33,8 @@ export function FlyoutHeader({
   onAddFolder,
   onOpenHistoryMenu,
   onOpenSettings,
+  selectedClipId,
+  hasClipListbox,
 }: FlyoutHeaderProps) {
   return (
     <header className="drag-area shrink-0 px-3 pb-2 pt-3">
@@ -38,6 +46,13 @@ export function FlyoutHeader({
           onChange={(event) => onSearchChange(event.target.value)}
           placeholder="Search clipboard history"
           aria-label="Search clipboard history"
+          // Arrow keys move the selection in the list while focus stays here, so
+          // the selected clip is announced through aria-activedescendant rather
+          // than by moving focus. Ids match ClipCard's `clip-option-<id>`.
+          aria-controls={hasClipListbox ? 'clip-listbox' : undefined}
+          aria-activedescendant={
+            hasClipListbox && selectedClipId ? `clip-option-${selectedClipId}` : undefined
+          }
           className="min-w-0 flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
         />
         {searchQuery && (

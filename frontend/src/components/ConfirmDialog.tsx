@@ -1,6 +1,7 @@
 import { X, AlertTriangle } from 'lucide-react';
 import { useEffect, useId } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useModalDialog } from '../hooks/useModalDialog';
 
 interface ConfirmDialogProps {
   isOpen: boolean;
@@ -28,6 +29,9 @@ export function ConfirmDialog({
   const { t } = useTranslation();
   const titleId = useId();
   const descriptionId = useId();
+  // Escape is handled below (it has to respect isBusy), so the hook only
+  // supplies focus entry, the Tab trap, and focus restore.
+  const dialogRef = useModalDialog<HTMLDivElement>(undefined, isOpen);
 
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
@@ -44,6 +48,8 @@ export function ConfirmDialog({
   return (
     <div className="animate-in fade-in fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm duration-200">
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}

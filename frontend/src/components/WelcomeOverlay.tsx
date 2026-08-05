@@ -1,5 +1,6 @@
 import { Clipboard, Keyboard, Lock, Pin } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useModalDialog } from '../hooks/useModalDialog';
 
 interface WelcomeOverlayProps {
   onDismiss: () => void;
@@ -12,6 +13,7 @@ interface WelcomeOverlayProps {
  */
 export function WelcomeOverlay({ onDismiss }: WelcomeOverlayProps) {
   const { t } = useTranslation();
+  const dialogRef = useModalDialog<HTMLDivElement>(onDismiss);
 
   const points = [
     { icon: Keyboard, text: t('onboarding.pointOpen') },
@@ -22,10 +24,22 @@ export function WelcomeOverlay({ onDismiss }: WelcomeOverlayProps) {
 
   return (
     <div className="animate-in fade-in absolute inset-0 z-50 flex items-center justify-center bg-black/60 p-3 backdrop-blur-sm duration-200">
-      <div className="animate-in zoom-in-95 flex max-h-full w-full max-w-sm flex-col overflow-hidden rounded-lg border border-border bg-background shadow-lg duration-200">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="welcome-title"
+        aria-describedby="welcome-intro"
+        tabIndex={-1}
+        className="animate-in zoom-in-95 flex max-h-full w-full max-w-sm flex-col overflow-hidden rounded-lg border border-border bg-background shadow-lg duration-200"
+      >
         <div className="flex flex-col gap-1 px-5 pt-5">
-          <h2 className="text-base font-semibold text-foreground">{t('onboarding.title')}</h2>
-          <p className="text-xs text-muted-foreground">{t('onboarding.intro')}</p>
+          <h2 id="welcome-title" className="text-base font-semibold text-foreground">
+            {t('onboarding.title')}
+          </h2>
+          <p id="welcome-intro" className="text-xs text-muted-foreground">
+            {t('onboarding.intro')}
+          </p>
         </div>
         <ul className="flex flex-col gap-3 overflow-y-auto px-5 py-4">
           {points.map(({ icon: Icon, text }, index) => (

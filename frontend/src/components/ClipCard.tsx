@@ -17,6 +17,10 @@ interface ClipCardProps {
   onCopy: () => void;
   onTogglePin: () => void;
   onContextMenu?: (e: React.MouseEvent) => void;
+  /** 1-based position of this option within the full history. */
+  posInSet: number;
+  /** Total options in the history, or -1 when more pages remain unloaded. */
+  setSize: number;
 }
 
 interface ImageMetadata {
@@ -75,6 +79,8 @@ export const ClipCard = memo(function ClipCard({
   onCopy,
   onTogglePin,
   onContextMenu,
+  posInSet,
+  setSize,
 }: ClipCardProps) {
   const imageSrc = useMemo(() => {
     if (clip.clip_type !== 'image' || !clip.content) return null;
@@ -128,8 +134,18 @@ export const ClipCard = memo(function ClipCard({
       data-el="clip-card"
       data-clip-id={clip.id}
       data-selected={isSelected}
-      role="listitem"
-      aria-current={isSelected ? 'true' : undefined}
+      // The list is single-select and keyboard-navigated, so option/aria-selected
+      // is what conveys the selection. aria-current on a listitem does not: a
+      // screen reader announces neither which clip is selected nor its position.
+      // The id is the aria-activedescendant target the search input points at.
+      id={`clip-option-${clip.id}`}
+      role="option"
+      aria-selected={isSelected}
+      // The list is paginated, so the DOM holds only part of the history. Without
+      // these a screen reader counts the rendered rows and announces a position
+      // out of the wrong total.
+      aria-posinset={posInSet}
+      aria-setsize={setSize}
       onMouseMove={onHover}
       onClick={onPaste}
       onContextMenu={(event) => {

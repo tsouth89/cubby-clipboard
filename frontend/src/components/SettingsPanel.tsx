@@ -707,6 +707,40 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     { id: 'about', label: t('settings.about'), icon: <Info size={17} /> },
   ];
 
+  // Roving tabindex: only the selected tab is in the Tab order, and Up/Down move
+  // between tabs. That is the expected tab-widget behaviour, and without it a
+  // keyboard user has to Tab through every tab to reach the panel.
+  const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
+
+  const focusTabAt = (index: number) => {
+    const next = tabs[(index + tabs.length) % tabs.length];
+    setActiveTab(next.id);
+    tabRefs.current[next.id]?.focus();
+  };
+
+  const handleTabKeyDown = (event: React.KeyboardEvent, index: number) => {
+    switch (event.key) {
+      case 'ArrowDown':
+      case 'ArrowRight':
+        event.preventDefault();
+        focusTabAt(index + 1);
+        break;
+      case 'ArrowUp':
+      case 'ArrowLeft':
+        event.preventDefault();
+        focusTabAt(index - 1);
+        break;
+      case 'Home':
+        event.preventDefault();
+        focusTabAt(0);
+        break;
+      case 'End':
+        event.preventDefault();
+        focusTabAt(tabs.length - 1);
+        break;
+    }
+  };
+
   const ghostButton =
     'inline-flex items-center gap-2 rounded-lg border border-border bg-accent/40 px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-50';
 
@@ -749,10 +783,24 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
         <div className="flex flex-1 overflow-hidden">
           {/* Sidebar */}
           <div className="flex w-[188px] flex-shrink-0 flex-col border-r border-border bg-card/40 p-2.5">
-            <div className="flex flex-col gap-0.5">
-              {tabs.map((tab) => (
+            <div
+              role="tablist"
+              aria-orientation="vertical"
+              aria-label={t('settings.title')}
+              className="flex flex-col gap-0.5"
+            >
+              {tabs.map((tab, index) => (
                 <button
                   key={tab.id}
+                  role="tab"
+                  id={`settings-tab-${tab.id}`}
+                  aria-selected={activeTab === tab.id}
+                  aria-controls="settings-tabpanel"
+                  tabIndex={activeTab === tab.id ? 0 : -1}
+                  ref={(element) => {
+                    tabRefs.current[tab.id] = element;
+                  }}
+                  onKeyDown={(event) => handleTabKeyDown(event, index)}
                   onClick={() => setActiveTab(tab.id)}
                   className={clsx(
                     'flex items-center gap-3 rounded-lg px-3 py-2 text-[13.5px] font-medium transition-colors',
@@ -772,7 +820,13 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
           </div>
 
           {/* Content Area */}
-          <div className="flex-1 overflow-y-auto px-7 py-6">
+          <div
+            role="tabpanel"
+            id="settings-tabpanel"
+            aria-labelledby={`settings-tab-${activeTab}`}
+            tabIndex={0}
+            className="flex-1 overflow-y-auto px-7 py-6"
+          >
             <div className="mx-auto max-w-2xl">
               {/* --- GENERAL TAB --- */}
               {activeTab === 'general' && (
