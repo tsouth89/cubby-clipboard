@@ -76,7 +76,11 @@ jobs:
         shell: pwsh
         run: |
           $actual = (cargo audit --version | Out-String).Trim()
-          if ($actual -notmatch [regex]::Escape($env:CARGO_AUDIT_VERSION)) {
+          # Match the version as a whole token, so a pin of 0.22.2 is not
+          # satisfied by 0.22.20. Deliberately not anchored on the tool name:
+          # the binary reports itself as "cargo-audit-audit <version>".
+          $pattern = '(?:^|\s)' + [regex]::Escape($env:CARGO_AUDIT_VERSION) + '(?:\s|$)'
+          if ($actual -notmatch $pattern) {
             throw "Expected cargo-audit $env:CARGO_AUDIT_VERSION on PATH, got: $actual"
           }
           Write-Host "cargo-audit verified: $actual"
