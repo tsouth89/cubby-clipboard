@@ -95,8 +95,18 @@ if (-not (Test-Path -LiteralPath $Path)) {
     Stop-WithError "nothing to sign at $Path."
 }
 
-if (-not (Get-Module -ListAvailable -Name ArtifactSigning | Where-Object { $_.Version -eq $moduleVersion })) {
-    Stop-WithError "the ArtifactSigning module $moduleVersion is not installed. Install it with 'Install-Module -Name ArtifactSigning -RequiredVersion $moduleVersion -Force -Repository PSGallery'."
+# Import the pinned version rather than only checking that it is installed:
+# an unqualified Invoke-ArtifactSigning auto-loads the *highest* available
+# version, so a second copy on the runner would quietly sign with something
+# other than the version this script claims to pin. Each signCommand call gets
+# a fresh pwsh process, so nothing else can already be loaded here and this
+# import fully determines which version signs. It also fails loudly when the
+# module is missing, which is what the installation check was for.
+try {
+    Import-Module -Name ArtifactSigning -RequiredVersion $moduleVersion -Force -ErrorAction Stop
+}
+catch {
+    Stop-WithError "could not load the ArtifactSigning module $moduleVersion. Install it with 'Install-Module -Name ArtifactSigning -RequiredVersion $moduleVersion -Force -Repository PSGallery'. $($_.Exception.Message)"
 }
 
 $resolved = (Resolve-Path -LiteralPath $Path).Path
