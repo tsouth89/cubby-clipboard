@@ -228,7 +228,6 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   const [settings, setSettings] = useState<Settings>(initialSettings);
   const settingsRef = useRef<Settings>(initialSettings);
   const settingsSaveQueue = useRef<Promise<void>>(Promise.resolve());
-  const [_historySize, setHistorySize] = useState<number>(0);
   const [isRecordingMode, setIsRecordingMode] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   // Folder Management State
@@ -374,7 +373,6 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   };
 
   useEffect(() => {
-    invoke<number>('get_clipboard_history_size').then(setHistorySize).catch(console.error);
     invoke<string[]>('get_ignored_apps').then(setIgnoredApps).catch(console.error);
     getVersion().then(setAppVersion).catch(console.error);
     loadFolders();
@@ -573,8 +571,6 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     try {
       const result = await invoke<StorageReclaim>('reclaim_storage');
       setStorageUsage(result.usage);
-      const newSize = await invoke<number>('get_clipboard_history_size');
-      setHistorySize(newSize);
       if (result.freed_bytes > 0) {
         toast.success(t('settings.reclaimSuccess', { size: formatBytes(result.freed_bytes) }));
       } else {
@@ -592,8 +588,6 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     try {
       const count = await invoke<number>('remove_duplicate_clips');
       toast.success(t('settings.removeDuplicatesSuccess', { count }));
-      const newSize = await invoke<number>('get_clipboard_history_size');
-      setHistorySize(newSize);
       loadStorageUsage();
     } catch (error) {
       console.error(error);
@@ -609,7 +603,6 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
       action: async () => {
         try {
           await invoke('clear_all_clips');
-          setHistorySize(0);
           loadStorageUsage();
           toast.success(t('settings.clearHistorySuccess'));
         } catch (error) {
