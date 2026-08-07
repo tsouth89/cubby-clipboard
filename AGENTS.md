@@ -141,6 +141,8 @@ pnpm run test
 | `Ctrl+F` | Focus search |
 | `Escape` | Close window / clear search |
 | `Enter` | Paste selected item |
+| `Shift+Enter` | Paste as plain text, or paste recognized text from an image |
+| `Ctrl+Enter` | Copy selected item without pasting |
 | `Delete` | Delete selected item |
 | `Ctrl+P` | Pin/Unpin selected item (bare letters go to type-to-search) |
 | `↑` / `↓` | Navigate items |
