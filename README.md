@@ -55,7 +55,8 @@ The app checks for signed updates at startup and every 30 minutes while it is ru
 | `Up` / `Down` | Move through clips |
 | `Enter` | Paste the selected clip |
 | `Shift+Enter` | Paste as plain text, or paste recognized text from an image |
-| `P` | Pin or unpin the selected clip |
+| `Ctrl+Enter` | Copy the selected clip without pasting it |
+| `Ctrl+P` | Pin or unpin the selected clip |
 | `Delete` | Delete the selected clip |
 | `Escape` | Clear search or close Cubby |
 
