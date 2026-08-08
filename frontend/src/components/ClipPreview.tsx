@@ -80,7 +80,12 @@ export function ClipPreview({
     let active = true;
     invoke<ClipDetails>('get_clip_details', { id: clipId })
       .then((loaded) => {
-        if (active) setDetails(loaded);
+        if (!active) return;
+        setDetails(loaded);
+        // Each attempt owns the outcome. A refetch that succeeds after a failed
+        // first load must retire the error, or the pane shows the loaded image
+        // under a banner saying it could not be loaded.
+        setDetailsError(null);
       })
       .catch((error) => {
         console.error('Failed to load clip details:', error);
