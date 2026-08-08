@@ -11,6 +11,7 @@ import { ContentFilter } from '../components/FlyoutHeader';
 import { useTheme } from '../hooks/useTheme';
 import { useLanguage } from '../hooks/useLanguage';
 import { useSystemAccent } from '../hooks/useSystemAccent';
+import { useRevealedClips } from '../hooks/useRevealedClips';
 import { customRange, DATE_PRESET_LABELS, DatePreset, presetRange } from '../utils/dateRange';
 import {
   applySelectionClick,
@@ -79,6 +80,8 @@ export function HistoryWindow() {
   // accent color itself.
   useSystemAccent();
   const density = settings?.density ?? 'comfortable';
+
+  const { revealed, toggleReveal, clearRevealed } = useRevealedClips();
 
   const clipsRef = useRef<ClipboardItem[]>(clips);
   clipsRef.current = clips;
@@ -460,6 +463,29 @@ export function HistoryWindow() {
       toast.error('Could not scan this image');
     }
   }, []);
+  const handleToggleReveal = useCallback(
+    (clipId: string) => {
+      const clip = clipsRef.current.find((item) => item.id === clipId);
+      if (clip) void toggleReveal(clip);
+    },
+    [toggleReveal]
+  );
+
+  /** Persist the hidden flag, as opposed to revealing for the session. */
+  const handleToggleHidden = useCallback(
+    async (clipId: string) => {
+      try {
+        const hidden = await invoke<boolean>('toggle_clip_hidden', { id: clipId });
+        clearRevealed();
+        await loadClips(false);
+        toast.success(hidden ? 'Clip hidden' : 'Clip no longer hidden');
+      } catch (error) {
+        console.error('Failed to change clip visibility:', error);
+        toast.error('Failed to change clip visibility');
+      }
+    },
+    [clearRevealed, loadClips]
+  );
 
   const handleTogglePin = useCallback(async (clipId: string) => {
     try {
@@ -835,6 +861,8 @@ export function HistoryWindow() {
             onSelectClip={setSelectedClipId}
             onPaste={setSelectedClipId}
             onCopy={handleCopy}
+            revealedClips={revealed}
+            onToggleReveal={handleToggleReveal}
             onTogglePin={handleTogglePin}
             onLoadMore={() => {
               if (hasMore && !isLoading) loadClips(true);
@@ -853,6 +881,7 @@ export function HistoryWindow() {
             onRescanOcr={handleRescanOcr}
             onCopyText={handleCopySelection}
             onSaveText={handleSaveText}
+            onToggleHidden={handleToggleHidden}
             onTogglePin={handleTogglePin}
             onDelete={handleDelete}
           />

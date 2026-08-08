@@ -15,6 +15,7 @@ import { useTheme } from './hooks/useTheme';
 import { useLanguage } from './hooks/useLanguage';
 import { useSystemAccent } from './hooks/useSystemAccent';
 import { useUpdater } from './hooks/useUpdater';
+import { useRevealedClips } from './hooks/useRevealedClips';
 import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
 import { generateDemoClips } from './debug/demoData';
@@ -100,6 +101,8 @@ function App() {
   const windowShape = hasRoundedCorners
     ? 'rounded-[10px] shadow-[0_24px_80px_rgba(0,0,0,0.48),0_6px_24px_rgba(0,0,0,0.32)]'
     : 'rounded-none shadow-none';
+
+  const { revealed, toggleReveal, clearRevealed } = useRevealedClips();
 
   const appWindow = getCurrentWindow();
   const selectedFolderRef = useRef(selectedFolder);
@@ -228,6 +231,9 @@ function App() {
       setSearchQuery('');
       setContentFilter('all');
       setSelectedFolder(null);
+      // Reveals last only as long as the flyout is open, so a hidden clip is
+      // hidden again the next time it appears.
+      clearRevealed();
       // Reset selection and scroll the list back to the top, so reopening
       // always shows your most-recent copy instead of wherever you'd scrolled.
       setSelectedClipId(null);
@@ -241,7 +247,7 @@ function App() {
     return () => {
       unlisten.then((dispose) => dispose()).catch(() => undefined);
     };
-  }, [appWindow, showPendingHotkeyNotice]);
+  }, [appWindow, clearRevealed, showPendingHotkeyNotice]);
 
   const openSettings = useCallback(async () => {
     // Check if settings window already exists
@@ -623,6 +629,37 @@ function App() {
     [t]
   );
 
+  // Persist the hidden flag. Distinct from revealing for the session: this is
+  // the state that survives a restart.
+  const handleToggleHidden = useCallback(
+    async (clipId: string) => {
+      try {
+        const hidden = await invoke<boolean>('toggle_clip_hidden', { id: clipId });
+        clearRevealed();
+        if (hidden) {
+          // Drop the payload from React state immediately. Clearing `content`
+          // but leaving `preview` would keep the secret text in the renderer
+          // until the reload landed, which is the whole thing being prevented.
+          setClips((current) =>
+            current.map((clip) =>
+              clip.id === clipId ? { ...clip, is_hidden: true, content: '', preview: '' } : clip
+            )
+          );
+        }
+        // Unhiding has nothing to restore optimistically — the row's payload was
+        // withheld by the backend, so only a reload can put it back. Marking it
+        // visible early would just render an empty row, and leave it empty for
+        // good if the reload failed.
+        refreshCurrentFolder();
+        toast.success(hidden ? 'Clip hidden' : 'Clip no longer hidden');
+      } catch (error) {
+        console.error('Failed to change clip visibility:', error);
+        toast.error('Failed to change clip visibility');
+      }
+    },
+    [clearRevealed, refreshCurrentFolder]
+  );
+
   const handleTogglePin = useCallback(
     async (clipId: string | null) => {
       if (!clipId) return;
@@ -962,6 +999,10 @@ function App() {
                             onClick: () => handleTogglePin(contextMenu.itemId),
                           },
                           {
+                            label: clip?.is_hidden ? 'Unhide content' : 'Hide content',
+                            onClick: () => handleToggleHidden(contextMenu.itemId),
+                          },
+                          {
                             label: t('contextMenu.paste'),
                             onClick: () => handlePaste(contextMenu.itemId),
                           },
@@ -1115,6 +1156,11 @@ function App() {
               onLoadMore={loadMore}
               onRetry={refreshCurrentFolder}
               onCardContextMenu={(e, clipId) => handleContextMenu(e, 'card', clipId)}
+              revealedClips={revealed}
+              onToggleReveal={(clipId) => {
+                const clip = clips.find((item) => item.id === clipId);
+                if (clip) void toggleReveal(clip);
+              }}
             />
 
             {/* Add/Rename Folder Modal Overlay */}
