@@ -21,6 +21,10 @@ interface ClipListProps {
   onLoadMore: () => void;
   onRetry: () => void;
   onCardContextMenu?: (e: React.MouseEvent, clipId: string) => void;
+  /** Hidden clips revealed for this session, by id. */
+  revealedClips?: ReadonlyMap<string, ClipboardItem>;
+  /** Reveal or re-hide a hidden clip for this session. */
+  onToggleReveal?: (clipId: string) => void;
   /** Whether moving the pointer over a card selects it. True in the flyout,
    *  where selection is only ever "what Enter will paste". The History window
    *  turns it off: selection there drives a preview pane, and sweeping the
@@ -51,6 +55,8 @@ export function ClipList({
   onLoadMore,
   onRetry,
   onCardContextMenu,
+  revealedClips,
+  onToggleReveal,
   selectOnHover = true,
   selectable = false,
   checkedIds,
@@ -145,6 +151,8 @@ export function ClipList({
             onCopy={() => onCopy(clip.id)}
             onTogglePin={() => onTogglePin(clip.id)}
             onContextMenu={(event) => onCardContextMenu?.(event, clip.id)}
+            revealed={revealedClips?.get(clip.id)}
+            onToggleReveal={onToggleReveal ? () => onToggleReveal(clip.id) : undefined}
             selectable={selectable}
             isChecked={checkedIds?.has(clip.id) ?? false}
             onToggleSelect={(event) => onToggleSelect?.(clip.id, index, event)}

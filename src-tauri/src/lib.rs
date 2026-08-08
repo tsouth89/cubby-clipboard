@@ -461,6 +461,7 @@ pub fn run_app() {
             commands::toggle_clip_pin,
             commands::set_clip_ocr_text,
             commands::update_clip_text,
+            commands::toggle_clip_hidden,
             commands::move_to_folder,
             commands::create_folder,
             commands::rename_folder,
