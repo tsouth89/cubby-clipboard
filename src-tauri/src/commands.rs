@@ -2515,6 +2515,62 @@ pub async fn pick_file(app: AppHandle) -> Result<String, String> {
     }
 }
 
+/// Where to save a new backup bundle. Separate from `pick_file` because this
+/// one is a save dialog, not an open dialog.
+#[tauri::command]
+pub async fn pick_backup_save_path(app: AppHandle) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let suggested = format!(
+        "cubby-backup-{}.cubbybak",
+        chrono::Local::now().format("%Y-%m-%d")
+    );
+    match app
+        .dialog()
+        .file()
+        .add_filter("Cubby backup", &["cubbybak"])
+        .set_file_name(&suggested)
+        .blocking_save_file()
+    {
+        Some(path) => Ok(path.to_string()),
+        None => Err("No location selected".to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn pick_backup_file(app: AppHandle) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    match app
+        .dialog()
+        .file()
+        .add_filter("Cubby backup", &["cubbybak"])
+        .blocking_pick_file()
+    {
+        Some(path) => Ok(path.to_string()),
+        None => Err("No file selected".to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn export_backup(
+    path: String,
+    passphrase: String,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<usize, String> {
+    crate::backup::export_backup(db.inner(), &path, &passphrase).await
+}
+
+#[tauri::command]
+pub async fn import_backup(
+    path: String,
+    passphrase: String,
+    dry_run: bool,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<crate::backup::BackupImportResult, String> {
+    crate::backup::import_backup(db.inner(), &path, &passphrase, dry_run).await
+}
+
 #[tauri::command]
 pub async fn pick_ditto_database(app: AppHandle) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;

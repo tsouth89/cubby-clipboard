@@ -26,6 +26,11 @@ uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
 hmac = "0.12"
 aes-gcm = "0.10"
+# Passphrase -> key for backup bundles (SOU-589). The storage key is DPAPI-bound
+# to one Windows account, so a bundle encrypted with it could never be restored
+# on another machine; Argon2id is the memory-hard KDF for the user-supplied
+# passphrase that replaces it. Same RustCrypto family as aes-gcm/sha2/hmac.
+argon2 = "0.5"
 getrandom = "0.3"
 image = { version = "0.24", default-features = false, features = ["png"] }
 dirs = "5"
