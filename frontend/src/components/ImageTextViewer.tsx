@@ -89,7 +89,15 @@ export function ImageTextViewer({
     setZoom(startingZoom(initialZoom));
     setAnchor(null);
     setFocus(null);
+    setPanMode(false);
     dragging.current = false;
+    panning.current = null;
+    // A new image starts at its own top-left. Inheriting the previous one's
+    // scroll can open it on blank space well past its edge.
+    if (viewportRef.current) {
+      viewportRef.current.scrollLeft = 0;
+      viewportRef.current.scrollTop = 0;
+    }
 
     const image = imgRef.current;
     setNatural(

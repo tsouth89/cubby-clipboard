@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { clsx } from 'clsx';
 import { format } from 'date-fns';
@@ -64,9 +64,17 @@ export function ClipPreview({
   // recognized text and no selectable words — until you navigate away and back.
   const ocrReady = clip?.has_ocr_text ?? false;
 
+  // Clear only when the clip itself changes. An OCR refetch is for the text and
+  // word boxes; blanking the pane would drop the already-loaded image back to
+  // "Loading…" and re-transfer the whole blob for no visual gain.
+  const previousClipId = useRef<string | null>(null);
+
   useEffect(() => {
-    setDetails(null);
-    setDetailsError(null);
+    if (previousClipId.current !== clipId) {
+      previousClipId.current = clipId;
+      setDetails(null);
+      setDetailsError(null);
+    }
     if (!clipId) return;
 
     let active = true;

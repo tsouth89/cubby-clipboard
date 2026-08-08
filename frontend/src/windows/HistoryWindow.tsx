@@ -125,6 +125,14 @@ export function HistoryWindow() {
     loadClips(false);
   }, [loadClips]);
 
+  // Narrowing the list replaces its contents, so send it back to the top.
+  // Without this the viewport keeps the old scroll offset and a shorter result
+  // set can land the user below the last row, staring at empty space.
+  const [listResetToken, setListResetToken] = useState(0);
+  useEffect(() => {
+    setListResetToken((token) => token + 1);
+  }, [contentFilter, searchQuery, selectedFolder]);
+
   useEffect(() => {
     loadFolders();
     refreshTotalCount();
@@ -435,7 +443,7 @@ export function HistoryWindow() {
             clips={clips}
             isLoading={isLoading}
             hasMore={hasMore}
-            resetToken={0}
+            resetToken={listResetToken}
             density={density}
             selectedClipId={selectedClipId}
             loadError={loadError}

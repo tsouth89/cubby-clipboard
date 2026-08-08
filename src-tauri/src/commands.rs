@@ -2016,13 +2016,17 @@ pub async fn get_clip_details(
     id: String,
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<ClipDetails, String> {
+    get_clip_details_in_database(db.inner(), &id).await
+}
+
+async fn get_clip_details_in_database(db: &Database, id: &str) -> Result<ClipDetails, String> {
     let clip: Option<Clip> = sqlx::query_as(r#"SELECT * FROM clips WHERE uuid = ?"#)
-        .bind(&id)
+        .bind(id)
         .fetch_optional(&db.pool)
         .await
         .map_err(|e| e.to_string())?;
     let mut clip = clip.ok_or_else(|| format!("Clip {} not found", id))?;
-    decrypt_clip_fields(&db, &mut clip)?;
+    decrypt_clip_fields(db, &mut clip)?;
 
     let image_expired = clip.full_image_expired;
     let content = if clip.clip_type == "image" {
@@ -2031,7 +2035,7 @@ pub async fn get_clip_details(
             // something, flagged so the UI can say the original is gone.
             BASE64.encode(&clip.content)
         } else {
-            BASE64.encode(&load_full_image_content(&db, &mut clip).await?)
+            BASE64.encode(&load_full_image_content(db, &mut clip).await?)
         }
     } else {
         String::from_utf8_lossy(&clip.content).to_string()
@@ -2178,9 +2182,9 @@ pub async fn import_from_ditto(
 mod tests {
     use super::{
         build_ocr_highlights, build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore,
-        directory_size_bytes, enforce_retention_in_pool, load_recognized_text,
-        migrate_clip_format_model, migrate_encrypted_storage, ocr_text_layout,
-        remove_clip_image_files, restore_hash_material, search_clips_in_database,
+        directory_size_bytes, enforce_retention_in_pool, get_clip_details_in_database,
+        load_recognized_text, migrate_clip_format_model, migrate_encrypted_storage,
+        ocr_text_layout, remove_clip_image_files, restore_hash_material, search_clips_in_database,
         toggle_clip_pin_in_pool, ClipboardContent, OCR_SNIPPET_CHAR_LIMIT,
     };
     use crate::clipboard::CapturedFormat;
@@ -3063,6 +3067,87 @@ mod tests {
             words,
         })
         .expect("layout should serialize")
+    }
+
+    #[tokio::test]
+    async fn clip_details_return_full_text_and_the_selectable_word_layout() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture {
+                id: "full-text",
+                clip_type: "text",
+                content: "the whole body, not the row preview",
+                preview: "the whole body...",
+                ocr: None,
+                folder_id: None,
+                pinned: false,
+                created_at: "2026-03-01 00:00:00",
+            },
+        )
+        .await;
+
+        // The pane shows the whole clip, not the truncated row preview.
+        let details = get_clip_details_in_database(&database, "full-text")
+            .await
+            .expect("text details should load");
+        assert_eq!(details.content, "the whole body, not the row preview");
+        assert!(details.ocr_text.is_none());
+        assert!(details.ocr_layout.is_none());
+        assert!(!details.image_expired);
+
+        let layout = crate::ocr::OcrLayout {
+            image_width: 100,
+            image_height: 50,
+            words: vec![crate::ocr::OcrWordBox {
+                text: "invoice".to_string(),
+                x: 10.0,
+                y: 5.0,
+                width: 40.0,
+                height: 10.0,
+                line: Some(0),
+            }],
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash, ocr_text, ocr_words, full_image_expired)
+            VALUES ('shot', 'image', ?, ?, 'hash-shot', ?, ?, 1)
+            "#,
+        )
+        .bind(database.crypto.encrypt(&[1, 2, 3]).unwrap())
+        .bind(database.crypto.encrypt_text("Screenshot").unwrap())
+        .bind(database.crypto.encrypt_text("invoice").unwrap())
+        .bind(
+            database
+                .crypto
+                .encrypt_text(&serde_json::to_string(&layout).unwrap())
+                .unwrap(),
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        let details = get_clip_details_in_database(&database, "shot")
+            .await
+            .expect("image details should load");
+        // Retention dropped the full blob, so the surviving thumbnail comes back
+        // flagged rather than being passed off as the original.
+        assert!(details.image_expired);
+        assert_eq!(details.ocr_text.as_deref(), Some("invoice"));
+        let words = details.ocr_layout.expect("layout should be returned").words;
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].text, "invoice");
+        // Fractions of the image, so the overlay lines up at any zoom.
+        assert_eq!(words[0].x, 0.1);
+        assert_eq!(words[0].width, 0.4);
+    }
+
+    #[tokio::test]
+    async fn clip_details_report_a_missing_clip_rather_than_returning_empty() {
+        let database = test_database().await;
+        assert!(get_clip_details_in_database(&database, "nope")
+            .await
+            .is_err());
     }
 
     #[test]
