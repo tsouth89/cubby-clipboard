@@ -1386,6 +1386,82 @@ pub async fn toggle_clip_pin(
     toggle_clip_pin_in_pool(&db.pool, &id).await
 }
 
+/// Replace a text clip's content in place (SOU-587), for the copy-fix-paste
+/// workflow that otherwise means pasting first and editing at the destination.
+#[tauri::command]
+pub async fn update_clip_text(
+    id: String,
+    text: String,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<(), String> {
+    update_clip_text_in_database(db.inner(), &id, &text).await
+}
+
+async fn update_clip_text_in_database(db: &Database, id: &str, text: &str) -> Result<(), String> {
+    let clip_type: Option<String> =
+        sqlx::query_scalar("SELECT clip_type FROM clips WHERE uuid = ?")
+            .bind(id)
+            .fetch_optional(&db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    let clip_type = clip_type.ok_or_else(|| format!("Clip {id} not found"))?;
+    if clip_type == "image" {
+        return Err("Image clips cannot be edited".to_string());
+    }
+
+    // The edited text is now the whole clip. Any html/rtf captured alongside it
+    // described the *old* text, so keeping them would paste the pre-edit version
+    // into anything that prefers a rich format — the edit would look like it had
+    // silently failed. Dropping them makes the clip plain text, which is what
+    // was actually edited. This is also why the hash is computed over no extra
+    // formats: it has to describe what the clip now is.
+    sqlx::query("DELETE FROM clip_formats WHERE clip_uuid = ?")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let hash_material = crate::clipboard::build_clip_hash_material(
+        "text",
+        text.as_bytes(),
+        std::iter::empty::<(&str, &[u8])>(),
+    );
+    // Dedup treats an edited clip exactly like any other clip: the hash follows
+    // the content, so re-copying this text later matches this row instead of
+    // adding a third. A collision with an existing clip is allowed rather than
+    // rejected — refusing an edit because some unrelated row happens to hold the
+    // same text would be the more surprising behavior.
+    let content_hash = db.crypto.keyed_hash(&hash_material);
+    let preview = truncate_preview(text);
+
+    sqlx::query(
+        "UPDATE clips SET clip_type = 'text', content = ?, text_preview = ?, content_hash = ? WHERE uuid = ?",
+    )
+    .bind(db.crypto.encrypt(text.as_bytes())?)
+    .bind(db.crypto.encrypt_text(&preview)?)
+    .bind(&content_hash)
+    .bind(id)
+    .execute(&db.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // The index holds the pre-edit text until it is told otherwise, so search
+    // would keep matching words the clip no longer contains.
+    db.search_index
+        .upsert(id, "text", text.as_bytes(), &preview, None, None);
+    // A capture of the old text would otherwise be suppressed as a duplicate of
+    // what this row used to hold.
+    crate::clipboard::reset_capture_dedup();
+    Ok(())
+}
+
+/// Preview text stored on the row, bounded so a huge clip does not bloat every
+/// list query. Mirrors the capture path's limit.
+fn truncate_preview(text: &str) -> String {
+    const PREVIEW_LIMIT: usize = 500;
+    text.chars().take(PREVIEW_LIMIT).collect()
+}
+
 #[tauri::command]
 pub async fn move_to_folder(
     clip_id: String,
@@ -2457,8 +2533,8 @@ mod tests {
         directory_size_bytes, enforce_retention_in_pool, get_clip_details_in_database,
         get_clips_in_database, load_recognized_text, migrate_clip_format_model,
         migrate_encrypted_storage, ocr_text_layout, remove_clip_image_files, restore_hash_material,
-        search_clips_in_database, toggle_clip_pin_in_pool, ClipboardContent,
-        OCR_SNIPPET_CHAR_LIMIT,
+        search_clips_in_database, toggle_clip_pin_in_pool, update_clip_text_in_database,
+        ClipboardContent, OCR_SNIPPET_CHAR_LIMIT,
     };
     use crate::clipboard::CapturedFormat;
     use crate::database::Database;
@@ -2702,6 +2778,103 @@ mod tests {
         .into_iter()
         .map(|clip| clip.id)
         .collect()
+    }
+
+    #[tokio::test]
+    async fn editing_a_clip_replaces_its_text_hash_and_stale_rich_formats() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("editable", "teh quick brown fox", "2026-06-01 09:00:00"),
+        )
+        .await;
+        // A rich capture: the html describes the *old* text.
+        sqlx::query(
+            "INSERT INTO clip_formats (clip_uuid, format, content) VALUES ('editable', 'html', ?)",
+        )
+        .bind(
+            database
+                .crypto
+                .encrypt(b"<b>teh quick brown fox</b>")
+                .unwrap(),
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        let before: String = sqlx::query_scalar("SELECT content_hash FROM clips WHERE uuid = ?")
+            .bind("editable")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+
+        update_clip_text_in_database(&database, "editable", "the quick brown fox")
+            .await
+            .expect("edit should apply");
+
+        let details = get_clip_details_in_database(&database, "editable")
+            .await
+            .unwrap();
+        assert_eq!(details.content, "the quick brown fox");
+
+        // The hash follows the content, so dedup keeps working against what the
+        // clip now holds rather than what it used to.
+        let after: String = sqlx::query_scalar("SELECT content_hash FROM clips WHERE uuid = ?")
+            .bind("editable")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert_ne!(before, after);
+        let expected = database
+            .crypto
+            .keyed_hash(&crate::clipboard::build_clip_hash_material(
+                "text",
+                b"the quick brown fox",
+                std::iter::empty::<(&str, &[u8])>(),
+            ));
+        assert_eq!(after, expected);
+
+        // The stale rich format is gone; keeping it would paste the pre-edit
+        // text into anything that prefers html, making the edit look ignored.
+        let formats: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM clip_formats WHERE clip_uuid = 'editable'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(formats, 0);
+
+        // Search follows the edit rather than the original wording.
+        database
+            .search_index
+            .ensure_ready(&database.pool, &database.crypto)
+            .await
+            .unwrap();
+        update_clip_text_in_database(&database, "editable", "the quick brown fox")
+            .await
+            .unwrap();
+        assert!(database.search_index.matches("quick").contains("editable"));
+        assert!(database.search_index.matches("teh").is_empty());
+    }
+
+    #[tokio::test]
+    async fn editing_refuses_an_image_and_an_unknown_clip() {
+        let database = test_database().await;
+        sqlx::query(
+            "INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash) VALUES ('shot', 'image', ?, ?, 'h')",
+        )
+        .bind(database.crypto.encrypt(&[1, 2, 3]).unwrap())
+        .bind(database.crypto.encrypt_text("Screenshot").unwrap())
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        assert!(update_clip_text_in_database(&database, "shot", "nope")
+            .await
+            .unwrap_err()
+            .contains("Image clips cannot be edited"));
+        assert!(update_clip_text_in_database(&database, "missing", "nope")
+            .await
+            .is_err());
     }
 
     #[tokio::test]
