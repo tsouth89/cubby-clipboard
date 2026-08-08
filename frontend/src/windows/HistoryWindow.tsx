@@ -882,6 +882,8 @@ export function HistoryWindow() {
             onCopyText={handleCopySelection}
             onSaveText={handleSaveText}
             onToggleHidden={handleToggleHidden}
+            revealed={selectedClipId ? revealed.get(selectedClipId) : undefined}
+            onToggleReveal={handleToggleReveal}
             onTogglePin={handleTogglePin}
             onDelete={handleDelete}
           />
