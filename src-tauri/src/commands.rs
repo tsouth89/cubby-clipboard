@@ -1386,6 +1386,58 @@ pub async fn toggle_clip_pin(
     toggle_clip_pin_in_pool(&db.pool, &id).await
 }
 
+/// Save a corrected version of an image's recognized text (SOU-590).
+///
+/// The issue left the call open on whether a correction should be transient or
+/// written back. Written back: if the engine misread a character, the same
+/// misreading is what search has indexed, so a transient fix would leave the
+/// clip permanently unfindable by its real text and give the user no way to
+/// mend that. A correction is worth more to search than to one paste.
+///
+/// The per-word boxes are deliberately left alone. They still describe where
+/// words sit on the image, which is what the selection overlay needs; only the
+/// recognized-text block — what search, Copy text, and Shift+Enter use — is
+/// corrected. Selecting a misread word directly off the image therefore still
+/// yields the original reading.
+#[tauri::command]
+pub async fn set_clip_ocr_text(
+    id: String,
+    text: String,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<(), String> {
+    set_clip_ocr_text_in_database(db.inner(), &id, &text).await
+}
+
+async fn set_clip_ocr_text_in_database(db: &Database, id: &str, text: &str) -> Result<(), String> {
+    let clip_type: Option<String> =
+        sqlx::query_scalar("SELECT clip_type FROM clips WHERE uuid = ?")
+            .bind(id)
+            .fetch_optional(&db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    if clip_type.as_deref() != Some("image") {
+        return Err("Recognized text belongs to image clips".to_string());
+    }
+
+    let trimmed = text.trim();
+    let stored = if trimmed.is_empty() {
+        None
+    } else {
+        db.crypto.encrypt_optional_text(Some(trimmed))?
+    };
+    // A corrected clip counts as processed: leaving it pending would let the
+    // background worker overwrite the correction on its next pass.
+    sqlx::query("UPDATE clips SET ocr_text = ?, ocr_status = 'completed' WHERE uuid = ?")
+        .bind(&stored)
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    db.search_index.update_ocr(id, trimmed);
+    Ok(())
+}
+
 /// Replace a text clip's content in place (SOU-587), for the copy-fix-paste
 /// workflow that otherwise means pasting first and editing at the destination.
 #[tauri::command]
@@ -2533,8 +2585,8 @@ mod tests {
         directory_size_bytes, enforce_retention_in_pool, get_clip_details_in_database,
         get_clips_in_database, load_recognized_text, migrate_clip_format_model,
         migrate_encrypted_storage, ocr_text_layout, remove_clip_image_files, restore_hash_material,
-        search_clips_in_database, toggle_clip_pin_in_pool, update_clip_text_in_database,
-        ClipboardContent, OCR_SNIPPET_CHAR_LIMIT,
+        search_clips_in_database, set_clip_ocr_text_in_database, toggle_clip_pin_in_pool,
+        update_clip_text_in_database, ClipboardContent, OCR_SNIPPET_CHAR_LIMIT,
     };
     use crate::clipboard::CapturedFormat;
     use crate::database::Database;
@@ -2873,6 +2925,73 @@ mod tests {
             .unwrap_err()
             .contains("Image clips cannot be edited"));
         assert!(update_clip_text_in_database(&database, "missing", "nope")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_corrected_reading_replaces_what_search_indexed() {
+        let database = test_database().await;
+        sqlx::query(
+            "INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash, ocr_text, ocr_status) VALUES ('shot', 'image', ?, ?, 'h', ?, 'completed')",
+        )
+        .bind(database.crypto.encrypt(&[1, 2, 3]).unwrap())
+        .bind(database.crypto.encrypt_text("Screenshot").unwrap())
+        // The engine misread a 1 as an l.
+        .bind(database.crypto.encrypt_text("invoice AKlA9").unwrap())
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        database
+            .search_index
+            .ensure_ready(&database.pool, &database.crypto)
+            .await
+            .unwrap();
+        assert!(database.search_index.matches("AKlA9").contains("shot"));
+
+        set_clip_ocr_text_in_database(&database, "shot", "  invoice AK1A9  ")
+            .await
+            .unwrap();
+
+        // The correction is what search now knows, which is the whole reason
+        // for writing it back rather than keeping it transient.
+        assert!(database.search_index.matches("AK1A9").contains("shot"));
+        assert!(database.search_index.matches("AKlA9").is_empty());
+        assert_eq!(
+            load_recognized_text(&database, "shot").await.unwrap(),
+            "invoice AK1A9"
+        );
+
+        // Marked processed, so the background worker cannot overwrite it.
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT ocr_status FROM clips WHERE uuid = 'shot'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(status.as_deref(), Some("completed"));
+
+        // Not stored in the clear.
+        let raw: Option<String> =
+            sqlx::query_scalar("SELECT ocr_text FROM clips WHERE uuid = 'shot'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert!(!raw.unwrap().contains("invoice"));
+    }
+
+    #[tokio::test]
+    async fn correcting_recognized_text_refuses_a_non_image() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("plain", "just text", "2026-06-01 09:00:00"),
+        )
+        .await;
+        assert!(set_clip_ocr_text_in_database(&database, "plain", "nope")
+            .await
+            .unwrap_err()
+            .contains("image clips"));
+        assert!(set_clip_ocr_text_in_database(&database, "missing", "nope")
             .await
             .is_err());
     }

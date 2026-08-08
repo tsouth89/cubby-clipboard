@@ -434,6 +434,33 @@ export function HistoryWindow() {
     [loadClips]
   );
 
+  const handleSaveOcrText = useCallback(async (clipId: string, text: string) => {
+    try {
+      await invoke('set_clip_ocr_text', { id: clipId, text });
+      // Mark the row as having recognized text so the pane refetches and the
+      // "paste text" affordances appear.
+      setClips((current) =>
+        current.map((clip) =>
+          clip.id === clipId ? { ...clip, has_ocr_text: text.trim().length > 0 } : clip
+        )
+      );
+      toast.success('Recognized text updated');
+    } catch (error) {
+      console.error('Failed to save the recognized text:', error);
+      toast.error('Failed to save the recognized text');
+    }
+  }, []);
+
+  const handleRescanOcr = useCallback(async (clipId: string) => {
+    try {
+      await invoke('rescan_clip_ocr', { id: clipId });
+      toast.info('Scanning this image for text…');
+    } catch (error) {
+      console.error('Failed to queue an OCR scan:', error);
+      toast.error('Could not scan this image');
+    }
+  }, []);
+
   const handleTogglePin = useCallback(async (clipId: string) => {
     try {
       const isPinned = await invoke<boolean>('toggle_clip_pin', { id: clipId });
@@ -822,6 +849,9 @@ export function HistoryWindow() {
             onCopyOcrText={handleCopyOcrText}
             onCopySelection={handleCopySelection}
             onOpenImage={handleOpenImage}
+            onSaveOcrText={handleSaveOcrText}
+            onRescanOcr={handleRescanOcr}
+            onCopyText={handleCopySelection}
             onSaveText={handleSaveText}
             onTogglePin={handleTogglePin}
             onDelete={handleDelete}

@@ -2,7 +2,17 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { clsx } from 'clsx';
 import { format } from 'date-fns';
-import { Check, Clock, Copy, ExternalLink, Pencil, Pin, Trash2, Type } from 'lucide-react';
+import {
+  Check,
+  Clock,
+  Copy,
+  ExternalLink,
+  Pencil,
+  Pin,
+  ScanText,
+  Trash2,
+  Type,
+} from 'lucide-react';
 import { ClipboardItem } from '../types';
 import { ImageTextViewer } from './ImageTextViewer';
 import { OcrLayout } from '../utils/ocrSelection';
@@ -30,6 +40,12 @@ interface ClipPreviewProps {
   onCopySelection: (text: string) => void;
   /** Pops the image out into its own full-size window. */
   onOpenImage: (clipId: string) => void;
+  /** Save a corrected reading of an image's recognized text. */
+  onSaveOcrText: (clipId: string, text: string) => Promise<void>;
+  /** Queue another OCR pass for an image that has no recognized text yet. */
+  onRescanOcr: (clipId: string) => Promise<void>;
+  /** Copy arbitrary text — used for the corrected reading. */
+  onCopyText: (text: string) => void;
   /** Save edited text back to the clip. Text clips only. */
   onSaveText: (clipId: string, text: string) => Promise<void>;
   onTogglePin: (clipId: string) => void;
@@ -51,12 +67,18 @@ export function ClipPreview({
   onCopyOcrText,
   onCopySelection,
   onOpenImage,
+  onSaveOcrText,
+  onRescanOcr,
+  onCopyText,
   onSaveText,
   onTogglePin,
   onDelete,
 }: ClipPreviewProps) {
   // Null when not editing; otherwise the working copy of the text.
   const [draft, setDraft] = useState<string | null>(null);
+  // Working copy of the recognized text while the scan panel is open.
+  const [scanDraft, setScanDraft] = useState<string | null>(null);
+  const [scanBusy, setScanBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   const [details, setDetails] = useState<ClipDetails | null>(null);
   const [detailsError, setDetailsError] = useState<string | null>(null);
@@ -107,6 +129,14 @@ export function ClipPreview({
   // draft onto a different clip and saving it there would be destructive.
   useEffect(() => {
     setDraft(null);
+    // A correction typed for one image must never be saved onto another.
+    setScanDraft(null);
+  }, [clipId]);
+
+  // Close the panel when the selection moves; a correction typed for one image
+  // must never be saved onto another.
+  useEffect(() => {
+    setScanDraft(null);
   }, [clipId]);
 
   const isImage = clip?.clip_type === 'image';
@@ -179,15 +209,79 @@ export function ClipPreview({
               The full image expired by retention. Its recognized text was kept.
             </p>
           )}
-          {details?.ocr_text && (
-            <details className="mt-2 shrink-0 border-t border-white/[0.07] pt-2">
-              <summary className="cursor-pointer text-[11px] text-muted-foreground">
-                All recognized text
-              </summary>
-              <pre className="mt-1.5 max-h-28 overflow-y-auto whitespace-pre-wrap break-words text-[12px] leading-[18px] text-foreground/80">
-                {details.ocr_text}
-              </pre>
-            </details>
+          {scanDraft !== null ? (
+            <div className="mt-2 shrink-0 border-t border-white/[0.07] pt-2">
+              <p className="mb-1.5 text-[11px] text-muted-foreground">
+                Recognized text — fix anything misread, then copy or save.
+              </p>
+              <textarea
+                value={scanDraft}
+                onChange={(event) => setScanDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    event.stopPropagation();
+                    setScanDraft(null);
+                  }
+                }}
+                className="h-24 w-full resize-none rounded-md border border-primary/45 bg-black/20 p-2 text-[12px] leading-[18px] text-foreground outline-none"
+              />
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  className={actionClass}
+                  onClick={() => onCopyText(scanDraft)}
+                  disabled={scanDraft.trim().length === 0}
+                >
+                  <Copy size={13} />
+                  Copy this text
+                </button>
+                <button
+                  type="button"
+                  className={actionClass}
+                  disabled={scanBusy || scanDraft === (details?.ocr_text ?? '')}
+                  onClick={async () => {
+                    setScanBusy(true);
+                    try {
+                      await onSaveOcrText(clip.id, scanDraft);
+                      setScanDraft(null);
+                    } finally {
+                      setScanBusy(false);
+                    }
+                  }}
+                  title="Also fixes what search matches for this image"
+                >
+                  <Check size={13} />
+                  {scanBusy ? 'Saving…' : 'Save correction'}
+                </button>
+                <button type="button" className={actionClass} onClick={() => setScanDraft(null)}>
+                  Close
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-2 shrink-0 border-t border-white/[0.07] pt-2">
+              <button
+                type="button"
+                className={actionClass}
+                disabled={scanBusy}
+                onClick={async () => {
+                  if (details?.ocr_text) {
+                    setScanDraft(details.ocr_text);
+                    return;
+                  }
+                  // Nothing recognized yet: ask the queue for another pass.
+                  setScanBusy(true);
+                  try {
+                    await onRescanOcr(clip.id);
+                  } finally {
+                    setScanBusy(false);
+                  }
+                }}
+              >
+                <ScanText size={13} />
+                {details?.ocr_text ? 'Scan text' : scanBusy ? 'Scanning…' : 'Scan text'}
+              </button>
+            </div>
           )}
           {detailsError && (
             <p className="shrink-0 pt-2 text-[11px] text-destructive">

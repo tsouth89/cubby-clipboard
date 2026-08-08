@@ -459,6 +459,7 @@ pub fn run_app() {
             commands::copy_ocr_text,
             commands::delete_clip,
             commands::toggle_clip_pin,
+            commands::set_clip_ocr_text,
             commands::update_clip_text,
             commands::move_to_folder,
             commands::create_folder,
@@ -498,6 +499,7 @@ pub fn run_app() {
             ocr_queue::get_ocr_queue_status,
             ocr_queue::set_ocr_queue_paused,
             ocr_queue::retry_failed_ocr,
+            ocr_queue::rescan_clip_ocr,
             clipboard::get_clipboard_capture_status,
             shortcuts::get_hotkey_startup_notice
         ])
