@@ -1732,8 +1732,14 @@ async fn process_clipboard_snapshot(
     if retention_deleted > 0 {
         db.search_index.invalidate();
     } else {
-        db.search_index
-            .upsert(&emitted_id, clip_type, &clip_content, &clip_preview, None);
+        db.search_index.upsert(
+            &emitted_id,
+            clip_type,
+            &clip_content,
+            &clip_preview,
+            None,
+            source_app.as_deref(),
+        );
     }
 
     // Remember this capture so a short-lived auto-clear can forget it (SOU-316).

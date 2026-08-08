@@ -490,6 +490,7 @@ pub fn run_app() {
             commands::get_clip_details,
             commands::copy_selected_text,
             commands::open_image_window,
+            commands::get_source_apps,
             ocr_queue::get_ocr_queue_status,
             ocr_queue::set_ocr_queue_paused,
             ocr_queue::retry_failed_ocr,
