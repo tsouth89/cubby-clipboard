@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { History, Search, X } from 'lucide-react';
+import { CheckSquare, Copy, History, Pin, PinOff, Search, Trash2, X } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
 import { ClipboardItem, FolderItem, Settings } from '../types';
 import { ClipList } from '../components/ClipList';
@@ -12,6 +12,13 @@ import { useTheme } from '../hooks/useTheme';
 import { useLanguage } from '../hooks/useLanguage';
 import { useSystemAccent } from '../hooks/useSystemAccent';
 import { customRange, DATE_PRESET_LABELS, DatePreset, presetRange } from '../utils/dateRange';
+import {
+  applySelectionClick,
+  EMPTY_SELECTION,
+  pruneSelection,
+  selectedInOrder,
+  toggleSelectAll,
+} from '../utils/multiSelect';
 
 /** One entry in the source-app filter, from `get_source_apps`. */
 interface SourceAppCount {
@@ -20,6 +27,9 @@ interface SourceAppCount {
 }
 
 const PAGE_SIZE = 20;
+
+const bulkActionClass =
+  'inline-flex items-center gap-1.5 rounded-md border border-white/[0.09] bg-white/[0.06] px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-white/[0.12]';
 
 const filterSelectClass =
   'h-9 max-w-[168px] shrink-0 rounded-md border border-white/[0.08] bg-transparent px-2 text-xs text-muted-foreground outline-none hover:text-foreground';
@@ -51,6 +61,7 @@ export function HistoryWindow() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [sourceApps, setSourceApps] = useState<SourceAppCount[]>([]);
   const [sourceApp, setSourceApp] = useState<string | null>(null);
+  const [selection, setSelection] = useState(EMPTY_SELECTION);
   const [datePreset, setDatePreset] = useState<DatePreset>('all');
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
@@ -219,6 +230,120 @@ export function HistoryWindow() {
     () => clips.find((clip) => clip.id === selectedClipId) ?? null,
     [clips, selectedClipId]
   );
+
+  const clipOrder = useMemo(() => clips.map((clip) => clip.id), [clips]);
+  // Selection is over loaded rows, so a filter change, a reload, or a delete
+  // must not leave the count claiming rows that are no longer there.
+  useEffect(() => {
+    setSelection((current) => pruneSelection(current, clipOrder));
+  }, [clipOrder]);
+
+  const selectedIds = useMemo(() => selectedInOrder(selection, clipOrder), [selection, clipOrder]);
+  const selectionCount = selectedIds.length;
+
+  const handleToggleSelect = useCallback(
+    (_clipId: string, index: number, event: React.MouseEvent) => {
+      setSelection((current) =>
+        applySelectionClick(current, clipOrder, index, {
+          shiftKey: event.shiftKey,
+          ctrlKey: event.ctrlKey,
+          metaKey: event.metaKey,
+        })
+      );
+    },
+    [clipOrder]
+  );
+
+  const clearSelection = useCallback(() => setSelection(EMPTY_SELECTION), []);
+
+  const afterBulkChange = useCallback(async () => {
+    clearSelection();
+    await Promise.all([loadClips(false), loadFolders(), refreshTotalCount(), loadSourceApps()]);
+  }, [clearSelection, loadClips, loadFolders, refreshTotalCount, loadSourceApps]);
+
+  const handleBulkDelete = useCallback(async () => {
+    if (selectionCount === 0) return;
+    try {
+      // Same contract as single-clip delete: Cubby has no trash, so the payload
+      // goes immediately rather than leaving a hidden soft-delete.
+      const deleted = await invoke<number>('delete_clips', {
+        ids: selectedIds,
+        hardDelete: true,
+      });
+      await afterBulkChange();
+      toast.success(deleted === 1 ? 'Deleted 1 clip' : `Deleted ${deleted} clips`);
+    } catch (error) {
+      console.error('Failed to delete clips:', error);
+      toast.error('Failed to delete clips');
+    }
+  }, [afterBulkChange, selectedIds, selectionCount]);
+
+  const handleBulkPin = useCallback(
+    async (pinned: boolean) => {
+      if (selectionCount === 0) return;
+      try {
+        await invoke<number>('set_clips_pinned', { ids: selectedIds, pinned });
+        await afterBulkChange();
+        toast.success(
+          pinned ? `Pinned ${selectionCount} clips` : `Unpinned ${selectionCount} clips`
+        );
+      } catch (error) {
+        console.error('Failed to update pin state:', error);
+        toast.error('Failed to update pin state');
+      }
+    },
+    [afterBulkChange, selectedIds, selectionCount]
+  );
+
+  const handleBulkMove = useCallback(
+    async (folderId: string | null) => {
+      if (selectionCount === 0) return;
+      try {
+        await invoke<number>('move_clips_to_folder', { ids: selectedIds, folderId });
+        await afterBulkChange();
+        toast.success(
+          folderId
+            ? `Moved ${selectionCount} clips to ${folders.find((f) => f.id === folderId)?.name ?? 'folder'}`
+            : `Removed ${selectionCount} clips from their folder`
+        );
+      } catch (error) {
+        console.error('Failed to move clips:', error);
+        toast.error('Failed to move clips');
+      }
+    },
+    [afterBulkChange, folders, selectedIds, selectionCount]
+  );
+
+  const handleBulkCopy = useCallback(async () => {
+    if (selectionCount === 0) return;
+    const chosen = selectedIds
+      .map((id) => clipsRef.current.find((clip) => clip.id === id))
+      .filter((clip): clip is ClipboardItem => Boolean(clip));
+    // Images have no text to concatenate. Take their recognized text where OCR
+    // found some, and say plainly how many contributed nothing.
+    const parts: string[] = [];
+    let skipped = 0;
+    for (const clip of chosen) {
+      const text = clip.clip_type === 'image' ? '' : (clip.content ?? clip.preview ?? '');
+      if (text.trim()) parts.push(text);
+      else skipped += 1;
+    }
+    if (parts.length === 0) {
+      toast.error('Nothing to copy from the selected clips');
+      return;
+    }
+    try {
+      await invoke('copy_selected_text', { text: parts.join('\n\n') });
+      toast.success(
+        skipped > 0
+          ? `Copied ${parts.length} clips (${skipped} without text skipped)`
+          : `Copied ${parts.length} clips`
+      );
+    } catch (error) {
+      console.error('Failed to copy clips:', error);
+      toast.error('Failed to copy');
+    }
+  }, [selectedIds, selectionCount]);
 
   useEffect(() => {
     if (clips.length === 0) {
@@ -474,6 +599,17 @@ export function HistoryWindow() {
           )}
         </div>
 
+        <button
+          type="button"
+          onClick={() => setSelection((current) => toggleSelectAll(current, clipOrder))}
+          disabled={clips.length === 0}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-white/[0.08] px-2 py-1.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-40"
+          title="Select every clip currently loaded"
+        >
+          <CheckSquare size={13} />
+          {selectionCount > 0 && selectionCount === clips.length ? 'None' : 'All'}
+        </button>
+
         <div className="flex shrink-0 items-center gap-1">
           {CONTENT_FILTERS.map(([id, label]) => (
             <button
@@ -579,6 +715,61 @@ export function HistoryWindow() {
         </div>
       )}
 
+      {selectionCount > 0 && (
+        <div
+          data-el="bulk-action-bar"
+          className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border bg-primary/[0.08] px-4 py-2"
+        >
+          <span className="mr-1 text-[11px] font-medium text-foreground">
+            {selectionCount} of {totalClipCount.toLocaleString()} selected
+          </span>
+          <button type="button" className={bulkActionClass} onClick={handleBulkCopy}>
+            <Copy size={12} />
+            Copy
+          </button>
+          <button type="button" className={bulkActionClass} onClick={() => handleBulkPin(true)}>
+            <Pin size={12} />
+            Pin
+          </button>
+          <button type="button" className={bulkActionClass} onClick={() => handleBulkPin(false)}>
+            <PinOff size={12} />
+            Unpin
+          </button>
+          <select
+            value=""
+            onChange={(event) => {
+              const value = event.target.value;
+              if (value) handleBulkMove(value === '__none__' ? null : value);
+            }}
+            className={`${bulkActionClass} cursor-pointer`}
+            aria-label="Move selected clips to a folder"
+          >
+            <option value="">Move to…</option>
+            <option value="__none__">No folder</option>
+            {folders.map((folder) => (
+              <option key={folder.id} value={folder.id}>
+                {folder.name}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className={`${bulkActionClass} text-destructive`}
+            onClick={handleBulkDelete}
+          >
+            <Trash2 size={12} />
+            Delete
+          </button>
+          <button
+            type="button"
+            onClick={clearSelection}
+            className="ml-auto rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground"
+          >
+            Clear selection
+          </button>
+        </div>
+      )}
+
       <main className="flex min-h-0 flex-1">
         <div className="min-h-0 w-[420px] shrink-0 border-r border-border">
           <ClipList
@@ -595,6 +786,9 @@ export function HistoryWindow() {
             // arrow keys only — not the pointer sweeping past on its way
             // somewhere else.
             selectOnHover={false}
+            selectable
+            checkedIds={selection.ids}
+            onToggleSelect={handleToggleSelect}
             onSelectClip={setSelectedClipId}
             onPaste={setSelectedClipId}
             onCopy={handleCopy}

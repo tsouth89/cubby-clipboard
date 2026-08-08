@@ -1227,18 +1227,25 @@ pub async fn delete_clip(
     hard_delete: bool,
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<(), String> {
+    delete_clip_in_database(db.inner(), &id, hard_delete).await
+}
+
+/// Delete one clip, factored out so bulk delete runs exactly this path instead
+/// of a faster bespoke one that could drift on image-file cleanup, capture
+/// dedup, or search-index maintenance (SOU-583).
+async fn delete_clip_in_database(db: &Database, id: &str, hard_delete: bool) -> Result<(), String> {
     let pool = &db.pool;
 
     if hard_delete {
         let mut transaction = pool.begin().await.map_err(|e| e.to_string())?;
         let file_path: Option<String> =
             sqlx::query_scalar(r#"SELECT file_path FROM clip_images WHERE clip_uuid = ?"#)
-                .bind(&id)
+                .bind(id)
                 .fetch_optional(&mut *transaction)
                 .await
                 .map_err(|e| e.to_string())?;
         sqlx::query(r#"DELETE FROM clips WHERE uuid = ?"#)
-            .bind(&id)
+            .bind(id)
             .execute(&mut *transaction)
             .await
             .map_err(|e| e.to_string())?;
@@ -1247,14 +1254,100 @@ pub async fn delete_clip(
         remove_clip_image_files(&db.image_dir, file_path.into_iter().collect());
     } else {
         sqlx::query(r#"UPDATE clips SET is_deleted = 1 WHERE uuid = ?"#)
-            .bind(&id)
+            .bind(id)
             .execute(pool)
             .await
             .map_err(|e| e.to_string())?;
     }
     crate::clipboard::reset_capture_dedup();
-    db.search_index.remove(&id);
+    db.search_index.remove(id);
     Ok(())
+}
+
+/// Delete several clips through the single-clip path, one at a time.
+///
+/// Returns how many were removed. A clip that fails is logged and skipped
+/// rather than aborting the batch — a bulk cleanup that stops halfway with no
+/// indication of where would be worse than finishing and reporting the count.
+/// Only a batch where nothing at all succeeded surfaces as an error.
+#[tauri::command]
+pub async fn delete_clips(
+    ids: Vec<String>,
+    hard_delete: bool,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<usize, String> {
+    let mut deleted = 0usize;
+    let mut first_error: Option<String> = None;
+    for id in &ids {
+        match delete_clip_in_database(db.inner(), id, hard_delete).await {
+            Ok(()) => deleted += 1,
+            Err(error) => {
+                log::warn!("BULK: Failed to delete clip {id}: {error}");
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) if deleted == 0 => Err(error),
+        _ => Ok(deleted),
+    }
+}
+
+/// Pin or unpin several clips. Unlike delete this is a plain column write with
+/// no side effects, so one statement is both correct and the same semantics as
+/// the single-clip toggle — it just sets an explicit state rather than flipping
+/// each, so a mixed selection ends up uniform instead of inverted.
+#[tauri::command]
+pub async fn set_clips_pinned(
+    ids: Vec<String>,
+    pinned: bool,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<u64, String> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("UPDATE clips SET is_pinned = ? WHERE uuid IN ({placeholders})");
+    let mut query = sqlx::query(&sql).bind(pinned);
+    for id in &ids {
+        query = query.bind(id);
+    }
+    let result = query
+        .execute(&db.pool)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(result.rows_affected())
+}
+
+/// Move several clips into a folder, or out of one when `folder_id` is None.
+#[tauri::command]
+pub async fn move_clips_to_folder(
+    ids: Vec<String>,
+    folder_id: Option<String>,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<u64, String> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let folder_id = match folder_id {
+        Some(id) => Some(id.parse::<i64>().map_err(|_| "Invalid folder ID")?),
+        None => None,
+    };
+    let placeholders = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("UPDATE clips SET folder_id = ? WHERE uuid IN ({placeholders})");
+    let mut query = sqlx::query(&sql).bind(folder_id);
+    for id in &ids {
+        query = query.bind(id);
+    }
+    let result = query
+        .execute(&db.pool)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(result.rows_affected())
 }
 
 async fn toggle_clip_pin_in_pool(pool: &SqlitePool, id: &str) -> Result<bool, String> {

@@ -3,6 +3,27 @@
 @tailwind utilities;
 
 @layer base {
+  /* Native controls — <select> popups, the date picker, scrollbars — are drawn
+     by the OS, not by our tokens. Without color-scheme they render light while
+     our text colors stay near-white, which is white-on-white in the dark app.
+     useTheme puts `light`/`dark` on <html>, so declaring it here covers every
+     window. */
+  :root,
+  .light {
+    color-scheme: light;
+  }
+
+  .dark {
+    color-scheme: dark;
+  }
+
+  /* Belt and braces: some WebView2 builds still paint option rows from the
+     page background rather than the color scheme, so state it outright. */
+  option {
+    background-color: hsl(var(--popover));
+    color: hsl(var(--popover-foreground));
+  }
+
   :root {
     --background: 210 20% 98%;
     --foreground: 222 47% 11%;

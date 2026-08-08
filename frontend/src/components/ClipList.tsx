@@ -26,6 +26,12 @@ interface ClipListProps {
    *  turns it off: selection there drives a preview pane, and sweeping the
    *  pointer across the list on the way to a button must not reload it. */
   selectOnHover?: boolean;
+  /** Multi-select is available (History window only). */
+  selectable?: boolean;
+  /** Ids currently in the multi-select set. */
+  checkedIds?: ReadonlySet<string>;
+  /** Toggle multi-selection for a row, given its index for shift-extend. */
+  onToggleSelect?: (clipId: string, index: number, event: React.MouseEvent) => void;
 }
 
 export function ClipList({
@@ -46,6 +52,9 @@ export function ClipList({
   onRetry,
   onCardContextMenu,
   selectOnHover = true,
+  selectable = false,
+  checkedIds,
+  onToggleSelect,
 }: ClipListProps) {
   const { t } = useTranslation();
   const listRef = useRef<HTMLDivElement>(null);
@@ -136,6 +145,9 @@ export function ClipList({
             onCopy={() => onCopy(clip.id)}
             onTogglePin={() => onTogglePin(clip.id)}
             onContextMenu={(event) => onCardContextMenu?.(event, clip.id)}
+            selectable={selectable}
+            isChecked={checkedIds?.has(clip.id) ?? false}
+            onToggleSelect={(event) => onToggleSelect?.(clip.id, index, event)}
           />
         ))}
       </div>
