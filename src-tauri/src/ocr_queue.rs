@@ -270,6 +270,36 @@ pub async fn retry_failed_ocr(db: State<'_, Arc<Database>>) -> Result<u64, Strin
     Ok(result.rows_affected())
 }
 
+/// Queue one image for another OCR pass (SOU-590), for the "Scan text" action
+/// on a clip the automatic pass never reached or gave up on.
+///
+/// Goes through the existing durable queue rather than running the engine
+/// inline: the worker already handles pausing, retries, and the process-exit
+/// recovery that an inline call would sidestep.
+#[tauri::command]
+pub async fn rescan_clip_ocr(id: String, db: State<'_, Arc<Database>>) -> Result<(), String> {
+    let result = sqlx::query(
+        r#"
+        UPDATE clips
+        SET ocr_status = 'pending',
+            ocr_attempts = 0,
+            ocr_next_retry_at = NULL,
+            ocr_error_kind = NULL
+        WHERE uuid = ? AND clip_type = 'image'
+        "#,
+    )
+    .bind(&id)
+    .execute(&db.pool)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    if result.rows_affected() == 0 {
+        return Err("That clip is not an image".to_string());
+    }
+    WORK_AVAILABLE.notify_one();
+    Ok(())
+}
+
 async fn load_paused(pool: &SqlitePool) -> Result<bool, String> {
     let value: Option<String> =
         sqlx::query_scalar("SELECT value FROM settings WHERE key = 'ocr_queue_paused'")
