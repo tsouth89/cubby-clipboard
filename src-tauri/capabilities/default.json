@@ -3,7 +3,9 @@
   "description": "Default capabilities for the main window",
   "windows": [
     "main",
-    "settings"
+    "settings",
+    "history",
+    "image"
   ],
   "permissions": [
     "core:default",

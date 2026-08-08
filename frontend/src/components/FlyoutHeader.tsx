@@ -1,5 +1,14 @@
 import { FolderItem } from '../types';
-import { ChevronDown, Filter, MoreHorizontal, Plus, Search, Settings2, X } from 'lucide-react';
+import {
+  ChevronDown,
+  Filter,
+  History,
+  MoreHorizontal,
+  Plus,
+  Search,
+  Settings2,
+  X,
+} from 'lucide-react';
 
 export type ContentFilter = 'all' | 'text' | 'images';
 
@@ -13,6 +22,8 @@ interface FlyoutHeaderProps {
   onSelectFolder: (folderId: string | null) => void;
   onAddFolder: () => void;
   onOpenHistoryMenu: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  /** Opens the dedicated History window (SOU-582). */
+  onOpenHistoryWindow: () => void;
   onOpenSettings: () => void;
   /** Id of the currently selected clip, or null. Drives aria-activedescendant. */
   selectedClipId: string | null;
@@ -32,6 +43,7 @@ export function FlyoutHeader({
   onSelectFolder,
   onAddFolder,
   onOpenHistoryMenu,
+  onOpenHistoryWindow,
   onOpenSettings,
   selectedClipId,
   hasClipListbox,
@@ -125,6 +137,15 @@ export function FlyoutHeader({
             aria-label="New folder"
           >
             <Plus size={15} />
+          </button>
+          <button
+            type="button"
+            onClick={onOpenHistoryWindow}
+            className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-white/[0.07] hover:text-foreground"
+            title="Open History window"
+            aria-label="Open History window"
+          >
+            <History size={15} />
           </button>
           <button
             type="button"

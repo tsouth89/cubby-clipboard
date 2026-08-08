@@ -5,14 +5,24 @@ import { Clock, Copy, File, Image as ImageIcon, MoreHorizontal, Pin } from 'luci
 import { formatDistanceToNowStrict } from 'date-fns';
 import { PREVIEW_CHAR_LIMIT } from '../constants';
 import { useTimeTick } from '../hooks/useTimeTick';
+import {
+  contentKind,
+  formatBytes,
+  imageLabel,
+  imageSrcFromContent,
+  normalizePreviewText,
+  parseImageMetadata,
+  sourceLabel,
+} from '../utils/clipDisplay';
 
 interface ClipCardProps {
   clip: ClipboardItem;
   density: 'compact' | 'comfortable';
   isSelected: boolean;
   /** Fired only on real mouse movement. A card sliding under a stationary
-   *  cursor during keyboard navigation must not steal selection. */
-  onHover: () => void;
+   *  cursor during keyboard navigation must not steal selection. Omitted where
+   *  hovering should not change the selection at all. */
+  onHover?: () => void;
   onPaste: () => void;
   onCopy: () => void;
   onTogglePin: () => void;
@@ -21,53 +31,6 @@ interface ClipCardProps {
   posInSet: number;
   /** Total options in the history, or -1 when more pages remain unloaded. */
   setSize: number;
-}
-
-interface ImageMetadata {
-  width?: number;
-  height?: number;
-  size_bytes?: number;
-  formats?: string[];
-}
-
-function sourceLabel(value: string | null, type: string) {
-  if (!value) return type === 'image' ? 'Image' : 'Clipboard';
-  return value.replace(/\.exe$/i, '');
-}
-
-function parseImageMetadata(metadata: string | null): ImageMetadata {
-  if (!metadata) return {};
-  try {
-    return JSON.parse(metadata) as ImageMetadata;
-  } catch {
-    return {};
-  }
-}
-
-function formatBytes(bytes?: number) {
-  if (!bytes || bytes <= 0) return null;
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function contentKind(content: string, clipType: string) {
-  const trimmed = content.trim();
-  if (clipType === 'url' || /^https?:\/\/\S+$/i.test(trimmed)) return 'URL';
-  if (/^[A-Za-z]:[\\/]|^\\\\[^\\]+\\/.test(trimmed)) return 'Path';
-  if (
-    /(^|\n)\s*(?:const|let|var|function|class|interface|type|pub fn|fn|use|import|SELECT|UPDATE|INSERT|git |cargo |pnpm |npm |sudo |curl |cd )\b/m.test(
-      trimmed
-    )
-  ) {
-    return 'Code';
-  }
-  if (trimmed.includes('\n')) return 'Text';
-  return trimmed.length < 24 ? 'Snippet' : 'Text';
-}
-
-function imageLabel(source: string) {
-  return /snip|screen|capture/i.test(source) ? 'Screenshot' : 'Clipboard image';
 }
 
 export const ClipCard = memo(function ClipCard({
@@ -82,20 +45,10 @@ export const ClipCard = memo(function ClipCard({
   posInSet,
   setSize,
 }: ClipCardProps) {
-  const imageSrc = useMemo(() => {
-    if (clip.clip_type !== 'image' || !clip.content) return null;
-    const value = clip.content;
-    if (
-      value.startsWith('data:') ||
-      value.startsWith('http://') ||
-      value.startsWith('https://') ||
-      value.startsWith('asset:') ||
-      value.startsWith('tauri://')
-    ) {
-      return value;
-    }
-    return `data:image/png;base64,${value}`;
-  }, [clip.clip_type, clip.content]);
+  const imageSrc = useMemo(
+    () => (clip.clip_type === 'image' ? imageSrcFromContent(clip.content) : null),
+    [clip.clip_type, clip.content]
+  );
 
   // Ticks every 15s so the relative time stays current while the flyout is open.
   const timeTick = useTimeTick();
@@ -107,10 +60,7 @@ export const ClipCard = memo(function ClipCard({
   }, [clip.created_at, timeTick]);
 
   const label = sourceLabel(clip.source_app, clip.clip_type);
-  const preview = (clip.content || clip.preview)
-    .replace(/\r\n/g, '\n')
-    .replace(/\n[ \t]*\n+/g, '\n')
-    .trim();
+  const preview = normalizePreviewText(clip.content || clip.preview);
   const imageMetadata = useMemo(() => parseImageMetadata(clip.metadata), [clip.metadata]);
   const kind = imageMetadata.formats?.some((format) => format === 'html' || format === 'rtf')
     ? 'Rich text'

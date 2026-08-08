@@ -246,8 +246,13 @@ pub fn run_app() {
             let title_i = MenuItem::with_id(app, "title", &title, false, None::<&str>)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit Cubby", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+            let history_i =
+                MenuItem::with_id(app, "history", "Open History", true, None::<&str>)?;
             let separator_i = PredefinedMenuItem::separator(app)?;
-            let menu = Menu::with_items(app, &[&title_i, &show_i, &separator_i, &quit_i])?;
+            let menu = Menu::with_items(
+                app,
+                &[&title_i, &show_i, &history_i, &separator_i, &quit_i],
+            )?;
 
             // Pick icon based on current system theme: white for dark, black for light
             let is_dark = dark_light::detect().map(|m| m == dark_light::Mode::Dark).unwrap_or(false);
@@ -273,6 +278,10 @@ pub fn run_app() {
                     } else if event.id.as_ref() == "show" {
                         if let Some(win) = app.get_webview_window("main") {
                             position_window_from_taskbar(&win);
+                        }
+                    } else if event.id.as_ref() == "history" {
+                        if let Err(e) = commands::show_history_window(app) {
+                            log::warn!("Failed to open the history window: {}", e);
                         }
                     }
                 })
@@ -477,6 +486,10 @@ pub fn run_app() {
             commands::get_system_accent_color,
             commands::focus_window,
             commands::refresh_window,
+            commands::open_history_window,
+            commands::get_clip_details,
+            commands::copy_selected_text,
+            commands::open_image_window,
             ocr_queue::get_ocr_queue_status,
             ocr_queue::set_ocr_queue_paused,
             ocr_queue::retry_failed_ocr,

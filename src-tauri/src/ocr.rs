@@ -15,6 +15,14 @@ pub struct OcrWordBox {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    /// Which recognized line this word came from. Lines arrive top to bottom
+    /// and words left to right, so `words` order is reading order and this
+    /// index is what tells a selection where to break lines.
+    ///
+    /// `None` on layouts captured before line indices were recorded; readers
+    /// infer bands from the boxes instead (see `commands::ocr_text_layout`).
+    #[serde(default)]
+    pub line: Option<u32>,
 }
 
 /// The per-word boxes plus the pixel dimensions of the image OCR actually ran
@@ -195,6 +203,7 @@ pub fn recognize_png(png_bytes: &[u8]) -> Result<OcrRecognition, String> {
                 y: rect.Y,
                 width: rect.Width,
                 height: rect.Height,
+                line: Some(index),
             });
         }
 

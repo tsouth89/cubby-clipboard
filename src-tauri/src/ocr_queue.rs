@@ -681,6 +681,7 @@ mod tests {
                     y: 2.0,
                     width: 30.0,
                     height: 12.0,
+                    line: Some(0),
                 },
                 OcrWordBox {
                     text: "World".to_string(),
@@ -688,6 +689,7 @@ mod tests {
                     y: 2.0,
                     width: 32.0,
                     height: 12.0,
+                    line: Some(0),
                 },
             ],
         };

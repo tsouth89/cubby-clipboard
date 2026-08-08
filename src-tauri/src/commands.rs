@@ -37,6 +37,96 @@ fn clip_to_list_item(clip: &Clip) -> ClipboardItem {
     }
 }
 
+/// Group words into lines when the stored layout predates line indices. Words
+/// are already in reading order, so this only has to notice where the text
+/// steps down: a word whose vertical center leaves the current line's band
+/// starts a new one. Without it every legacy clip would look like a single
+/// line, and a multi-line selection would copy back as one run-on.
+fn infer_line_indices(words: &[crate::ocr::OcrWordBox]) -> Vec<u32> {
+    let mut lines = Vec::with_capacity(words.len());
+    let mut line = 0u32;
+    let mut band_center = f32::NAN;
+    let mut band_height = 0.0f32;
+
+    for word in words {
+        let center = word.y + word.height / 2.0;
+        if band_center.is_nan() {
+            band_center = center;
+            band_height = word.height.max(1.0);
+        } else {
+            // Tolerate half a line height of baseline wobble within a line;
+            // anything beyond that is the next line.
+            let tolerance = band_height.max(word.height).max(1.0) * 0.6;
+            if (center - band_center).abs() > tolerance {
+                line += 1;
+                band_center = center;
+                band_height = word.height.max(1.0);
+            } else {
+                // Track the running center so a gently drifting line stays one.
+                band_center = (band_center + center) / 2.0;
+                band_height = band_height.max(word.height);
+            }
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+/// The selectable word layout for an image clip, as fractions of the image.
+/// Returns None when there is nothing usable to select.
+fn ocr_text_layout(ocr_words_json: &str) -> Option<crate::models::OcrTextLayout> {
+    let layout: crate::ocr::OcrLayout = serde_json::from_str(ocr_words_json).ok()?;
+    if layout.image_width == 0 || layout.image_height == 0 || layout.words.is_empty() {
+        return None;
+    }
+    let width = layout.image_width as f32;
+    let height = layout.image_height as f32;
+
+    // Recorded indices are the engine's own line numbers; fall back to inferred
+    // bands for layouts stored before those were kept.
+    let inferred = infer_line_indices(&layout.words);
+    let recorded: Vec<u32> = layout
+        .words
+        .iter()
+        .zip(inferred.iter())
+        .map(|(word, fallback)| word.line.unwrap_or(*fallback))
+        .collect();
+
+    // Densify: the engine skips empty words, so its indices can have gaps, and
+    // the UI wants "line N+1 follows line N" to mean exactly one break.
+    let mut dense = Vec::with_capacity(recorded.len());
+    let mut previous: Option<u32> = None;
+    let mut next_line = 0u32;
+    for raw in recorded {
+        match previous {
+            Some(last) if last == raw => {}
+            Some(_) => next_line += 1,
+            None => {}
+        }
+        previous = Some(raw);
+        dense.push(next_line);
+    }
+
+    let words = layout
+        .words
+        .iter()
+        .zip(dense)
+        .map(|(word, line)| crate::models::OcrTextWord {
+            text: word.text.clone(),
+            x: word.x / width,
+            y: word.y / height,
+            width: word.width / width,
+            height: word.height / height,
+            line,
+        })
+        .collect();
+
+    Some(crate::models::OcrTextLayout {
+        aspect: width / height,
+        words,
+    })
+}
+
 /// Build the highlight overlay for an image search result: the word boxes whose
 /// text matches the query, expressed as fractions of the image plus its aspect
 /// ratio (SOU-242 phase 2). Returns None when nothing usable matches.
@@ -868,7 +958,7 @@ async fn restore_clip(
                         })),
                     );
                 } else {
-                    crate::animate_window_hide(window, None);
+                    hide_flyout_after_copy(window);
                 }
             }
             final_res
@@ -948,9 +1038,20 @@ async fn restore_recognized_text(
             })),
         );
     } else {
-        crate::animate_window_hide(window, None);
+        hide_flyout_after_copy(window);
     }
     Ok(())
+}
+
+/// Dismiss the flyout once a copy has landed on the clipboard — its whole job
+/// was to hand something over, so staying open would be in the way. Only the
+/// flyout: the History window is a place you work in, and hiding it (or taking
+/// the shared show/hide animation lock on its behalf) after every copy would be
+/// wrong.
+fn hide_flyout_after_copy(window: &tauri::WebviewWindow) {
+    if window.label() == "main" {
+        crate::animate_window_hide(window, None);
+    }
 }
 
 #[tauri::command]
@@ -1797,6 +1898,184 @@ pub async fn refresh_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Label of the dedicated History window (SOU-582). The compact flyout stays
+/// `main`; this is the roomy, resizable surface that has space for a preview
+/// pane and the filters the flyout can't fit.
+pub const HISTORY_WINDOW_LABEL: &str = "history";
+
+/// Open the History window, or focus it if it is already open. Lives in Rust so
+/// the tray menu and the flyout button share one implementation.
+pub fn show_history_window(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(HISTORY_WINDOW_LABEL) {
+        if let Err(e) = window.unminimize() {
+            log::warn!("Failed to unminimize the history window: {:?}", e);
+        }
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    tauri::WebviewWindowBuilder::new(
+        app,
+        HISTORY_WINDOW_LABEL,
+        tauri::WebviewUrl::App("index.html?window=history".into()),
+    )
+    .title("Cubby History")
+    .inner_size(1040.0, 700.0)
+    .min_inner_size(760.0, 460.0)
+    .resizable(true)
+    // Own title bar, same as the settings window.
+    .decorations(false)
+    .transparent(false)
+    .center()
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn open_history_window(app: AppHandle) -> Result<(), String> {
+    show_history_window(&app)
+}
+
+/// Label of the pop-out image viewer. One window, reused: opening a different
+/// clip navigates the existing viewer rather than piling up windows.
+pub const IMAGE_WINDOW_LABEL: &str = "image";
+
+/// Open a screenshot in its own window, big enough to read it. The History
+/// window's preview pane can only ever show a 2862px screenshot at a fraction
+/// of its captured size; this is the surface where the pixels — and the text
+/// selection over them — actually have room.
+#[tauri::command]
+pub async fn open_image_window(app: AppHandle, id: String) -> Result<(), String> {
+    let url = format!("index.html?window=image&clip={id}");
+
+    if let Some(window) = app.get_webview_window(IMAGE_WINDOW_LABEL) {
+        // Re-point the existing viewer at the newly chosen clip.
+        window
+            .eval(format!(
+                "window.location.replace({});",
+                serde_json::to_string(&url).map_err(|e| e.to_string())?
+            ))
+            .map_err(|e| e.to_string())?;
+        if let Err(e) = window.unminimize() {
+            log::warn!("Failed to unminimize the image window: {:?}", e);
+        }
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    // Open large: most of the work area, so a full-size screenshot needs little
+    // or no panning. Falls back to a sane fixed size if the monitor is unknown.
+    let (width, height) = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|monitor| {
+            let size = monitor.size().to_logical::<f64>(monitor.scale_factor());
+            ((size.width * 0.82).round(), (size.height * 0.86).round())
+        })
+        .unwrap_or((1280.0, 860.0));
+
+    tauri::WebviewWindowBuilder::new(&app, IMAGE_WINDOW_LABEL, tauri::WebviewUrl::App(url.into()))
+        .title("Cubby Image")
+        .inner_size(width, height)
+        .min_inner_size(520.0, 400.0)
+        .resizable(true)
+        .decorations(false)
+        .transparent(false)
+        .center()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Everything the History window's preview pane needs beyond the list row.
+/// The list query returns a thumbnail for images and the flyout never needs
+/// more, so the full-resolution blob and the recognized text are loaded only
+/// when a clip is actually selected for preview.
+#[derive(serde::Serialize)]
+pub struct ClipDetails {
+    /// Full text, or base64 of the full-resolution image.
+    pub content: String,
+    pub ocr_text: Option<String>,
+    /// Retention dropped the full image (SOU-244), so `content` is the surviving
+    /// thumbnail rather than the original.
+    pub image_expired: bool,
+    /// Word boxes for selecting text straight off the preview. None for text
+    /// clips, and for images captured before word layouts were recorded — those
+    /// still offer the whole recognized block via `ocr_text`.
+    pub ocr_layout: Option<crate::models::OcrTextLayout>,
+}
+
+#[tauri::command]
+pub async fn get_clip_details(
+    id: String,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<ClipDetails, String> {
+    let clip: Option<Clip> = sqlx::query_as(r#"SELECT * FROM clips WHERE uuid = ?"#)
+        .bind(&id)
+        .fetch_optional(&db.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut clip = clip.ok_or_else(|| format!("Clip {} not found", id))?;
+    decrypt_clip_fields(&db, &mut clip)?;
+
+    let image_expired = clip.full_image_expired;
+    let content = if clip.clip_type == "image" {
+        if image_expired {
+            // Only the thumbnail survives. Hand it back so the pane still shows
+            // something, flagged so the UI can say the original is gone.
+            BASE64.encode(&clip.content)
+        } else {
+            BASE64.encode(&load_full_image_content(&db, &mut clip).await?)
+        }
+    } else {
+        String::from_utf8_lossy(&clip.content).to_string()
+    };
+
+    let ocr_layout = clip
+        .ocr_words
+        .as_deref()
+        .filter(|_| clip.clip_type == "image")
+        .and_then(ocr_text_layout);
+
+    Ok(ClipDetails {
+        content,
+        ocr_text: clip.ocr_text.filter(|text| !text.trim().is_empty()),
+        image_expired,
+        ocr_layout,
+    })
+}
+
+/// Put a text selection made on an image preview onto the clipboard. Uses the
+/// same ignore-hash discipline as the other copy paths so Cubby's own capture
+/// loop doesn't treat the write as a fresh copy and duplicate it.
+#[tauri::command]
+pub async fn copy_selected_text(text: String, window: tauri::WebviewWindow) -> Result<(), String> {
+    if text.is_empty() {
+        return Err("Nothing selected".to_string());
+    }
+
+    let _guard = crate::clipboard::CLIPBOARD_SYNC.lock().await;
+    let mut hash_material = b"text\0".to_vec();
+    hash_material.extend_from_slice(text.as_bytes());
+    let content_hash = crate::clipboard::calculate_hash(&hash_material);
+    crate::clipboard::set_ignore_hash(content_hash.clone());
+    if let Err(error) = ClipboardContext::new()
+        .and_then(|context| context.set(vec![ClipboardContent::Text(text.clone())]))
+    {
+        crate::clipboard::clear_ignore_hash_if_matches(&content_hash);
+        return Err(format!("Failed to copy the selection: {error}"));
+    }
+
+    let _ = window.emit("clipboard-write", &text);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn focus_window(app: AppHandle, label: String) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(&label) {
@@ -1900,9 +2179,9 @@ mod tests {
     use super::{
         build_ocr_highlights, build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore,
         directory_size_bytes, enforce_retention_in_pool, load_recognized_text,
-        migrate_clip_format_model, migrate_encrypted_storage, remove_clip_image_files,
-        restore_hash_material, search_clips_in_database, toggle_clip_pin_in_pool, ClipboardContent,
-        OCR_SNIPPET_CHAR_LIMIT,
+        migrate_clip_format_model, migrate_encrypted_storage, ocr_text_layout,
+        remove_clip_image_files, restore_hash_material, search_clips_in_database,
+        toggle_clip_pin_in_pool, ClipboardContent, OCR_SNIPPET_CHAR_LIMIT,
     };
     use crate::clipboard::CapturedFormat;
     use crate::database::Database;
@@ -2759,6 +3038,106 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// Two lines of two words each, in reading order, in a 100x50 image.
+    fn two_line_words(with_recorded_lines: bool) -> Vec<crate::ocr::OcrWordBox> {
+        let make = |text: &str, x: f32, y: f32, line: u32| crate::ocr::OcrWordBox {
+            text: text.to_string(),
+            x,
+            y,
+            width: 20.0,
+            height: 10.0,
+            line: with_recorded_lines.then_some(line),
+        };
+        vec![
+            make("hello", 0.0, 0.0, 0),
+            make("there", 25.0, 0.0, 0),
+            make("second", 0.0, 25.0, 1),
+            make("line", 25.0, 25.0, 1),
+        ]
+    }
+
+    fn layout_json(words: Vec<crate::ocr::OcrWordBox>) -> String {
+        serde_json::to_string(&crate::ocr::OcrLayout {
+            image_width: 100,
+            image_height: 50,
+            words,
+        })
+        .expect("layout should serialize")
+    }
+
+    #[test]
+    fn ocr_text_layout_normalizes_boxes_and_keeps_recorded_lines() {
+        let layout = ocr_text_layout(&layout_json(two_line_words(true)))
+            .expect("layout should build from recorded lines");
+
+        assert_eq!(layout.aspect, 2.0);
+        assert_eq!(
+            layout.words.iter().map(|w| w.line).collect::<Vec<_>>(),
+            vec![0, 0, 1, 1]
+        );
+        // Boxes arrive as fractions of the image, not raw pixels.
+        assert_eq!(layout.words[1].x, 0.25);
+        assert_eq!(layout.words[2].y, 0.5);
+        assert_eq!(layout.words[0].width, 0.2);
+        assert_eq!(layout.words[0].height, 0.2);
+    }
+
+    #[test]
+    fn ocr_text_layout_infers_lines_for_layouts_stored_without_them() {
+        // Legacy layouts have no line indices. Without inference every word
+        // would land on line 0 and a two-line selection would copy as one line.
+        let layout = ocr_text_layout(&layout_json(two_line_words(false)))
+            .expect("layout should build from inferred lines");
+
+        assert_eq!(
+            layout.words.iter().map(|w| w.line).collect::<Vec<_>>(),
+            vec![0, 0, 1, 1]
+        );
+    }
+
+    #[test]
+    fn ocr_text_layout_densifies_gaps_in_recorded_line_indices() {
+        // The engine skips empty words, so its indices can jump. Consecutive
+        // stored lines must still come out one apart.
+        let words = vec![
+            crate::ocr::OcrWordBox {
+                text: "a".to_string(),
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+                line: Some(0),
+            },
+            crate::ocr::OcrWordBox {
+                text: "b".to_string(),
+                x: 0.0,
+                y: 20.0,
+                width: 10.0,
+                height: 10.0,
+                line: Some(7),
+            },
+        ];
+        let layout = ocr_text_layout(&layout_json(words)).expect("layout should build");
+        assert_eq!(
+            layout.words.iter().map(|w| w.line).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn ocr_text_layout_rejects_unusable_input() {
+        assert!(ocr_text_layout("not json").is_none());
+        assert!(ocr_text_layout(&layout_json(Vec::new())).is_none());
+        // Zero dimensions would make every fraction a division by zero.
+        let zero = serde_json::to_string(&crate::ocr::OcrLayout {
+            image_width: 0,
+            image_height: 0,
+            words: two_line_words(true),
+        })
+        .expect("layout should serialize");
+        assert!(ocr_text_layout(&zero).is_none());
+    }
+
     #[test]
     fn ocr_highlights_selects_matching_words_as_image_fractions() {
         use crate::ocr::{OcrLayout, OcrWordBox};
@@ -2772,6 +3151,7 @@ mod tests {
                     y: 5.0,
                     width: 40.0,
                     height: 10.0,
+                    line: Some(0),
                 },
                 OcrWordBox {
                     text: "Denied".to_string(),
@@ -2779,6 +3159,7 @@ mod tests {
                     y: 5.0,
                     width: 30.0,
                     height: 10.0,
+                    line: Some(0),
                 },
                 OcrWordBox {
                     text: "Ok".to_string(),
@@ -2786,6 +3167,7 @@ mod tests {
                     y: 30.0,
                     width: 10.0,
                     height: 8.0,
+                    line: Some(1),
                 },
             ],
         };

@@ -231,6 +231,31 @@ pub struct OcrRect {
     pub height: f32,
 }
 
+/// Every recognized word on an image clip, positioned as fractions of the
+/// image (0..1) so the UI can place them at any zoom without knowing the pixel
+/// dimensions OCR happened to run at. Powers word-level text selection in the
+/// History window's preview.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OcrTextLayout {
+    /// Width/height of the image, so the viewer can letterbox to its true shape.
+    pub aspect: f32,
+    /// Reading order: lines top to bottom, words left to right. A selection is a
+    /// contiguous index range over this list.
+    pub words: Vec<OcrTextWord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OcrTextWord {
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// Dense line index. Selections join words within a line with spaces and
+    /// across lines with newlines.
+    pub line: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderItem {
     pub id: String,
