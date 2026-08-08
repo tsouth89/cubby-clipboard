@@ -17,6 +17,9 @@ export interface ClipboardItem {
   // Retention dropped this image's full-resolution blob but kept its thumbnail
   // and OCR text (SOU-244). It stays searchable; the full image can't be pasted.
   image_expired?: boolean;
+  // A note the user attached to this clip (SOU-588). Searchable, and shown on
+  // the row so a clip with no memorable text can still be recognized.
+  notes?: string | null;
 }
 
 export interface OcrMatch {
