@@ -1,7 +1,15 @@
 import { ClipboardItem } from '../types';
 import { clsx } from 'clsx';
 import { memo, useMemo } from 'react';
-import { Clock, Copy, File, Image as ImageIcon, MoreHorizontal, Pin } from 'lucide-react';
+import {
+  Clock,
+  Copy,
+  File,
+  Image as ImageIcon,
+  MoreHorizontal,
+  Pin,
+  StickyNote,
+} from 'lucide-react';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { PREVIEW_CHAR_LIMIT } from '../constants';
 import { useTimeTick } from '../hooks/useTimeTick';
@@ -274,6 +282,16 @@ export const ClipCard = memo(function ClipCard({
             >
               {preview.slice(0, PREVIEW_CHAR_LIMIT)}
             </p>
+            {clip.notes && (
+              <p
+                data-el="clip-note"
+                className="mt-1 flex min-w-0 items-center gap-1 text-[11px] text-primary/85"
+                title={clip.notes}
+              >
+                <StickyNote size={10} className="shrink-0" />
+                <span className="truncate">{clip.notes}</span>
+              </p>
+            )}
             <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
               {clip.is_pinned && (
                 <>

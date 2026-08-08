@@ -34,6 +34,7 @@ fn clip_to_list_item(clip: &Clip) -> ClipboardItem {
         ocr_match: None,
         ocr_highlights: None,
         image_expired: clip.full_image_expired,
+        notes: clip.notes.clone(),
     }
 }
 
@@ -318,6 +319,10 @@ fn decrypt_clip_fields(db: &Database, clip: &mut Clip) -> Result<(), String> {
         .is_err()
     {
         clip.ocr_words = None;
+    }
+    // A note is auxiliary too: an unreadable one must not stop the clip loading.
+    if db.crypto.decrypt_optional_text(&mut clip.notes).is_err() {
+        clip.notes = None;
     }
     Ok(())
 }
@@ -1514,6 +1519,42 @@ fn truncate_preview(text: &str) -> String {
     text.chars().take(PREVIEW_LIMIT).collect()
 }
 
+/// Attach or clear a clip's note (SOU-588). An empty note clears the field
+/// rather than storing a blank string, so "has a note" stays a real distinction.
+#[tauri::command]
+pub async fn set_clip_notes(
+    id: String,
+    notes: String,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<(), String> {
+    set_clip_notes_in_database(db.inner(), &id, &notes).await
+}
+
+async fn set_clip_notes_in_database(db: &Database, id: &str, notes: &str) -> Result<(), String> {
+    let trimmed = notes.trim();
+    let stored = if trimmed.is_empty() {
+        None
+    } else {
+        db.crypto.encrypt_optional_text(Some(trimmed))?
+    };
+
+    let affected = sqlx::query("UPDATE clips SET notes = ? WHERE uuid = ?")
+        .bind(&stored)
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .rows_affected();
+    if affected == 0 {
+        return Err(format!("Clip {id} not found"));
+    }
+
+    // Notes are searchable, so the index has to learn about them the moment they
+    // change — otherwise a note would only become findable after a rebuild.
+    db.search_index.update_notes(id, trimmed);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn move_to_folder(
     clip_id: String,
@@ -2585,8 +2626,9 @@ mod tests {
         directory_size_bytes, enforce_retention_in_pool, get_clip_details_in_database,
         get_clips_in_database, load_recognized_text, migrate_clip_format_model,
         migrate_encrypted_storage, ocr_text_layout, remove_clip_image_files, restore_hash_material,
-        search_clips_in_database, set_clip_ocr_text_in_database, toggle_clip_pin_in_pool,
-        update_clip_text_in_database, ClipboardContent, OCR_SNIPPET_CHAR_LIMIT,
+        search_clips_in_database, set_clip_notes_in_database, set_clip_ocr_text_in_database,
+        toggle_clip_pin_in_pool, update_clip_text_in_database, ClipboardContent,
+        OCR_SNIPPET_CHAR_LIMIT,
     };
     use crate::clipboard::CapturedFormat;
     use crate::database::Database;
@@ -2992,6 +3034,82 @@ mod tests {
             .unwrap_err()
             .contains("image clips"));
         assert!(set_clip_ocr_text_in_database(&database, "missing", "nope")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_note_is_stored_encrypted_and_makes_its_clip_findable() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text(
+                "uuid-clip",
+                "9f2c1b7e-40aa-4f11-b0d2-77c9e1f00a31",
+                "2026-06-01 09:00:00",
+            ),
+        )
+        .await;
+        database
+            .search_index
+            .ensure_ready(&database.pool, &database.crypto)
+            .await
+            .unwrap();
+
+        // The whole point: a clip with no memorable text becomes findable by
+        // what the user called it.
+        assert!(database.search_index.matches("staging api key").is_empty());
+        set_clip_notes_in_database(&database, "uuid-clip", "  staging api key  ")
+            .await
+            .unwrap();
+        assert!(database
+            .search_index
+            .matches("staging api key")
+            .contains("uuid-clip"));
+
+        let found = search_clips_in_database(
+            "staging api".into(),
+            None,
+            10,
+            0,
+            None,
+            None,
+            None,
+            None,
+            &database,
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        // Trimmed on the way in, and handed back for the row to show.
+        assert_eq!(found[0].notes.as_deref(), Some("staging api key"));
+
+        // Stored encrypted, like every other clip field.
+        let raw: Option<String> = sqlx::query_scalar("SELECT notes FROM clips WHERE uuid = ?")
+            .bind("uuid-clip")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        let raw = raw.expect("a note should be stored");
+        assert!(
+            !raw.contains("staging"),
+            "the note must not sit in the clear"
+        );
+
+        // Clearing removes it rather than storing a blank, so "has a note"
+        // stays a real distinction.
+        set_clip_notes_in_database(&database, "uuid-clip", "   ")
+            .await
+            .unwrap();
+        let cleared: Option<String> = sqlx::query_scalar("SELECT notes FROM clips WHERE uuid = ?")
+            .bind("uuid-clip")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert!(cleared.is_none());
+        assert!(database.search_index.matches("staging api key").is_empty());
+
+        assert!(set_clip_notes_in_database(&database, "missing", "x")
             .await
             .is_err());
     }
@@ -3549,6 +3667,7 @@ mod tests {
             ocr_text: None,
             ocr_words: None,
             full_image_expired: false,
+            notes: None,
             created_at: chrono::Utc::now(),
             last_accessed: chrono::Utc::now(),
         };

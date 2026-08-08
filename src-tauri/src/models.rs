@@ -113,6 +113,9 @@ pub struct Clip {
     // True once retention has dropped this image clip's full-resolution blob but
     // kept its thumbnail + ocr_text (SOU-244). Only ever set for `image` clips.
     pub full_image_expired: bool,
+    // A note the user attached to this clip (SOU-588). Encrypted at rest like
+    // the rest of the clip; None for rows written before the column existed.
+    pub notes: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_accessed: chrono::DateTime<chrono::Utc>,
 }
@@ -136,6 +139,7 @@ impl<'r> FromRow<'r, SqliteRow> for Clip {
             ocr_text: row.try_get("ocr_text")?,
             ocr_words: row.try_get("ocr_words")?,
             full_image_expired: row.try_get("full_image_expired")?,
+            notes: row.try_get("notes")?,
             created_at: row.try_get("created_at")?,
             last_accessed: row.try_get("last_accessed")?,
         })
@@ -203,6 +207,9 @@ pub struct ClipboardItem {
     // its thumbnail + OCR text were kept (SOU-244). The UI marks it and stops
     // offering the full image for paste/copy.
     pub image_expired: bool,
+    // The user's note for this clip (SOU-588), shown on the row so it can be
+    // recognized without opening it.
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

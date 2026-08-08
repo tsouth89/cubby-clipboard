@@ -201,6 +201,12 @@ impl Database {
         )
         .await?;
 
+        // A user-written note attached to a clip (SOU-588), so something with no
+        // memorable text — a UUID, half an address — can still be found later.
+        // Encrypted at rest like every other clip field, and NULL for every row
+        // that predates the column.
+        add_column_if_missing(&self.pool, "ALTER TABLE clips ADD COLUMN notes TEXT").await?;
+
         // Existing images without OCR become durable background work. A process
         // that exited while a job was running leaves it as `processing`; reset
         // those jobs so the next launch can recover them.

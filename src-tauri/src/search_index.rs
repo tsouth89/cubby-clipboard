@@ -13,6 +13,7 @@ type IndexedClipRow = (
     String,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 
 #[derive(Clone, Debug, Default)]
@@ -20,6 +21,9 @@ struct SearchDocument {
     content: String,
     preview: String,
     ocr: String,
+    /// The user's note for this clip (SOU-588). Searchable alongside the
+    /// content and OCR text, which is the point of writing one.
+    notes: String,
     /// Source app exactly as captured, for the History window's per-app filter
     /// and counts. `source_app` is encrypted with a random nonce, so SQL can
     /// neither group nor filter on it; this index already holds the decrypted
@@ -33,11 +37,18 @@ struct SearchDocument {
 }
 
 impl SearchDocument {
-    fn new(content: &str, preview: &str, ocr: Option<&str>, source_app: Option<&str>) -> Self {
+    fn new(
+        content: &str,
+        preview: &str,
+        ocr: Option<&str>,
+        notes: Option<&str>,
+        source_app: Option<&str>,
+    ) -> Self {
         Self {
             content: normalize(content),
             preview: normalize(preview),
             ocr: normalize(ocr.unwrap_or_default()),
+            notes: normalize(notes.unwrap_or_default()),
             source_app: source_app
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
@@ -46,11 +57,14 @@ impl SearchDocument {
     }
 
     fn contains(&self, query: &str) -> bool {
-        self.content.contains(query) || self.preview.contains(query) || self.ocr.contains(query)
+        self.content.contains(query)
+            || self.preview.contains(query)
+            || self.ocr.contains(query)
+            || self.notes.contains(query)
     }
 
     fn trigrams(&self) -> HashSet<String> {
-        [&self.content, &self.preview, &self.ocr]
+        [&self.content, &self.preview, &self.ocr, &self.notes]
             .into_iter()
             .flat_map(|field| trigrams(field))
             .collect()
@@ -155,6 +169,7 @@ impl SearchIndex {
                        CASE WHEN clip_type = 'image' THEN x'' ELSE content END,
                        text_preview,
                        ocr_text,
+                       notes,
                        source_app
                 FROM clips
                 WHERE is_deleted = 0
@@ -170,6 +185,7 @@ impl SearchIndex {
                 encrypted_content,
                 encrypted_preview,
                 encrypted_ocr,
+                encrypted_notes,
                 encrypted_source_app,
             ) in clips
             {
@@ -185,6 +201,12 @@ impl SearchIndex {
                         .map_err(|error| {
                             log::warn!("SEARCH: Ignoring unreadable auxiliary OCR text: {error}")
                         })
+                        .ok()
+                });
+                let notes = encrypted_notes.as_deref().and_then(|value| {
+                    crypto
+                        .decrypt_text(value)
+                        .map_err(|error| log::warn!("SEARCH: Ignoring an unreadable note: {error}"))
                         .ok()
                 });
                 // Like OCR text, the source app is auxiliary: an unreadable one
@@ -208,6 +230,7 @@ impl SearchIndex {
                         &searchable_content,
                         &preview,
                         ocr.as_deref(),
+                        notes.as_deref(),
                         source_app.as_deref(),
                     ),
                 );
@@ -295,14 +318,29 @@ impl SearchIndex {
             } else {
                 String::new()
             };
-            let mut document = SearchDocument::new(&searchable_content, preview, ocr, source_app);
+            let mut document =
+                SearchDocument::new(&searchable_content, preview, ocr, None, source_app);
             if ocr.is_none() {
                 document.ocr = existing.ocr;
             }
+            // Notes are only ever written through update_notes, so an upsert
+            // from a re-capture must not silently drop one.
+            document.notes = existing.notes;
             if source_app.is_none() {
                 document.source_app = existing.source_app;
             }
             state.insert(id.to_string(), document);
+        }
+    }
+
+    /// Replace a clip's note text in the index.
+    pub fn update_notes(&self, id: &str, notes: &str) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        if let Some(state) = self.state.write().as_mut() {
+            if let Some(mut document) = state.documents.get(id).cloned() {
+                document.notes = normalize(notes);
+                state.insert(id.to_string(), document);
+            }
         }
     }
 
@@ -350,11 +388,11 @@ mod tests {
         let mut state = IndexState::default();
         state.insert(
             "one".to_string(),
-            SearchDocument::new("Release confirmation 4J7K", "", None, None),
+            SearchDocument::new("Release confirmation 4J7K", "", None, None, None),
         );
         state.insert(
             "two".to_string(),
-            SearchDocument::new("unrelated", "", None, None),
+            SearchDocument::new("unrelated", "", None, None, None),
         );
 
         assert_eq!(

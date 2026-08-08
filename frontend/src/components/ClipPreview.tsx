@@ -10,6 +10,7 @@ import {
   Pencil,
   Pin,
   ScanText,
+  StickyNote,
   Trash2,
   Type,
 } from 'lucide-react';
@@ -48,6 +49,8 @@ interface ClipPreviewProps {
   onCopyText: (text: string) => void;
   /** Save edited text back to the clip. Text clips only. */
   onSaveText: (clipId: string, text: string) => Promise<void>;
+  /** Save (or clear, when empty) the clip's note. */
+  onSaveNotes: (clipId: string, notes: string) => Promise<void>;
   onTogglePin: (clipId: string) => void;
   onDelete: (clipId: string) => void;
 }
@@ -71,6 +74,7 @@ export function ClipPreview({
   onRescanOcr,
   onCopyText,
   onSaveText,
+  onSaveNotes,
   onTogglePin,
   onDelete,
 }: ClipPreviewProps) {
@@ -80,6 +84,8 @@ export function ClipPreview({
   const [scanDraft, setScanDraft] = useState<string | null>(null);
   const [scanBusy, setScanBusy] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Local working copy of the note so typing stays responsive; saved on blur.
+  const [noteDraft, setNoteDraft] = useState('');
   const [details, setDetails] = useState<ClipDetails | null>(null);
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const clipId = clip?.id ?? null;
@@ -138,6 +144,11 @@ export function ClipPreview({
   useEffect(() => {
     setScanDraft(null);
   }, [clipId]);
+  // Follow the selection rather than the keystrokes, so switching clips shows
+  // the new clip's note instead of carrying the previous one across.
+  useEffect(() => {
+    setNoteDraft(clip?.notes ?? '');
+  }, [clipId, clip?.notes]);
 
   const isImage = clip?.clip_type === 'image';
   const imageMetadata = useMemo(() => parseImageMetadata(clip?.metadata), [clip?.metadata]);
@@ -324,6 +335,31 @@ export function ClipPreview({
           )}
         </div>
       )}
+
+      <div className="shrink-0 border-t border-white/[0.07] px-4 py-3">
+        <label className="flex items-center gap-2">
+          <StickyNote size={12} className="shrink-0 text-muted-foreground" />
+          <input
+            value={noteDraft}
+            onChange={(event) => setNoteDraft(event.target.value)}
+            onBlur={() => {
+              const next = noteDraft.trim();
+              if (next !== (clip.notes ?? '')) void onSaveNotes(clip.id, next);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') event.currentTarget.blur();
+              if (event.key === 'Escape') {
+                event.stopPropagation();
+                setNoteDraft(clip.notes ?? '');
+                event.currentTarget.blur();
+              }
+            }}
+            placeholder="Add a note to find this later"
+            aria-label="Note"
+            className="min-w-0 flex-1 border-b border-transparent bg-transparent pb-0.5 text-[11px] text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-primary/45"
+          />
+        </label>
+      </div>
 
       <div className="shrink-0 space-y-1 border-t border-white/[0.07] px-4 py-3">
         <MetaRow label="Source" value={label} />
