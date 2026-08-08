@@ -112,6 +112,9 @@ export function ImageTextViewer({
     return () => observer.disconnect();
   }, []);
 
+  // Recomputed per render, and read afresh inside handlers, so moving the
+  // window to a monitor with a different scale factor doesn't leave 1:1 and the
+  // percentage label quoting the old ratio.
   const actualScale = actualSizeScale();
 
   const fitScale = useMemo(() => {
@@ -174,7 +177,13 @@ export function ImageTextViewer({
         startPan(event);
         return;
       }
-      if (words.length === 0 || event.button !== 0) return;
+      if (event.button !== 0) return;
+      // No recognized text at all: the whole surface is "empty space", so
+      // left-drag pans rather than doing nothing.
+      if (words.length === 0) {
+        startPan(event);
+        return;
+      }
       const point = pointAt(event);
       if (!point) return;
       const index = anchorWord(words, point);
@@ -261,6 +270,16 @@ export function ImageTextViewer({
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!range) return;
+      // Never take keys from whatever the user is typing in. Without this the
+      // capture-phase listener would swallow Escape and Ctrl+C from the search
+      // input whenever an image selection happened to be live.
+      const active = document.activeElement as HTMLElement | null;
+      if (
+        active &&
+        (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)
+      ) {
+        return;
+      }
       if (event.key === 'Escape') {
         event.stopPropagation();
         event.preventDefault();
@@ -421,7 +440,7 @@ export function ImageTextViewer({
         <button
           type="button"
           className={clsx(controlClass, 'pointer-events-auto px-2 text-[11px] font-medium')}
-          onClick={() => setScale(actualScale)}
+          onClick={() => setScale(actualSizeScale())}
           title="Actual size (1 image pixel per screen pixel)"
         >
           1:1

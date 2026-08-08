@@ -73,7 +73,10 @@ export function HistoryWindow() {
 
         const data = query
           ? await invoke<ClipboardItem[]>('search_clips', {
-              query: searchQuery,
+              // The trimmed form, not the raw input: the index matches on the
+              // normalized text, so a stray leading space would match nothing
+              // while the box still looks like it holds a real query.
+              query,
               filterId: selectedFolder,
               limit: PAGE_SIZE,
               offset,
@@ -140,7 +143,19 @@ export function HistoryWindow() {
         previous.map((clip) => (clip.id === event.payload ? { ...clip, has_ocr_text: true } : clip))
       );
     });
+    // Deleting or pinning from the flyout or tray emits no event this window
+    // hears, so it would keep listing clips that are already gone and fail on
+    // the next action against one. Refreshing when the window is focused again
+    // catches every such change without a new cross-window event contract.
+    const refreshOnFocus = () => {
+      loadClips(false);
+      loadFolders();
+      refreshTotalCount();
+    };
+    window.addEventListener('focus', refreshOnFocus);
+
     return () => {
+      window.removeEventListener('focus', refreshOnFocus);
       unlistenClipboard.then((dispose) => dispose()).catch(() => undefined);
       unlistenOcr.then((dispose) => dispose()).catch(() => undefined);
     };
@@ -164,7 +179,22 @@ export function HistoryWindow() {
   const handleCopy = useCallback(async (clipId: string, plainText = false) => {
     const clip = clipsRef.current.find((item) => item.id === clipId);
     if (!clip) return;
-    if (plainText && clip.clip_type === 'image') return;
+    // "As plain text" on an image means its recognized text, the same as
+    // Shift+Enter in the flyout. Silently doing nothing looked like a success.
+    if (plainText && clip.clip_type === 'image') {
+      if (!clip.has_ocr_text) {
+        toast.error('No recognized text on this image');
+        return;
+      }
+      try {
+        await invoke('copy_ocr_text', { id: clipId });
+        toast.success('Copied');
+      } catch (error) {
+        console.error('Failed to copy recognized text:', error);
+        toast.error('Failed to copy');
+      }
+      return;
+    }
     if (clip.clip_type === 'image' && clip.image_expired) {
       toast.error("This screenshot's full image expired. Only its recognized text remains.");
       return;
@@ -279,7 +309,10 @@ export function HistoryWindow() {
         document.querySelector<HTMLInputElement>('[data-el="history-search-input"]')?.focus();
         return;
       }
-      if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+      // Arrow keys move the list selection, but not while the caret is in the
+      // search box — there they belong to the input, or typing becomes
+      // unworkable without a mouse.
+      if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !isEditing) {
         const list = clipsRef.current;
         if (list.length === 0) return;
         event.preventDefault();

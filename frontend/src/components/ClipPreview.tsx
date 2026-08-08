@@ -59,6 +59,11 @@ export function ClipPreview({
   // The list row carries only a preview (and a thumbnail for images). Pull the
   // full payload when a clip is actually selected, and drop a late response for
   // a clip that is no longer selected so a slow load can't overwrite a newer one.
+  // Refetch when OCR lands for the clip already on screen: the id has not
+  // changed, so without this the pane keeps showing the pre-OCR payload — no
+  // recognized text and no selectable words — until you navigate away and back.
+  const ocrReady = clip?.has_ocr_text ?? false;
+
   useEffect(() => {
     setDetails(null);
     setDetailsError(null);
@@ -77,16 +82,20 @@ export function ClipPreview({
     return () => {
       active = false;
     };
-  }, [clipId]);
+  }, [clipId, ocrReady]);
 
   const isImage = clip?.clip_type === 'image';
   const imageMetadata = useMemo(() => parseImageMetadata(clip?.metadata), [clip?.metadata]);
-  // Fall back to the list row's thumbnail until the full payload arrives, so the
-  // pane shows the right clip immediately instead of flashing empty.
-  const imageSrc = useMemo(
-    () => (isImage ? imageSrcFromContent(details?.content ?? clip?.content) : null),
-    [isImage, details?.content, clip?.content]
-  );
+  // Wait for the full payload rather than showing the row's thumbnail first.
+  // Swapping the image under the viewer means fit and 1:1 are computed against
+  // the thumbnail's dimensions and then recomputed against the real ones, which
+  // visibly jumps the zoom. The thumbnail is only used if the full load failed,
+  // where it is the best thing left to show.
+  const imageSrc = useMemo(() => {
+    if (!isImage) return null;
+    if (details) return imageSrcFromContent(details.content);
+    return detailsError ? imageSrcFromContent(clip?.content) : null;
+  }, [isImage, details, detailsError, clip?.content]);
 
   if (!clip) {
     return (
@@ -135,7 +144,9 @@ export function ClipPreview({
               }
             />
           ) : (
-            <p className="text-xs text-muted-foreground">No image data.</p>
+            <p className="text-xs text-muted-foreground">
+              {detailsError ? 'No image data.' : 'Loading image…'}
+            </p>
           )}
           {expired && (
             <p className="flex shrink-0 items-center gap-1.5 pt-1 text-[11px] text-muted-foreground">

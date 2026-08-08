@@ -41,7 +41,10 @@ export function parseImageMetadata(metadata: string | null | undefined): ImageMe
 }
 
 export function formatBytes(bytes?: number): string | null {
-  if (!bytes || bytes <= 0) return null;
+  // Zero is a real size and renders as "0 B"; only a missing or negative value
+  // means "we don't know", which is what null conveys to the caller.
+  if (bytes === undefined || bytes === null || bytes < 0) return null;
+  if (bytes === 0) return '0 B';
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;

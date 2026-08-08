@@ -55,9 +55,13 @@ describe('formatBytes', () => {
     expect(formatBytes(3 * 1024 * 1024)).toBe('3.0 MB');
   });
 
-  it('reports nothing for missing or empty sizes', () => {
-    expect(formatBytes(0)).toBeNull();
+  it('renders zero as a real size rather than hiding the row', () => {
+    expect(formatBytes(0)).toBe('0 B');
+  });
+
+  it('reports nothing only when the size is unknown', () => {
     expect(formatBytes(undefined)).toBeNull();
+    expect(formatBytes(-1)).toBeNull();
   });
 });
 
