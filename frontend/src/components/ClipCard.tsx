@@ -31,6 +31,13 @@ interface ClipCardProps {
   posInSet: number;
   /** Total options in the history, or -1 when more pages remain unloaded. */
   setSize: number;
+  /** Multi-select is available (History window only; the flyout omits this). */
+  selectable?: boolean;
+  /** Whether this row is in the multi-select set. */
+  isChecked?: boolean;
+  /** Toggle multi-selection. The event carries the modifiers, so the caller can
+   *  tell a plain toggle from a shift-extend. */
+  onToggleSelect?: (event: React.MouseEvent) => void;
 }
 
 export const ClipCard = memo(function ClipCard({
@@ -44,6 +51,9 @@ export const ClipCard = memo(function ClipCard({
   onContextMenu,
   posInSet,
   setSize,
+  selectable = false,
+  isChecked = false,
+  onToggleSelect,
 }: ClipCardProps) {
   const imageSrc = useMemo(
     () => (clip.clip_type === 'image' ? imageSrcFromContent(clip.content) : null),
@@ -97,7 +107,17 @@ export const ClipCard = memo(function ClipCard({
       aria-posinset={posInSet}
       aria-setsize={setSize}
       onMouseMove={onHover}
-      onClick={onPaste}
+      // Ctrl/Shift+click is a multi-select gesture wherever multi-select
+      // exists, matching how file lists behave; a plain click keeps its normal
+      // meaning (paste in the flyout, preview in the History window).
+      onClick={(event) => {
+        if (selectable && onToggleSelect && (event.ctrlKey || event.metaKey || event.shiftKey)) {
+          event.preventDefault();
+          onToggleSelect(event);
+          return;
+        }
+        onPaste();
+      }}
       onContextMenu={(event) => {
         event.preventDefault();
         onContextMenu?.(event);
@@ -116,6 +136,22 @@ export const ClipCard = memo(function ClipCard({
             'absolute left-0 w-[3px] rounded-r bg-primary',
             isCompact ? 'inset-y-2' : 'inset-y-2.5'
           )}
+        />
+      )}
+
+      {selectable && (
+        <input
+          type="checkbox"
+          checked={isChecked}
+          // The row's own click handler owns the modifier gestures; the box is
+          // the plain, discoverable way to toggle one row.
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleSelect?.(event);
+          }}
+          onChange={() => undefined}
+          className="h-4 w-4 shrink-0 accent-primary"
+          aria-label={isChecked ? 'Deselect clip' : 'Select clip'}
         />
       )}
 
