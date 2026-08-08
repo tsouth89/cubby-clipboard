@@ -699,68 +699,197 @@ fn content_filter_clause(content_filter: Option<&str>) -> &'static str {
     }
 }
 
+/// The History window's date-range filter (SOU-585). `created_at` is stored in
+/// the clear, unlike the app name, so SQL can apply this one directly and
+/// paging stays authoritative in the database.
+///
+/// The range is half-open, `[from, to)`. The caller passes the instant after
+/// the last one it wants, so a "Today" preset is `[midnight, tomorrow)` and
+/// nothing has to reason about the last representable moment of a day.
+///
+/// Returns the SQL fragment; bind `from` then `to` (whichever are present)
+/// immediately after the folder id and before limit/offset.
+fn date_range_clause(from: Option<&str>, to: Option<&str>) -> String {
+    let mut clause = String::new();
+    if from.is_some() {
+        clause.push_str(" AND created_at >= ?");
+    }
+    if to.is_some() {
+        clause.push_str(" AND created_at < ?");
+    }
+    clause
+}
+
+/// Load a page of clips by id, still ordered the way the database ordered them.
+/// Used by every path that has to narrow ids outside SQL (search, source app)
+/// before fetching the encrypted payloads for just the rows being shown.
+async fn fetch_clips_by_id(pool: &SqlitePool, ids: &[String]) -> Result<Vec<Clip>, String> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT * FROM clips WHERE is_deleted = 0 AND uuid IN ({placeholders}) \
+         ORDER BY is_pinned DESC, created_at DESC"
+    );
+    let mut query = sqlx::query_as::<_, Clip>(&sql);
+    for id in ids {
+        query = query.bind(id);
+    }
+    query.fetch_all(pool).await.map_err(|e| e.to_string())
+}
+
+/// Filters that SQL can apply itself, assembled into one WHERE body so every
+/// listing path restricts identically.
+fn clip_where_body(
+    folder_id: Option<i64>,
+    content_filter: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> String {
+    let mut sql = String::from("is_deleted = 0");
+    if folder_id.is_some() {
+        sql.push_str(" AND folder_id = ?");
+    }
+    sql.push_str(content_filter_clause(content_filter));
+    sql.push_str(&date_range_clause(from, to));
+    sql
+}
+
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn get_clips(
     filter_id: Option<String>,
     limit: i64,
     offset: i64,
     preview_only: Option<bool>,
     content_filter: Option<String>,
+    date_from: Option<String>,
+    date_to: Option<String>,
+    source_app: Option<String>,
     db: tauri::State<'_, Arc<Database>>,
+) -> Result<Vec<ClipboardItem>, String> {
+    get_clips_in_database(
+        filter_id,
+        limit,
+        offset,
+        preview_only,
+        content_filter,
+        date_from,
+        date_to,
+        source_app,
+        db.inner(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn get_clips_in_database(
+    filter_id: Option<String>,
+    limit: i64,
+    offset: i64,
+    preview_only: Option<bool>,
+    content_filter: Option<String>,
+    date_from: Option<String>,
+    date_to: Option<String>,
+    source_app: Option<String>,
+    db: &Database,
 ) -> Result<Vec<ClipboardItem>, String> {
     let pool = &db.pool;
     let preview_only = preview_only.unwrap_or(false);
     let started = Instant::now();
 
     log::info!(
-        "get_clips called with filter_id: {:?}, preview_only: {}, content_filter: {:?}",
+        "get_clips called with filter_id: {:?}, preview_only: {}, content_filter: {:?}, date: {:?}..{:?}, source_app: {:?}",
         filter_id,
         preview_only,
-        content_filter
+        content_filter,
+        date_from,
+        date_to,
+        source_app
     );
 
-    let type_clause = content_filter_clause(content_filter.as_deref());
-    let sql_started = Instant::now();
-    let mut clips: Vec<Clip> = match filter_id.as_deref() {
-        Some(id) => {
-            let folder_id_num = id.parse::<i64>().ok();
-            if let Some(numeric_id) = folder_id_num {
-                log::info!("Querying for folder_id: {}", numeric_id);
-                let sql = format!(
-                    "SELECT * FROM clips WHERE is_deleted = 0 AND folder_id = ?{type_clause} \
-                     ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?"
-                );
-                sqlx::query_as(&sql)
-                    .bind(numeric_id)
-                    .bind(limit)
-                    .bind(offset)
-                    .fetch_all(pool)
-                    .await
-                    .map_err(|e| e.to_string())?
-            } else {
+    let folder_id = match filter_id.as_deref() {
+        Some(id) => match id.parse::<i64>() {
+            Ok(id) => Some(id),
+            Err(_) => {
                 log::info!("Unknown folder_id, returning empty");
-                Vec::new()
+                return Ok(Vec::new());
             }
-        }
-        None => {
-            log::info!("Querying for items, offset: {}, limit: {}", offset, limit);
+        },
+        None => None,
+    };
+    let source_app = source_app.filter(|app| !app.trim().is_empty());
+    let where_body = clip_where_body(
+        folder_id,
+        content_filter.as_deref(),
+        date_from.as_deref(),
+        date_to.as_deref(),
+    );
+
+    let sql_started = Instant::now();
+    let mut clips: Vec<Clip> = if let Some(app) = source_app.as_deref() {
+        // The app name is encrypted with a random nonce, so SQL can neither
+        // match nor group on it. Take the ordered ids from the database, narrow
+        // them against the in-memory index, and page the result — the same
+        // shape search uses, so ordering and pinning stay authoritative in SQL
+        // and a filtered page can't hide matches on unfetched pages.
+        db.search_index.ensure_ready(pool, &db.crypto).await?;
+        let allowed = db.search_index.ids_for_source_app(app);
+        if allowed.is_empty() {
+            Vec::new()
+        } else {
             let sql = format!(
-                "SELECT * FROM clips WHERE is_deleted = 0{type_clause} \
-                 ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?"
+                "SELECT uuid FROM clips WHERE {where_body} ORDER BY is_pinned DESC, created_at DESC"
             );
-            sqlx::query_as(&sql)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| e.to_string())?
+            let mut query = sqlx::query_scalar::<_, String>(&sql);
+            if let Some(id) = folder_id {
+                query = query.bind(id);
+            }
+            if let Some(from) = date_from.as_deref() {
+                query = query.bind(from.to_string());
+            }
+            if let Some(to) = date_to.as_deref() {
+                query = query.bind(to.to_string());
+            }
+            let ordered_ids = query.fetch_all(pool).await.map_err(|e| e.to_string())?;
+            let page: Vec<String> = ordered_ids
+                .into_iter()
+                .filter(|id| allowed.contains(id))
+                .skip(offset.max(0) as usize)
+                .take(limit.max(0) as usize)
+                .collect();
+            fetch_clips_by_id(pool, &page).await?
         }
+    } else {
+        let sql = format!(
+            "SELECT * FROM clips WHERE {where_body} \
+             ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?"
+        );
+        let mut query = sqlx::query_as::<_, Clip>(&sql);
+        if let Some(id) = folder_id {
+            query = query.bind(id);
+        }
+        if let Some(from) = date_from.as_deref() {
+            query = query.bind(from.to_string());
+        }
+        if let Some(to) = date_to.as_deref() {
+            query = query.bind(to.to_string());
+        }
+        query
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?
     };
     let sql_ms = sql_started.elapsed().as_millis();
 
     log::info!("DB: Found {} clips", clips.len());
     for clip in &mut clips {
-        decrypt_clip_fields(&db, clip)?;
+        decrypt_clip_fields(db, clip)?;
     }
 
     let image_rows = clips
@@ -1275,23 +1404,42 @@ pub async fn rename_folder(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn search_clips(
     query: String,
     filter_id: Option<String>,
     limit: i64,
     offset: i64,
     content_filter: Option<String>,
+    date_from: Option<String>,
+    date_to: Option<String>,
+    source_app: Option<String>,
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<Vec<ClipboardItem>, String> {
-    search_clips_in_database(query, filter_id, limit, offset, content_filter, db.inner()).await
+    search_clips_in_database(
+        query,
+        filter_id,
+        limit,
+        offset,
+        content_filter,
+        date_from,
+        date_to,
+        source_app,
+        db.inner(),
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn search_clips_in_database(
     query: String,
     filter_id: Option<String>,
     limit: i64,
     offset: i64,
     content_filter: Option<String>,
+    date_from: Option<String>,
+    date_to: Option<String>,
+    source_app: Option<String>,
     db: &Database,
 ) -> Result<Vec<ClipboardItem>, String> {
     let pool = &db.pool;
@@ -1310,37 +1458,46 @@ async fn search_clips_in_database(
     };
     let index_started = Instant::now();
     db.search_index.ensure_ready(pool, &db.crypto).await?;
-    let candidates = db.search_index.matches(&query);
+    let mut candidates = db.search_index.matches(&query);
+    // The source app is encrypted with a random nonce, so it narrows the
+    // candidate set here alongside the text match rather than in SQL. AND, not
+    // OR: every active filter has to hold.
+    if let Some(app) = source_app.as_deref().filter(|app| !app.trim().is_empty()) {
+        let allowed = db.search_index.ids_for_source_app(app);
+        candidates.retain(|id| allowed.contains(id));
+    }
     let index_ms = index_started.elapsed().as_millis();
     if candidates.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Ordering, pinning, folder filtering, and pagination remain authoritative
-    // in SQLite. Only UUIDs are scanned here; encrypted payloads are fetched and
-    // decrypted for the final result page.
-    let type_clause = content_filter_clause(content_filter.as_deref());
+    // Ordering, pinning, folder filtering, date range, and pagination remain
+    // authoritative in SQLite. Only UUIDs are scanned here; encrypted payloads
+    // are fetched and decrypted for the final result page.
+    let where_body = clip_where_body(
+        folder_id,
+        content_filter.as_deref(),
+        date_from.as_deref(),
+        date_to.as_deref(),
+    );
     let sql_started = Instant::now();
-    let ordered_ids: Vec<String> = if let Some(folder_id) = folder_id {
-        let sql = format!(
-            "SELECT uuid FROM clips WHERE is_deleted = 0 AND folder_id = ?{type_clause} \
-             ORDER BY is_pinned DESC, created_at DESC"
-        );
-        sqlx::query_scalar(&sql)
-            .bind(folder_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| error.to_string())?
-    } else {
-        let sql = format!(
-            "SELECT uuid FROM clips WHERE is_deleted = 0{type_clause} \
-             ORDER BY is_pinned DESC, created_at DESC"
-        );
-        sqlx::query_scalar(&sql)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| error.to_string())?
-    };
+    let sql = format!(
+        "SELECT uuid FROM clips WHERE {where_body} ORDER BY is_pinned DESC, created_at DESC"
+    );
+    let mut ordered_query = sqlx::query_scalar::<_, String>(&sql);
+    if let Some(id) = folder_id {
+        ordered_query = ordered_query.bind(id);
+    }
+    if let Some(from) = date_from.as_deref() {
+        ordered_query = ordered_query.bind(from.to_string());
+    }
+    if let Some(to) = date_to.as_deref() {
+        ordered_query = ordered_query.bind(to.to_string());
+    }
+    let ordered_ids: Vec<String> = ordered_query
+        .fetch_all(pool)
+        .await
+        .map_err(|error| error.to_string())?;
     let selected_ids = ordered_ids
         .into_iter()
         .filter(|id| candidates.contains(id))
@@ -1351,21 +1508,7 @@ async fn search_clips_in_database(
         return Ok(Vec::new());
     }
 
-    let placeholders = std::iter::repeat_n("?", selected_ids.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let selected_sql = format!(
-        "SELECT * FROM clips WHERE is_deleted = 0 AND uuid IN ({placeholders}) \
-         ORDER BY is_pinned DESC, created_at DESC"
-    );
-    let mut selected_query = sqlx::query_as::<_, Clip>(&selected_sql);
-    for id in &selected_ids {
-        selected_query = selected_query.bind(id);
-    }
-    let mut clips = selected_query
-        .fetch_all(pool)
-        .await
-        .map_err(|error| error.to_string())?;
+    let mut clips = fetch_clips_by_id(pool, &selected_ids).await?;
     let sql_ms = sql_started.elapsed().as_millis();
     for clip in &mut clips {
         decrypt_clip_fields(db, clip)?;
@@ -2055,6 +2198,33 @@ async fn get_clip_details_in_database(db: &Database, id: &str) -> Result<ClipDet
     })
 }
 
+/// One entry in the History window's source-app filter.
+#[derive(serde::Serialize)]
+pub struct SourceAppCount {
+    pub name: String,
+    pub count: usize,
+}
+
+/// Every source app present in the history, with a live count, most used first.
+///
+/// Counts come from the in-memory index rather than a `GROUP BY`: `source_app`
+/// is encrypted with a random nonce, so two clips from the same app do not
+/// share a ciphertext and SQL cannot group them. The index already holds the
+/// decrypted view of every clip, so this needs no extra table and no second
+/// copy of the capture path's app-name resolution.
+#[tauri::command]
+pub async fn get_source_apps(
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<Vec<SourceAppCount>, String> {
+    db.search_index.ensure_ready(&db.pool, &db.crypto).await?;
+    Ok(db
+        .search_index
+        .source_app_counts()
+        .into_iter()
+        .map(|(name, count)| SourceAppCount { name, count })
+        .collect())
+}
+
 /// Put a text selection made on an image preview onto the clipboard. Uses the
 /// same ignore-hash discipline as the other copy paths so Cubby's own capture
 /// loop doesn't treat the write as a fresh copy and duplicate it.
@@ -2183,9 +2353,10 @@ mod tests {
     use super::{
         build_ocr_highlights, build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore,
         directory_size_bytes, enforce_retention_in_pool, get_clip_details_in_database,
-        load_recognized_text, migrate_clip_format_model, migrate_encrypted_storage,
-        ocr_text_layout, remove_clip_image_files, restore_hash_material, search_clips_in_database,
-        toggle_clip_pin_in_pool, ClipboardContent, OCR_SNIPPET_CHAR_LIMIT,
+        get_clips_in_database, load_recognized_text, migrate_clip_format_model,
+        migrate_encrypted_storage, ocr_text_layout, remove_clip_image_files, restore_hash_material,
+        search_clips_in_database, toggle_clip_pin_in_pool, ClipboardContent,
+        OCR_SNIPPET_CHAR_LIMIT,
     };
     use crate::clipboard::CapturedFormat;
     use crate::database::Database;
@@ -2222,6 +2393,29 @@ mod tests {
         folder_id: Option<i64>,
         pinned: bool,
         created_at: &'a str,
+        source_app: Option<&'a str>,
+    }
+
+    impl<'a> SearchFixture<'a> {
+        /// A plain unpinned text clip; tests override only what they exercise.
+        fn text(id: &'a str, content: &'a str, created_at: &'a str) -> Self {
+            Self {
+                id,
+                clip_type: "text",
+                content,
+                preview: content,
+                ocr: None,
+                folder_id: None,
+                pinned: false,
+                created_at,
+                source_app: None,
+            }
+        }
+
+        fn with_app(mut self, app: &'a str) -> Self {
+            self.source_app = Some(app);
+            self
+        }
     }
 
     async fn insert_search_clip(database: &Database, fixture: SearchFixture<'_>) {
@@ -2230,12 +2424,16 @@ mod tests {
         let encrypted_ocr = fixture
             .ocr
             .map(|text| database.crypto.encrypt_text(text).unwrap());
+        let encrypted_source_app = database
+            .crypto
+            .encrypt_optional_text(fixture.source_app)
+            .unwrap();
         sqlx::query(
             r#"
             INSERT INTO clips (
                 uuid, clip_type, content, text_preview, content_hash,
-                folder_id, is_pinned, created_at, ocr_text
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                folder_id, is_pinned, created_at, ocr_text, source_app
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(fixture.id)
@@ -2247,9 +2445,198 @@ mod tests {
         .bind(fixture.pinned)
         .bind(fixture.created_at)
         .bind(encrypted_ocr)
+        .bind(encrypted_source_app)
         .execute(&database.pool)
         .await
         .unwrap();
+    }
+
+    /// Three clips over three days from two apps, newest last.
+    async fn seed_filter_clips(database: &Database) {
+        insert_search_clip(
+            database,
+            SearchFixture::text("day-one", "alpha one", "2026-03-01 12:00:00").with_app("code.exe"),
+        )
+        .await;
+        insert_search_clip(
+            database,
+            SearchFixture::text("day-two", "alpha two", "2026-03-02 12:00:00")
+                .with_app("chrome.exe"),
+        )
+        .await;
+        insert_search_clip(
+            database,
+            SearchFixture::text("day-three", "alpha three", "2026-03-03 12:00:00")
+                .with_app("code.exe"),
+        )
+        .await;
+    }
+
+    async fn listed_ids(
+        database: &Database,
+        date_from: Option<&str>,
+        date_to: Option<&str>,
+        source_app: Option<&str>,
+    ) -> Vec<String> {
+        get_clips_in_database(
+            None,
+            50,
+            0,
+            Some(true),
+            None,
+            date_from.map(str::to_string),
+            date_to.map(str::to_string),
+            source_app.map(str::to_string),
+            database,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|clip| clip.id)
+        .collect()
+    }
+
+    #[tokio::test]
+    async fn source_app_counts_group_encrypted_app_names() {
+        let database = test_database().await;
+        seed_filter_clips(&database).await;
+        database
+            .search_index
+            .ensure_ready(&database.pool, &database.crypto)
+            .await
+            .unwrap();
+
+        // Each row's app name is encrypted under a fresh nonce, so identical
+        // apps have different ciphertexts and SQL could not group them. The
+        // counts still have to come out right, most used first.
+        assert_eq!(
+            database.search_index.source_app_counts(),
+            vec![("code.exe".to_string(), 2), ("chrome.exe".to_string(), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn source_app_filter_narrows_the_list_and_pages_correctly() {
+        let database = test_database().await;
+        seed_filter_clips(&database).await;
+
+        assert_eq!(
+            listed_ids(&database, None, None, Some("code.exe")).await,
+            vec!["day-three", "day-one"]
+        );
+        // Matching is case-insensitive: the stored name is whatever Windows
+        // reported at capture time.
+        assert_eq!(
+            listed_ids(&database, None, None, Some("CODE.EXE")).await,
+            vec!["day-three", "day-one"]
+        );
+        assert!(listed_ids(&database, None, None, Some("nothing.exe"))
+            .await
+            .is_empty());
+
+        // Paging runs over the filtered set, not the raw table: page two of a
+        // one-per-page code.exe listing is the *second code.exe clip*, not
+        // whatever row happens to sit second overall.
+        let page_two = get_clips_in_database(
+            None,
+            1,
+            1,
+            Some(true),
+            None,
+            None,
+            None,
+            Some("code.exe".into()),
+            &database,
+        )
+        .await
+        .unwrap();
+        assert_eq!(page_two.len(), 1);
+        assert_eq!(page_two[0].id, "day-one");
+    }
+
+    #[tokio::test]
+    async fn date_range_filter_is_half_open_and_combines_with_source_app() {
+        let database = test_database().await;
+        seed_filter_clips(&database).await;
+
+        // [from, to): the second day is included, the third is not.
+        assert_eq!(
+            listed_ids(
+                &database,
+                Some("2026-03-02 00:00:00"),
+                Some("2026-03-03 00:00:00"),
+                None
+            )
+            .await,
+            vec!["day-two"]
+        );
+        assert_eq!(
+            listed_ids(&database, Some("2026-03-02 00:00:00"), None, None).await,
+            vec!["day-three", "day-two"]
+        );
+        assert_eq!(
+            listed_ids(&database, None, Some("2026-03-02 00:00:00"), None).await,
+            vec!["day-one"]
+        );
+
+        // Filters combine with AND: day-two is in range but is not code.exe.
+        assert!(listed_ids(
+            &database,
+            Some("2026-03-02 00:00:00"),
+            Some("2026-03-03 00:00:00"),
+            Some("code.exe")
+        )
+        .await
+        .is_empty());
+        assert_eq!(
+            listed_ids(
+                &database,
+                Some("2026-03-03 00:00:00"),
+                None,
+                Some("code.exe")
+            )
+            .await,
+            vec!["day-three"]
+        );
+    }
+
+    #[tokio::test]
+    async fn search_combines_with_date_and_source_app_filters() {
+        let database = test_database().await;
+        seed_filter_clips(&database).await;
+
+        let all = search_clips_in_database(
+            "alpha".into(),
+            None,
+            50,
+            0,
+            None,
+            None,
+            None,
+            None,
+            &database,
+        )
+        .await
+        .unwrap();
+        assert_eq!(all.len(), 3);
+
+        let narrowed = search_clips_in_database(
+            "alpha".into(),
+            None,
+            50,
+            0,
+            None,
+            Some("2026-03-02 00:00:00".into()),
+            None,
+            Some("code.exe".into()),
+            &database,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            narrowed.into_iter().map(|clip| clip.id).collect::<Vec<_>>(),
+            vec!["day-three"]
+        );
     }
 
     #[tokio::test]
@@ -2271,6 +2658,7 @@ mod tests {
                 folder_id: Some(folder_id),
                 pinned: false,
                 created_at: "2026-01-01 00:00:00",
+                source_app: Some("chrome.exe"),
             },
         )
         .await;
@@ -2285,6 +2673,7 @@ mod tests {
                 folder_id: None,
                 pinned: true,
                 created_at: "2026-01-02 00:00:00",
+                source_app: Some("SnippingTool.exe"),
             },
         )
         .await;
@@ -2299,13 +2688,24 @@ mod tests {
                 folder_id: None,
                 pinned: false,
                 created_at: "2026-01-03 00:00:00",
+                source_app: Some("chrome.exe"),
             },
         )
         .await;
 
-        let first = search_clips_in_database("ALPHA".into(), None, 1, 0, None, &database)
-            .await
-            .unwrap();
+        let first = search_clips_in_database(
+            "ALPHA".into(),
+            None,
+            1,
+            0,
+            None,
+            None,
+            None,
+            None,
+            &database,
+        )
+        .await
+        .unwrap();
         assert_eq!(first[0].id, "ocr-result");
         assert!(first[0].ocr_match.is_some());
         assert!(first[0].has_ocr_text);
@@ -2314,9 +2714,19 @@ mod tests {
             "Alpha receipt 8372"
         );
 
-        let second = search_clips_in_database("alpha".into(), None, 1, 1, None, &database)
-            .await
-            .unwrap();
+        let second = search_clips_in_database(
+            "alpha".into(),
+            None,
+            1,
+            1,
+            None,
+            None,
+            None,
+            None,
+            &database,
+        )
+        .await
+        .unwrap();
         assert_eq!(second[0].id, "text-result");
 
         let folder = search_clips_in_database(
@@ -2324,6 +2734,9 @@ mod tests {
             Some(folder_id.to_string()),
             10,
             0,
+            None,
+            None,
+            None,
             None,
             &database,
         )
@@ -2339,6 +2752,9 @@ mod tests {
             10,
             0,
             Some("images".into()),
+            None,
+            None,
+            None,
             &database,
         )
         .await
@@ -2346,10 +2762,19 @@ mod tests {
         assert_eq!(images_only.len(), 1);
         assert_eq!(images_only[0].id, "ocr-result");
 
-        let text_only =
-            search_clips_in_database("alpha".into(), None, 10, 0, Some("text".into()), &database)
-                .await
-                .unwrap();
+        let text_only = search_clips_in_database(
+            "alpha".into(),
+            None,
+            10,
+            0,
+            Some("text".into()),
+            None,
+            None,
+            None,
+            &database,
+        )
+        .await
+        .unwrap();
         assert_eq!(text_only.len(), 1);
         assert_eq!(text_only[0].id, "text-result");
 
@@ -3080,6 +3505,7 @@ mod tests {
                 content: "the whole body, not the row preview",
                 preview: "the whole body...",
                 ocr: None,
+                source_app: None,
                 folder_id: None,
                 pinned: false,
                 created_at: "2026-03-01 00:00:00",

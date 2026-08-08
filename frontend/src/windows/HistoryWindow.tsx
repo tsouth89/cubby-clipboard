@@ -11,8 +11,18 @@ import { ContentFilter } from '../components/FlyoutHeader';
 import { useTheme } from '../hooks/useTheme';
 import { useLanguage } from '../hooks/useLanguage';
 import { useSystemAccent } from '../hooks/useSystemAccent';
+import { customRange, DATE_PRESET_LABELS, DatePreset, presetRange } from '../utils/dateRange';
+
+/** One entry in the source-app filter, from `get_source_apps`. */
+interface SourceAppCount {
+  name: string;
+  count: number;
+}
 
 const PAGE_SIZE = 20;
+
+const filterSelectClass =
+  'h-9 max-w-[168px] shrink-0 rounded-md border border-white/[0.08] bg-transparent px-2 text-xs text-muted-foreground outline-none hover:text-foreground';
 
 const CONTENT_FILTERS: ReadonlyArray<readonly [ContentFilter, string]> = [
   ['all', 'All'],
@@ -39,6 +49,18 @@ export function HistoryWindow() {
   const [hasMore, setHasMore] = useState(true);
   const [totalClipCount, setTotalClipCount] = useState(0);
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [sourceApps, setSourceApps] = useState<SourceAppCount[]>([]);
+  const [sourceApp, setSourceApp] = useState<string | null>(null);
+  const [datePreset, setDatePreset] = useState<DatePreset>('all');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+
+  // Recomputed per render rather than stored, so a window left open overnight
+  // still means "today" tomorrow instead of pinning yesterday's boundaries.
+  const dateRange =
+    datePreset === 'custom'
+      ? customRange(customFrom, customTo)
+      : presetRange(datePreset, new Date());
 
   const effectiveTheme = useTheme(settings?.theme ?? 'system');
   useLanguage(settings?.language);
@@ -61,6 +83,10 @@ export function HistoryWindow() {
     };
   }, []);
 
+  // Destructured so the load callback depends on the two stamps rather than a
+  // fresh object identity each render, which would reload on every keystroke.
+  const { from: dateFrom, to: dateTo } = dateRange;
+
   const loadClips = useCallback(
     async (append: boolean) => {
       const loadId = ++loadIdRef.current;
@@ -81,6 +107,9 @@ export function HistoryWindow() {
               limit: PAGE_SIZE,
               offset,
               contentFilter,
+              dateFrom,
+              dateTo,
+              sourceApp,
             })
           : await invoke<ClipboardItem[]>('get_clips', {
               filterId: selectedFolder,
@@ -88,6 +117,9 @@ export function HistoryWindow() {
               offset,
               previewOnly: true,
               contentFilter,
+              dateFrom,
+              dateTo,
+              sourceApp,
             });
 
         if (loadId !== loadIdRef.current) return;
@@ -102,7 +134,7 @@ export function HistoryWindow() {
         if (loadId === loadIdRef.current) setIsLoading(false);
       }
     },
-    [contentFilter, searchQuery, selectedFolder]
+    [contentFilter, dateFrom, dateTo, searchQuery, selectedFolder, sourceApp]
   );
 
   const loadFolders = useCallback(async () => {
@@ -110,6 +142,14 @@ export function HistoryWindow() {
       setFolders(await invoke<FolderItem[]>('get_folders'));
     } catch (error) {
       console.error('Failed to load folders:', error);
+    }
+  }, []);
+
+  const loadSourceApps = useCallback(async () => {
+    try {
+      setSourceApps(await invoke<SourceAppCount[]>('get_source_apps'));
+    } catch (error) {
+      console.error('Failed to load source apps:', error);
     }
   }, []);
 
@@ -136,7 +176,8 @@ export function HistoryWindow() {
   useEffect(() => {
     loadFolders();
     refreshTotalCount();
-  }, [loadFolders, refreshTotalCount]);
+    loadSourceApps();
+  }, [loadFolders, refreshTotalCount, loadSourceApps]);
 
   // Keep the window live while it sits open next to the flyout: a copy made
   // anywhere shows up here without a manual refresh.
@@ -145,6 +186,8 @@ export function HistoryWindow() {
       loadClips(false);
       loadFolders();
       refreshTotalCount();
+      // A new clip can introduce an app, or move one up the list.
+      loadSourceApps();
     });
     const unlistenOcr = listen<string>('ocr-completed', (event) => {
       setClips((previous) =>
@@ -159,6 +202,9 @@ export function HistoryWindow() {
       loadClips(false);
       loadFolders();
       refreshTotalCount();
+      // Deleting elsewhere can empty out an app, changing its count or dropping
+      // it from the filter list entirely.
+      loadSourceApps();
     };
     window.addEventListener('focus', refreshOnFocus);
 
@@ -167,7 +213,7 @@ export function HistoryWindow() {
       unlistenClipboard.then((dispose) => dispose()).catch(() => undefined);
       unlistenOcr.then((dispose) => dispose()).catch(() => undefined);
     };
-  }, [loadClips, loadFolders, refreshTotalCount]);
+  }, [loadClips, loadFolders, refreshTotalCount, loadSourceApps]);
 
   const selectedClip = useMemo(
     () => clips.find((clip) => clip.id === selectedClipId) ?? null,
@@ -348,15 +394,39 @@ export function HistoryWindow() {
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [handleClose, handleCopy, handleDelete, searchQuery, selectedClipId]);
 
+  const hasNarrowingFilter =
+    Boolean(sourceApp) || dateFrom !== null || dateTo !== null || contentFilter !== 'all';
+
   const emptyState = searchQuery.trim()
-    ? { title: 'No matches', description: 'Try a different search term.' }
-    : selectedFolder
-      ? { title: 'This folder is empty', description: 'Move clips here to keep them together.' }
-      : contentFilter === 'images'
-        ? { title: 'No images yet', description: 'Copy an image and it will show up here.' }
-        : contentFilter === 'text'
-          ? { title: 'No text clips yet', description: 'Copy some text and it will show up here.' }
-          : { title: 'Nothing here yet', description: 'Anything you copy will appear in Cubby.' };
+    ? {
+        title: 'No matches',
+        description: hasNarrowingFilter
+          ? 'Try a different search term, or widen the filters.'
+          : 'Try a different search term.',
+      }
+    : sourceApp
+      ? {
+          title: `Nothing from ${sourceApp}`,
+          description: 'No clips from this app match the other filters.',
+        }
+      : dateFrom !== null || dateTo !== null
+        ? {
+            title: 'Nothing in this date range',
+            description: 'Try a wider range, or Any time.',
+          }
+        : selectedFolder
+          ? { title: 'This folder is empty', description: 'Move clips here to keep them together.' }
+          : contentFilter === 'images'
+            ? { title: 'No images yet', description: 'Copy an image and it will show up here.' }
+            : contentFilter === 'text'
+              ? {
+                  title: 'No text clips yet',
+                  description: 'Copy some text and it will show up here.',
+                }
+              : {
+                  title: 'Nothing here yet',
+                  description: 'Anything you copy will appear in Cubby.',
+                };
 
   return (
     <div className="flex h-screen select-none flex-col bg-background text-foreground">
@@ -425,7 +495,7 @@ export function HistoryWindow() {
         <select
           value={selectedFolder ?? ''}
           onChange={(event) => setSelectedFolder(event.target.value || null)}
-          className="h-9 max-w-[160px] shrink-0 rounded-md border border-white/[0.08] bg-transparent px-2 text-xs text-muted-foreground outline-none hover:text-foreground"
+          className={filterSelectClass}
           aria-label="Filter by folder"
         >
           <option value="">All folders</option>
@@ -435,7 +505,79 @@ export function HistoryWindow() {
             </option>
           ))}
         </select>
+
+        <select
+          value={sourceApp ?? ''}
+          onChange={(event) => setSourceApp(event.target.value || null)}
+          className={filterSelectClass}
+          aria-label="Filter by source app"
+        >
+          <option value="">All apps</option>
+          {/* A previously chosen app can vanish from the list once its last
+              clip is deleted. Keep it as an option so the control still shows
+              what is actually being filtered on. */}
+          {sourceApp && !sourceApps.some((app) => app.name === sourceApp) && (
+            <option value={sourceApp}>{sourceApp} (0)</option>
+          )}
+          {sourceApps.map((app) => (
+            <option key={app.name} value={app.name}>
+              {app.name} ({app.count})
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={datePreset}
+          onChange={(event) => setDatePreset(event.target.value as DatePreset)}
+          className={filterSelectClass}
+          aria-label="Filter by date"
+        >
+          {(Object.keys(DATE_PRESET_LABELS) as (keyof typeof DATE_PRESET_LABELS)[]).map((key) => (
+            <option key={key} value={key}>
+              {DATE_PRESET_LABELS[key]}
+            </option>
+          ))}
+          <option value="custom">Custom range…</option>
+        </select>
       </div>
+
+      {datePreset === 'custom' && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-2 text-xs text-muted-foreground">
+          <label className="flex items-center gap-1.5">
+            From
+            <input
+              type="date"
+              value={customFrom}
+              max={customTo || undefined}
+              onChange={(event) => setCustomFrom(event.target.value)}
+              className="rounded-md border border-white/[0.08] bg-transparent px-2 py-1 text-foreground outline-none"
+            />
+          </label>
+          <label className="flex items-center gap-1.5">
+            To
+            <input
+              type="date"
+              value={customTo}
+              min={customFrom || undefined}
+              onChange={(event) => setCustomTo(event.target.value)}
+              className="rounded-md border border-white/[0.08] bg-transparent px-2 py-1 text-foreground outline-none"
+            />
+          </label>
+          {(customFrom || customTo) && (
+            <button
+              type="button"
+              onClick={() => {
+                setCustomFrom('');
+                setCustomTo('');
+              }}
+              className="rounded p-1 hover:bg-white/10 hover:text-foreground"
+              aria-label="Clear custom range"
+            >
+              <X size={13} />
+            </button>
+          )}
+        </div>
+      )}
 
       <main className="flex min-h-0 flex-1">
         <div className="min-h-0 w-[420px] shrink-0 border-r border-border">
