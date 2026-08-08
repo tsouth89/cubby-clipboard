@@ -91,8 +91,14 @@ if (typeof csp !== 'string' || !csp.includes("default-src 'self'") || !csp.inclu
   throw new Error('Release builds must use the restrictive Cubby content-security policy');
 }
 
-if (JSON.stringify(capability.windows) !== JSON.stringify(['main', 'settings'])) {
-  throw new Error('Tauri capabilities must be scoped to the main and settings windows');
+// Every window Cubby opens, listed explicitly. Kept an exact match rather than
+// a subset check so a new window has to be added here deliberately instead of
+// inheriting the app's capabilities by accident.
+const allowedCapabilityWindows = ['main', 'settings', 'history', 'image'];
+if (JSON.stringify(capability.windows) !== JSON.stringify(allowedCapabilityWindows)) {
+  throw new Error(
+    `Tauri capabilities must be scoped to exactly: ${allowedCapabilityWindows.join(', ')}`
+  );
 }
 
 for (const forbiddenPermission of ['notification:default', 'opener:default', 'clipboard-x:default']) {

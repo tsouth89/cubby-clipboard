@@ -21,6 +21,11 @@ interface ClipListProps {
   onLoadMore: () => void;
   onRetry: () => void;
   onCardContextMenu?: (e: React.MouseEvent, clipId: string) => void;
+  /** Whether moving the pointer over a card selects it. True in the flyout,
+   *  where selection is only ever "what Enter will paste". The History window
+   *  turns it off: selection there drives a preview pane, and sweeping the
+   *  pointer across the list on the way to a button must not reload it. */
+  selectOnHover?: boolean;
 }
 
 export function ClipList({
@@ -40,13 +45,15 @@ export function ClipList({
   onLoadMore,
   onRetry,
   onCardContextMenu,
+  selectOnHover = true,
 }: ClipListProps) {
   const { t } = useTranslation();
   const listRef = useRef<HTMLDivElement>(null);
   // Arrow-key navigation can scroll a card under a stationary cursor and fire
   // mouseenter. A mousemove, including the first one after opening the flyout,
   // is direct evidence of pointer intent and may safely change selection.
-  const handleCardHover = (clipId: string) => () => onSelectClip(clipId);
+  const handleCardHover = (clipId: string) =>
+    selectOnHover ? () => onSelectClip(clipId) : undefined;
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: 0 });

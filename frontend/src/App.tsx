@@ -277,6 +277,17 @@ function App() {
     });
   }, []);
 
+  // Creating and focusing the History window lives in Rust so the flyout and
+  // the tray menu open it exactly the same way.
+  const openHistoryWindow = useCallback(async () => {
+    try {
+      await invoke('open_history_window');
+    } catch (e) {
+      console.error('Failed to open the history window:', e);
+      toast.error('Failed to open the History window');
+    }
+  }, []);
+
   const handleDismissWelcome = useCallback(() => {
     setShowWelcome(false);
     setSettings((prev) => (prev ? { ...prev, has_completed_onboarding: true } : prev));
@@ -1079,6 +1090,7 @@ function App() {
               setShowAddFolderModal(true);
             }}
             onOpenHistoryMenu={handleHistoryMenu}
+            onOpenHistoryWindow={openHistoryWindow}
             onOpenSettings={openSettings}
           />
 
