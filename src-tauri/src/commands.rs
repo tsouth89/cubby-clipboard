@@ -723,6 +723,15 @@ fn date_range_clause(from: Option<&str>, to: Option<&str>) -> String {
 /// Load a page of clips by id, still ordered the way the database ordered them.
 /// Used by every path that has to narrow ids outside SQL (search, source app)
 /// before fetching the encrypted payloads for just the rows being shown.
+///
+/// Every clip listing orders by `is_pinned DESC, created_at DESC, uuid DESC`.
+/// The `uuid` key is what makes that ordering *total*: `created_at` has
+/// one-second resolution, so a burst of copies ties, and SQLite is free to
+/// break a tie differently between two executions of the same query. The
+/// paging paths order once to pick a page and then order again here to fetch
+/// it, so without a deterministic tie-break the second ordering could disagree
+/// with the first and a row could be repeated on one page and missing from the
+/// next.
 async fn fetch_clips_by_id(pool: &SqlitePool, ids: &[String]) -> Result<Vec<Clip>, String> {
     if ids.is_empty() {
         return Ok(Vec::new());
@@ -732,7 +741,7 @@ async fn fetch_clips_by_id(pool: &SqlitePool, ids: &[String]) -> Result<Vec<Clip
         .join(",");
     let sql = format!(
         "SELECT * FROM clips WHERE is_deleted = 0 AND uuid IN ({placeholders}) \
-         ORDER BY is_pinned DESC, created_at DESC"
+         ORDER BY is_pinned DESC, created_at DESC, uuid DESC"
     );
     let mut query = sqlx::query_as::<_, Clip>(&sql);
     for id in ids {
@@ -842,7 +851,7 @@ async fn get_clips_in_database(
             Vec::new()
         } else {
             let sql = format!(
-                "SELECT uuid FROM clips WHERE {where_body} ORDER BY is_pinned DESC, created_at DESC"
+                "SELECT uuid FROM clips WHERE {where_body} ORDER BY is_pinned DESC, created_at DESC, uuid DESC"
             );
             let mut query = sqlx::query_scalar::<_, String>(&sql);
             if let Some(id) = folder_id {
@@ -866,7 +875,7 @@ async fn get_clips_in_database(
     } else {
         let sql = format!(
             "SELECT * FROM clips WHERE {where_body} \
-             ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?"
+             ORDER BY is_pinned DESC, created_at DESC, uuid DESC LIMIT ? OFFSET ?"
         );
         let mut query = sqlx::query_as::<_, Clip>(&sql);
         if let Some(id) = folder_id {
@@ -1575,7 +1584,7 @@ async fn search_clips_in_database(
     );
     let sql_started = Instant::now();
     let sql = format!(
-        "SELECT uuid FROM clips WHERE {where_body} ORDER BY is_pinned DESC, created_at DESC"
+        "SELECT uuid FROM clips WHERE {where_body} ORDER BY is_pinned DESC, created_at DESC, uuid DESC"
     );
     let mut ordered_query = sqlx::query_scalar::<_, String>(&sql);
     if let Some(id) = folder_id {
@@ -2579,6 +2588,112 @@ mod tests {
             None,
             date_from.map(str::to_string),
             date_to.map(str::to_string),
+            source_app.map(str::to_string),
+            database,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|clip| clip.id)
+        .collect()
+    }
+
+    #[tokio::test]
+    async fn paging_is_stable_when_clips_share_a_timestamp() {
+        let database = test_database().await;
+        // created_at has one-second resolution, so a burst of copies lands on
+        // the same value. Ten of them, paged two at a time.
+        for index in 0..10 {
+            insert_search_clip(
+                &database,
+                SearchFixture::text(
+                    &format!("tie-{index}"),
+                    "alpha burst",
+                    "2026-04-01 09:00:00",
+                )
+                .with_app("code.exe"),
+            )
+            .await;
+        }
+
+        // Walk each paging path two rows at a time and require the pages, laid
+        // end to end, to reproduce the unpaged listing exactly: same rows, same
+        // order, nothing repeated or skipped.
+        //
+        // Note this does not *reproduce* the tie-break defect. SQLite leaves the
+        // order of tied rows unspecified but happens to be stable here, so the
+        // bug is not summonable on demand; the `uuid` key removes the
+        // reliance on that. What this does guard is the invariant itself, which
+        // is what any future change to ordering or paging would break.
+        for path in ["plain", "source_app", "search"] {
+            let mut seen: Vec<String> = Vec::new();
+            for page in 0..5 {
+                let ids: Vec<String> = match path {
+                    "search" => search_clips_in_database(
+                        "alpha".into(),
+                        None,
+                        2,
+                        page * 2,
+                        None,
+                        None,
+                        None,
+                        None,
+                        &database,
+                    )
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|clip| clip.id)
+                    .collect(),
+                    "source_app" => listed_page(&database, 2, page * 2, Some("code.exe")).await,
+                    _ => listed_page(&database, 2, page * 2, None).await,
+                };
+                seen.extend(ids);
+            }
+
+            let unpaged: Vec<String> = match path {
+                "search" => search_clips_in_database(
+                    "alpha".into(),
+                    None,
+                    50,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &database,
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|clip| clip.id)
+                .collect(),
+                "source_app" => listed_page(&database, 50, 0, Some("code.exe")).await,
+                _ => listed_page(&database, 50, 0, None).await,
+            };
+
+            assert_eq!(unpaged.len(), 10, "{path} should list every clip");
+            assert_eq!(
+                seen, unpaged,
+                "{path} paging disagreed with the full listing"
+            );
+        }
+    }
+
+    async fn listed_page(
+        database: &Database,
+        limit: i64,
+        offset: i64,
+        source_app: Option<&str>,
+    ) -> Vec<String> {
+        get_clips_in_database(
+            None,
+            limit,
+            offset,
+            Some(true),
+            None,
+            None,
+            None,
             source_app.map(str::to_string),
             database,
         )
