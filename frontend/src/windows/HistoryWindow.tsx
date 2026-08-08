@@ -418,6 +418,22 @@ export function HistoryWindow() {
     }
   }, []);
 
+  const handleSaveText = useCallback(
+    async (clipId: string, text: string) => {
+      try {
+        await invoke('update_clip_text', { id: clipId, text });
+        // The row still holds the pre-edit preview, and the edit may have
+        // changed which clips a filter or search matches.
+        await loadClips(false);
+        toast.success('Clip updated');
+      } catch (error) {
+        console.error('Failed to update the clip:', error);
+        toast.error('Failed to update the clip');
+      }
+    },
+    [loadClips]
+  );
+
   const handleTogglePin = useCallback(async (clipId: string) => {
     try {
       const isPinned = await invoke<boolean>('toggle_clip_pin', { id: clipId });
@@ -806,6 +822,7 @@ export function HistoryWindow() {
             onCopyOcrText={handleCopyOcrText}
             onCopySelection={handleCopySelection}
             onOpenImage={handleOpenImage}
+            onSaveText={handleSaveText}
             onTogglePin={handleTogglePin}
             onDelete={handleDelete}
           />

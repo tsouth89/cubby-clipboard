@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { clsx } from 'clsx';
 import { format } from 'date-fns';
-import { Clock, Copy, ExternalLink, Pin, Trash2, Type } from 'lucide-react';
+import { Check, Clock, Copy, ExternalLink, Pencil, Pin, Trash2, Type } from 'lucide-react';
 import { ClipboardItem } from '../types';
 import { ImageTextViewer } from './ImageTextViewer';
 import { OcrLayout } from '../utils/ocrSelection';
@@ -30,6 +30,8 @@ interface ClipPreviewProps {
   onCopySelection: (text: string) => void;
   /** Pops the image out into its own full-size window. */
   onOpenImage: (clipId: string) => void;
+  /** Save edited text back to the clip. Text clips only. */
+  onSaveText: (clipId: string, text: string) => Promise<void>;
   onTogglePin: (clipId: string) => void;
   onDelete: (clipId: string) => void;
 }
@@ -49,9 +51,13 @@ export function ClipPreview({
   onCopyOcrText,
   onCopySelection,
   onOpenImage,
+  onSaveText,
   onTogglePin,
   onDelete,
 }: ClipPreviewProps) {
+  // Null when not editing; otherwise the working copy of the text.
+  const [draft, setDraft] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [details, setDetails] = useState<ClipDetails | null>(null);
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const clipId = clip?.id ?? null;
@@ -96,6 +102,12 @@ export function ClipPreview({
       active = false;
     };
   }, [clipId, ocrReady]);
+
+  // Abandon an unsaved edit when the selection moves — silently carrying a
+  // draft onto a different clip and saving it there would be destructive.
+  useEffect(() => {
+    setDraft(null);
+  }, [clipId]);
 
   const isImage = clip?.clip_type === 'image';
   const imageMetadata = useMemo(() => parseImageMetadata(clip?.metadata), [clip?.metadata]);
@@ -185,14 +197,32 @@ export function ClipPreview({
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          <pre
-            className={clsx(
-              'whitespace-pre-wrap break-words text-[12.5px] leading-[19px] text-foreground/95',
-              kind === 'Code' && 'font-mono text-[12px]'
-            )}
-          >
-            {text}
-          </pre>
+          {draft !== null ? (
+            <textarea
+              autoFocus
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.stopPropagation();
+                  setDraft(null);
+                }
+              }}
+              className={clsx(
+                'h-full min-h-[200px] w-full resize-none rounded-md border border-primary/45 bg-black/20 p-2 text-[12.5px] leading-[19px] text-foreground outline-none',
+                kind === 'Code' && 'font-mono text-[12px]'
+              )}
+            />
+          ) : (
+            <pre
+              className={clsx(
+                'whitespace-pre-wrap break-words text-[12.5px] leading-[19px] text-foreground/95',
+                kind === 'Code' && 'font-mono text-[12px]'
+              )}
+            >
+              {text}
+            </pre>
+          )}
           {detailsError && (
             <p className="mt-3 text-[11px] text-destructive">
               Could not load the full clip. Showing the list preview instead.
@@ -210,6 +240,50 @@ export function ClipPreview({
       </div>
 
       <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-white/[0.07] px-4 py-3">
+        {draft !== null ? (
+          <>
+            <button
+              type="button"
+              className={actionClass}
+              disabled={saving}
+              onClick={async () => {
+                setSaving(true);
+                try {
+                  await onSaveText(clip.id, draft);
+                  setDraft(null);
+                } finally {
+                  setSaving(false);
+                }
+              }}
+            >
+              <Check size={13} />
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              type="button"
+              className={actionClass}
+              disabled={saving}
+              onClick={() => setDraft(null)}
+            >
+              Cancel
+            </button>
+          </>
+        ) : (
+          !isImage && (
+            <button
+              type="button"
+              className={actionClass}
+              // The full text, not the row's truncated preview — editing from a
+              // preview would silently chop the clip on save.
+              onClick={() => setDraft(details?.content ?? clip.content ?? '')}
+              disabled={!details && !detailsError}
+              title={!details && !detailsError ? 'Loading the full text…' : undefined}
+            >
+              <Pencil size={13} />
+              Edit
+            </button>
+          )
+        )}
         <button
           type="button"
           className={actionClass}

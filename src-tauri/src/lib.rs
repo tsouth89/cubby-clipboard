@@ -459,6 +459,7 @@ pub fn run_app() {
             commands::copy_ocr_text,
             commands::delete_clip,
             commands::toggle_clip_pin,
+            commands::update_clip_text,
             commands::move_to_folder,
             commands::create_folder,
             commands::rename_folder,
