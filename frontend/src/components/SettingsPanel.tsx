@@ -46,6 +46,14 @@ const GITHUB_URL = 'https://github.com/tsouth89/cubby-clipboard';
 const WEBSITE_URL = 'https://cubbyclipboard.com';
 const PRIVACY_URL = 'https://cubbyclipboard.com/privacy';
 
+type BackupImportResult = {
+  total: number;
+  imported: number;
+  duplicates: number;
+  errors: string[];
+  dry_run: boolean;
+};
+
 type DittoImportResult = {
   total: number;
   imported: number;
@@ -323,6 +331,10 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   const [newIgnoredApp, setNewIgnoredApp] = useState('');
   const [appVersion, setAppVersion] = useState('');
   const [dittoBusy, setDittoBusy] = useState(false);
+  const [backupBusy, setBackupBusy] = useState(false);
+  // Which passphrase prompt is open, if any.
+  const [backupPrompt, setBackupPrompt] = useState<'export' | 'import' | null>(null);
+  const [backupPassphrase, setBackupPassphrase] = useState('');
   const [ocrStatus, setOcrStatus] = useState<OcrQueueStatus | null>(null);
   const [ocrActionBusy, setOcrActionBusy] = useState(false);
   const [storageUsage, setStorageUsage] = useState<StorageUsage | null>(null);
@@ -555,6 +567,97 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     });
   };
 
+  const closeBackupPrompt = () => {
+    setBackupPrompt(null);
+    setBackupPassphrase('');
+  };
+
+  const handleExportBackup = async (passphrase: string) => {
+    let path: string;
+    try {
+      path = await invoke<string>('pick_backup_save_path');
+    } catch {
+      return; // picker cancelled
+    }
+    setBackupBusy(true);
+    try {
+      const count = await invoke<number>('export_backup', { path, passphrase });
+      toast.success(
+        count === 1 ? 'Exported 1 clip to an encrypted backup' : `Exported ${count} clips`
+      );
+    } catch (e) {
+      toast.error(`Backup failed: ${String(e)}`);
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleImportBackup = async (passphrase: string) => {
+    let path: string;
+    try {
+      path = await invoke<string>('pick_backup_file');
+    } catch {
+      return; // picker cancelled
+    }
+
+    // Dry run first, so the confirmation can say what will actually happen and
+    // a wrong passphrase is caught before anything is written.
+    let preview: BackupImportResult;
+    setBackupBusy(true);
+    try {
+      preview = await invoke<BackupImportResult>('import_backup', {
+        path,
+        passphrase,
+        dryRun: true,
+      });
+    } catch (e) {
+      toast.error(String(e));
+      return;
+    } finally {
+      setBackupBusy(false);
+    }
+
+    if (preview.imported === 0) {
+      toast.info(
+        preview.duplicates > 0
+          ? 'Every clip in that backup is already in your history'
+          : 'That backup has nothing to restore'
+      );
+      return;
+    }
+
+    setConfirmDialog({
+      isOpen: true,
+      title: 'Restore from backup',
+      message: `Add ${preview.imported} clip${preview.imported === 1 ? '' : 's'} from this backup?${
+        preview.duplicates > 0
+          ? ` ${preview.duplicates} already in your history will be skipped.`
+          : ''
+      }`,
+      action: async () => {
+        setBackupBusy(true);
+        try {
+          const result = await invoke<BackupImportResult>('import_backup', {
+            path,
+            passphrase,
+            dryRun: false,
+          });
+          if (result.errors.length > 0) {
+            toast.warning(
+              `Restored ${result.imported} clips; ${result.errors.length} could not be read`
+            );
+          } else {
+            toast.success(`Restored ${result.imported} clips`);
+          }
+        } catch (e) {
+          toast.error(String(e));
+        } finally {
+          setBackupBusy(false);
+        }
+      },
+    });
+  };
+
   const handleRemoveIgnoredApp = async (app: string) => {
     try {
       await invoke('remove_ignored_app', { appName: app });
@@ -749,6 +852,50 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
         }}
         onCancel={() => setConfirmDialog((prev) => ({ ...prev, isOpen: false }))}
       />
+      {backupPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
+          <form
+            className="w-full max-w-sm rounded-lg border border-border bg-card p-4 shadow-xl"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const passphrase = backupPassphrase;
+              const mode = backupPrompt;
+              closeBackupPrompt();
+              if (mode === 'export') void handleExportBackup(passphrase);
+              else void handleImportBackup(passphrase);
+            }}
+          >
+            <h2 className="text-sm font-semibold">
+              {backupPrompt === 'export' ? 'Choose a passphrase' : 'Enter the passphrase'}
+            </h2>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              {backupPrompt === 'export'
+                ? 'This passphrase encrypts the backup file. Cubby does not store it — if you lose it, the backup cannot be opened by anyone, including you.'
+                : 'The passphrase this backup was created with.'}
+            </p>
+            <input
+              type="password"
+              autoFocus
+              value={backupPassphrase}
+              onChange={(event) => setBackupPassphrase(event.target.value)}
+              placeholder="Passphrase"
+              className="mt-3 w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm outline-none focus:border-primary"
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" onClick={closeBackupPrompt} className={ghostButton}>
+                {t('common.cancel')}
+              </button>
+              <button
+                type="submit"
+                disabled={backupPassphrase.length === 0}
+                className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
+              >
+                {backupPrompt === 'export' ? 'Choose location…' : 'Choose file…'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
       <div className="flex h-full select-none flex-col bg-background text-foreground">
         {/* Title bar */}
         <div
@@ -1347,6 +1494,32 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                             {dittoBusy
                               ? t('settings.dittoImporting')
                               : t('settings.dittoImportButton')}
+                          </button>
+                        }
+                      />
+                      <Row
+                        title="Export an encrypted backup"
+                        desc="Save your history to a single encrypted file. You choose a passphrase; without it the file cannot be opened, and Cubby cannot recover it for you."
+                        control={
+                          <button
+                            onClick={() => setBackupPrompt('export')}
+                            disabled={backupBusy}
+                            className={ghostButton}
+                          >
+                            {backupBusy ? 'Working…' : 'Export…'}
+                          </button>
+                        }
+                      />
+                      <Row
+                        title="Restore from a backup"
+                        desc="Read a backup file back in. Clips you already have are skipped, so restoring twice is safe."
+                        control={
+                          <button
+                            onClick={() => setBackupPrompt('import')}
+                            disabled={backupBusy}
+                            className={ghostButton}
+                          >
+                            {backupBusy ? 'Working…' : 'Restore…'}
                           </button>
                         }
                       />

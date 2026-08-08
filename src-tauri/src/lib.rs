@@ -33,6 +33,7 @@ impl Drop for AnimationGuard {
     }
 }
 
+mod backup;
 mod cf_html;
 mod clipboard;
 mod commands;
@@ -484,6 +485,10 @@ pub fn run_app() {
             settings_commands::get_ignored_apps,
             commands::pick_file,
             commands::pick_ditto_database,
+            commands::pick_backup_save_path,
+            commands::pick_backup_file,
+            commands::export_backup,
+            commands::import_backup,
             commands::get_paste_context,
             commands::get_system_accent_color,
             commands::focus_window,
