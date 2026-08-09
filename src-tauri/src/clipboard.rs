@@ -1484,11 +1484,13 @@ async fn process_clipboard_snapshot(
     };
 
     let db_lookup_started = std::time::Instant::now();
-    // A failed lookup must not be read as "no such row". content_hash carries a
-    // plain index and no UNIQUE constraint, so falling through to the insert
-    // branch would succeed and silently leave two rows for one clip. Since we
-    // cannot tell whether the clip already exists, skip this capture and say so:
-    // one recorded miss beats a duplicate the user has to notice and clean up.
+    // A failed lookup must not be read as "no such row". content_hash is unique
+    // as of the idx_clips_hash_unique migration, so the insert below would now
+    // be rejected rather than silently storing a second row -- but a rejected
+    // insert loses the capture just the same, and reports it as a constraint
+    // error rather than as what it is. Since we cannot tell whether the clip
+    // already exists, skip this capture and say so: one recorded miss beats
+    // either a duplicate or a confusing failure further down.
     let existing_uuid: Option<String> = match sqlx::query_scalar::<_, String>(
         r#"SELECT uuid FROM clips WHERE content_hash = ?"#,
     )
