@@ -40,8 +40,8 @@ tight enough that a real regression does.
 | --- | --- | --- | --- |
 | `db_growth_per_text_clip` | 922 B | 2 KiB | enforced |
 | `image_thumbnail_bytes` | 86.8 KiB | 192 KiB | enforced |
-| `search_index_bytes_per_clip` | 5.2 KiB | 8 KiB | reported |
-| `first_searchable_result` | 4–10 ms over 2,000 clips | 100 ms | reported |
+| `search_index_bytes_per_clip` | 998 B | 2 KiB | reported |
+| `first_searchable_result` | 2–5 ms over 2,000 clips | 100 ms | reported |
 | `process_startup` | not yet measured | 2,000 ms | reported |
 | `shortcut_to_visible` | not yet measured | 150 ms | reported |
 | `paste_completion` | not yet measured | 800 ms | reported |
@@ -59,15 +59,18 @@ exits, which would make the startup number meaningless.
 
 ## What the numbers say
 
-**Search index memory is the scaling constraint.** At 5.2 KiB per clip the
-in-memory trigram index costs roughly 10 MiB at 2,000 clips, but around 500 MiB
-at 100,000. History is uncapped by default. The index is held in memory because
-the database is encrypted and cannot be searched by SQL (SBS-211), so this is a
-consequence of the privacy design rather than an oversight — but it means idle
-memory on a very large history is dominated by it, and the `idle_memory` budget
-will be met or missed by this number rather than by the WebView. Tracked in
-#169, which records where the bytes go and the cheapest directions to reduce
-them.
+**Search index memory was the scaling constraint, and is now much less of
+one.** It began at 5.2 KiB per clip — roughly 500 MiB at 100,000 clips, against
+a 200 MiB `idle_memory` budget — because each trigram held a `HashSet` of
+reference-counted clip ids. Issue #169 replaced that with sorted `u32` slots and
+stopped storing a preview the content already contains, bringing it to 998 B per
+clip: about 95 MiB at 100,000 clips, and search got faster rather than slower.
+
+The index is still held in memory for the life of the process, because the
+database is encrypted and cannot be searched by SQL (SBS-211), so it remains
+the largest resident structure and the thing `idle_memory` will be decided by.
+It now leaves room for a large history rather than consuming the whole budget
+before the WebView is counted.
 
 **Per-clip database cost is not the problem.** 922 B for a 170-byte clip is
 mostly encryption overhead and the content hash, and it grows linearly.

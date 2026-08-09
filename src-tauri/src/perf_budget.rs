@@ -87,7 +87,10 @@ pub const BUDGETS: &[Budget] = &[
     Budget {
         id: "search_index_bytes_per_clip",
         what: "in-memory search index bytes per indexed clip",
-        limit: 8192.0,
+        // Observed 998 B after the postings rework (#169), down from 5.2 KiB
+        // when postings were a HashSet<Arc<str>> per trigram. Set at roughly 2x
+        // so the old representation could not come back unnoticed.
+        limit: 2048.0,
         unit: Unit::Bytes,
         // Reported, not enforced, despite being a byte count: measuring it
         // needs a process-wide allocation counter, which other tests running in
