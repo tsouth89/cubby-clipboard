@@ -87,6 +87,12 @@ impl Database {
     /// up; creating the unique index before they run would fail the upgrade of
     /// exactly the installs that need it. Call this after them.
     ///
+    /// The oldest *visible* copy of each hash survives and inherits the pin,
+    /// hide state, folder, and note of every row being removed. Unlike
+    /// `remove_duplicate_clips`, which refuses to touch pinned rows at all, this
+    /// has to collapse the group to exactly one row for the constraint to hold
+    /// -- so the pin is moved rather than honoured in place.
+    ///
     /// Returns the number of duplicate rows removed. On failure the whole
     /// reconciliation rolls back and the old non-unique index is left in place:
     /// an unconstrained database that works beats a half-migrated one.
@@ -108,27 +114,41 @@ impl Database {
         let mut removed = 0_u64;
 
         for hash in &duplicated {
-            // Newest wins. `created_at` is what the history is ordered by, and
-            // the id breaks ties for clips captured inside the same second.
-            let rows: Vec<DuplicateRow> = sqlx::query_as::<_, (String, bool, Option<i64>)>(
-                r#"
-                SELECT uuid, is_pinned, folder_id
+            // The oldest *visible* copy wins, matching `remove_duplicate_clips`.
+            //
+            // `is_deleted ASC` is the load-bearing part. Soft delete keeps the
+            // row, so without it a newer soft-deleted duplicate could win and
+            // the only copy the user can actually see would be hard-deleted --
+            // the clip would vanish from history entirely. `remove_duplicate_clips`
+            // documents the same hazard.
+            //
+            // Among visible rows the lowest id wins, which is the original
+            // capture rather than an accidental re-insert, and is exactly the
+            // `MIN(id)` rule that command already uses.
+            let rows: Vec<DuplicateRow> =
+                sqlx::query_as::<_, (String, bool, bool, Option<i64>, Option<String>)>(
+                    r#"
+                SELECT uuid, is_pinned, is_hidden, folder_id, notes
                 FROM clips
                 WHERE content_hash = ?
-                ORDER BY created_at DESC, id DESC
+                ORDER BY is_deleted ASC, id ASC
                 "#,
-            )
-            .bind(hash)
-            .fetch_all(&mut *transaction)
-            .await
-            .map_err(|error| format!("could not read a duplicate clip group: {error}"))?
-            .into_iter()
-            .map(|(uuid, is_pinned, folder_id)| DuplicateRow {
-                uuid,
-                is_pinned,
-                folder_id,
-            })
-            .collect();
+                )
+                .bind(hash)
+                .fetch_all(&mut *transaction)
+                .await
+                .map_err(|error| format!("could not read a duplicate clip group: {error}"))?
+                .into_iter()
+                .map(
+                    |(uuid, is_pinned, is_hidden, folder_id, notes)| DuplicateRow {
+                        uuid,
+                        is_pinned,
+                        is_hidden,
+                        folder_id,
+                        notes,
+                    },
+                )
+                .collect();
 
             let Some((survivor, losers)) = rows.split_first() else {
                 continue;
@@ -137,21 +157,36 @@ impl Database {
                 continue;
             }
 
-            // Carry forward state the user set by hand. Losing a pin because a
-            // duplicate happened to be newer would be a silent data loss, and a
-            // pin is cheap to keep.
+            // Carry forward everything the user set by hand. These rows are
+            // duplicates by content, but the organising work on them is not
+            // duplicated: a note written on one copy exists only there, and
+            // losing it because another copy survived would be silent data
+            // loss the user cannot undo.
             let pinned = rows.iter().any(|row| row.is_pinned);
+            let hidden = rows.iter().any(|row| row.is_hidden);
             let folder = survivor
                 .folder_id
                 .or_else(|| rows.iter().find_map(|row| row.folder_id));
+            let notes = survivor
+                .notes
+                .clone()
+                .filter(|note| !note.trim().is_empty())
+                .or_else(|| {
+                    rows.iter()
+                        .find_map(|row| row.notes.clone().filter(|note| !note.trim().is_empty()))
+                });
 
-            sqlx::query("UPDATE clips SET is_pinned = ?, folder_id = ? WHERE uuid = ?")
-                .bind(pinned)
-                .bind(folder)
-                .bind(&survivor.uuid)
-                .execute(&mut *transaction)
-                .await
-                .map_err(|error| format!("could not merge duplicate clip state: {error}"))?;
+            sqlx::query(
+                "UPDATE clips SET is_pinned = ?, is_hidden = ?, folder_id = ?, notes = ? WHERE uuid = ?",
+            )
+            .bind(pinned)
+            .bind(hidden)
+            .bind(folder)
+            .bind(notes)
+            .bind(&survivor.uuid)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| format!("could not merge duplicate clip state: {error}"))?;
 
             for loser in losers {
                 // Child rows cascade, but the image blobs on disk do not, so
@@ -799,7 +834,9 @@ fn sanitize_storage_diagnostic(message: &str) -> String {
 struct DuplicateRow {
     uuid: String,
     is_pinned: bool,
+    is_hidden: bool,
     folder_id: Option<i64>,
+    notes: Option<String>,
 }
 
 async fn add_column_if_missing(pool: &SqlitePool, sql: &str) -> Result<(), sqlx::Error> {
@@ -833,6 +870,9 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         directory
     }
+
+    /// uuid, is_pinned, is_hidden, folder_id, notes.
+    type SurvivorState = (String, bool, bool, Option<i64>, Option<String>);
 
     async fn migrated_database() -> Database {
         let pool = SqlitePoolOptions::new()
@@ -942,7 +982,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicates_collapse_to_the_newest_row_and_keep_a_pin() {
+    async fn duplicates_collapse_to_the_oldest_visible_row_and_keep_hand_set_state() {
         let database = migrated_database().await;
         let folder: i64 =
             sqlx::query_scalar("INSERT INTO folders (name) VALUES ('Kept') RETURNING id")
@@ -950,44 +990,135 @@ mod tests {
                 .await
                 .expect("folder should insert");
 
-        // The pin and the folder are on the OLDEST row, which is the one that
-        // loses. Both have to survive on the winner or the user silently loses
-        // work they did by hand.
+        // Every piece of hand-set state is on the NEWER row, which is the one
+        // that loses. All of it has to land on the survivor, or the user
+        // silently loses work they cannot recover.
         insert_clip_with_hash(
             &database,
-            "old",
+            "original",
             "same-hash",
-            true,
-            Some(folder),
+            false,
+            None,
             "2026-05-01 09:00:00",
         )
         .await;
         insert_clip_with_hash(
             &database,
-            "new",
+            "duplicate",
             "same-hash",
-            false,
-            None,
+            true,
+            Some(folder),
             "2026-05-02 09:00:00",
         )
         .await;
+        sqlx::query(
+            "UPDATE clips SET notes = 'invoice reference', is_hidden = 1 WHERE uuid = 'duplicate'",
+        )
+        .execute(&database.pool)
+        .await
+        .expect("note should save");
 
         assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
 
-        let survivors: Vec<(String, bool, Option<i64>)> =
-            sqlx::query_as("SELECT uuid, is_pinned, folder_id FROM clips")
+        let survivors: Vec<SurvivorState> =
+            sqlx::query_as("SELECT uuid, is_pinned, is_hidden, folder_id, notes FROM clips")
                 .fetch_all(&database.pool)
                 .await
                 .unwrap();
         assert_eq!(survivors.len(), 1, "one row should remain");
-        assert_eq!(survivors[0].0, "new", "the newest row should win");
-        assert!(survivors[0].1, "the pin should carry forward");
         assert_eq!(
-            survivors[0].2,
-            Some(folder),
-            "folder membership should carry forward"
+            survivors[0].0, "original",
+            "the oldest visible row should win"
+        );
+        assert!(survivors[0].1, "the pin should carry forward");
+        assert!(survivors[0].2, "hide state should carry forward");
+        assert_eq!(survivors[0].3, Some(folder), "folder should carry forward");
+        assert_eq!(
+            survivors[0].4.as_deref(),
+            Some("invoice reference"),
+            "the user's note should carry forward"
         );
         assert!(unique_hash_index_exists(&database).await);
+    }
+
+    /// Soft delete keeps the row, so a newer deleted duplicate must never win:
+    /// hard-deleting the only visible copy would make the clip vanish from
+    /// history entirely. `remove_duplicate_clips` documents the same hazard.
+    #[tokio::test]
+    async fn a_soft_deleted_duplicate_never_outranks_the_visible_clip() {
+        let database = migrated_database().await;
+        insert_clip_with_hash(
+            &database,
+            "visible",
+            "hash",
+            false,
+            None,
+            "2026-05-01 09:00:00",
+        )
+        .await;
+        insert_clip_with_hash(
+            &database,
+            "deleted",
+            "hash",
+            false,
+            None,
+            "2026-05-09 09:00:00",
+        )
+        .await;
+        sqlx::query("UPDATE clips SET is_deleted = 1 WHERE uuid = 'deleted'")
+            .execute(&database.pool)
+            .await
+            .expect("soft delete should apply");
+
+        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
+
+        let remaining: Vec<(String, bool)> = sqlx::query_as("SELECT uuid, is_deleted FROM clips")
+            .fetch_all(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].0, "visible", "the visible clip must survive");
+        assert!(!remaining[0].1, "the survivor must still be visible");
+    }
+
+    /// A pin on a row that is about to be removed has to move to the survivor,
+    /// even when the survivor is the visible-but-older copy.
+    #[tokio::test]
+    async fn a_pin_on_a_soft_deleted_duplicate_moves_to_the_visible_survivor() {
+        let database = migrated_database().await;
+        insert_clip_with_hash(
+            &database,
+            "visible",
+            "hash",
+            false,
+            None,
+            "2026-05-01 09:00:00",
+        )
+        .await;
+        insert_clip_with_hash(
+            &database,
+            "deleted",
+            "hash",
+            true,
+            None,
+            "2026-05-09 09:00:00",
+        )
+        .await;
+        sqlx::query("UPDATE clips SET is_deleted = 1 WHERE uuid = 'deleted'")
+            .execute(&database.pool)
+            .await
+            .expect("soft delete should apply");
+
+        database.enforce_content_hash_uniqueness().await.unwrap();
+
+        let (uuid, pinned, deleted): (String, bool, bool) =
+            sqlx::query_as("SELECT uuid, is_pinned, is_deleted FROM clips")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(uuid, "visible");
+        assert!(pinned, "the pin should survive on the visible row");
+        assert!(!deleted, "a live pinned clip must remain live");
     }
 
     #[tokio::test]
@@ -1025,8 +1156,10 @@ mod tests {
         let database = migrated_database().await;
         insert_clip_with_hash(&database, "old", "dupe", false, None, "2026-05-01 09:00:00").await;
         insert_clip_with_hash(&database, "new", "dupe", false, None, "2026-05-02 09:00:00").await;
+        // Attached to the row that loses -- the newer one, now that the oldest
+        // visible copy survives.
         sqlx::query(
-            "INSERT INTO clip_formats (clip_uuid, format, content) VALUES ('old', 'fixture', x'00')",
+            "INSERT INTO clip_formats (clip_uuid, format, content) VALUES ('new', 'fixture', x'00')",
         )
         .execute(&database.pool)
         .await
