@@ -561,6 +561,52 @@ mod windows_probe {
         }
     }
 
+    /// Number of times a contended clipboard open is retried, matching the
+    /// budget `set_fixture` uses for writes.
+    const CLIPBOARD_OPEN_ATTEMPTS: u32 = 10;
+
+    fn clipboard_retry_backoff(attempt: u32) -> Duration {
+        Duration::from_millis(2_u64.pow(attempt.min(6)))
+    }
+
+    /// `OpenClipboard` and `EmptyClipboard` fail with `ERROR_ACCESS_DENIED`
+    /// while another process -- including Cubby's own poll loop -- holds the
+    /// clipboard. Production capture retries contention, so the probe does too;
+    /// otherwise a busy machine reports a fixture failure for a payload that
+    /// real capture would have published fine.
+    fn retry_on_clipboard_contention(
+        mut attempt_once: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut last_error = None;
+        for attempt in 0..CLIPBOARD_OPEN_ATTEMPTS {
+            match attempt_once() {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt + 1 < CLIPBOARD_OPEN_ATTEMPTS {
+                        thread::sleep(clipboard_retry_backoff(attempt));
+                    }
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| "unknown clipboard error".to_string()))
+    }
+
+    /// Takes ownership of the clipboard, retrying contention. The clipboard is
+    /// left open on success and closed again before every retry.
+    fn open_and_empty_clipboard(hwnd: HWND) -> Result<(), String> {
+        retry_on_clipboard_contention(|| unsafe {
+            OpenClipboard(Some(hwnd)).map_err(|error| error.to_string())?;
+            match EmptyClipboard() {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let _ = CloseClipboard();
+                    Err(error.to_string())
+                }
+            }
+        })
+    }
+
     fn publish_delayed_fixture(
         hwnd: HWND,
         payloads: Vec<(u32, Vec<u8>)>,
@@ -573,9 +619,10 @@ mod windows_probe {
             state.render_errors.clear();
         }
 
+        open_and_empty_clipboard(hwnd)
+            .map_err(|error| format!("failed to open clipboard for fixture {name}: {error}"))?;
+
         unsafe {
-            OpenClipboard(Some(hwnd)).map_err(|error| error.to_string())?;
-            EmptyClipboard().map_err(|error| error.to_string())?;
             let formats = state_cell
                 .lock()
                 .expect("delayed writer state lock")
@@ -643,19 +690,28 @@ mod windows_probe {
                 LRESULT(0)
             }
             WM_RENDERALLFORMATS => {
-                if OpenClipboard(Some(hwnd)).is_ok() {
-                    let formats = DELAYED_WRITER_STATE
-                        .get_or_init(Default::default)
-                        .lock()
-                        .expect("delayed writer state lock")
-                        .payloads
-                        .keys()
-                        .copied()
-                        .collect::<Vec<_>>();
-                    for format in formats {
-                        render_delayed_format(format);
+                match OpenClipboard(Some(hwnd)) {
+                    Ok(()) => {
+                        let formats = DELAYED_WRITER_STATE
+                            .get_or_init(Default::default)
+                            .lock()
+                            .expect("delayed writer state lock")
+                            .payloads
+                            .keys()
+                            .copied()
+                            .collect::<Vec<_>>();
+                        for format in formats {
+                            render_delayed_format(format);
+                        }
+                        let _ = CloseClipboard();
                     }
-                    let _ = CloseClipboard();
+                    // Without this the clipboard keeps advertising delayed
+                    // formats that will never have data, and the listener
+                    // reports an opaque "not materialized" instead of the
+                    // contention that actually caused it.
+                    Err(error) => record_delayed_render_error(format!(
+                        "failed to open clipboard to render all delayed formats: {error}"
+                    )),
                 }
                 LRESULT(0)
             }
@@ -1262,7 +1318,7 @@ mod windows_probe {
         }
         let has_image_format = formats
             .iter()
-            .any(|format| matches!(format.as_str(), "CF_BITMAP" | "CF_DIB" | "CF_DIBV5" | "PNG"));
+            .any(|format| crate::clipboard_policy::is_image_format_name(format));
         let policy = crate::clipboard_policy::classify_file_payload(true, has_image_format);
         if policy != crate::clipboard_policy::FilePayloadPolicy::IgnoreFilePayload {
             return Err(format!(
@@ -1479,9 +1535,52 @@ mod windows_probe {
     #[cfg(test)]
     mod tests {
         use super::{
-            cf_html_payload, fixture_binary, fixture_html_fragment, validate_physical_file_fixture,
-            PhysicalFileFixture,
+            cf_html_payload, clipboard_retry_backoff, fixture_binary, fixture_html_fragment,
+            retry_on_clipboard_contention, validate_physical_file_fixture, PhysicalFileFixture,
+            CLIPBOARD_OPEN_ATTEMPTS,
         };
+        use std::cell::Cell;
+
+        #[test]
+        fn clipboard_open_survives_transient_contention() {
+            let attempts = Cell::new(0_u32);
+            let result = retry_on_clipboard_contention(|| {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() < 4 {
+                    Err("access denied".to_string())
+                } else {
+                    Ok(())
+                }
+            });
+
+            assert_eq!(result, Ok(()));
+            assert_eq!(attempts.get(), 4);
+        }
+
+        #[test]
+        fn clipboard_open_reports_the_last_error_once_the_budget_runs_out() {
+            let attempts = Cell::new(0_u32);
+            let result = retry_on_clipboard_contention(|| {
+                attempts.set(attempts.get() + 1);
+                Err(format!("access denied on attempt {}", attempts.get()))
+            });
+
+            assert_eq!(attempts.get(), CLIPBOARD_OPEN_ATTEMPTS);
+            assert_eq!(
+                result,
+                Err(format!(
+                    "access denied on attempt {CLIPBOARD_OPEN_ATTEMPTS}"
+                ))
+            );
+        }
+
+        #[test]
+        fn clipboard_retry_backoff_grows_then_caps() {
+            assert_eq!(clipboard_retry_backoff(0).as_millis(), 1);
+            assert_eq!(clipboard_retry_backoff(3).as_millis(), 8);
+            assert_eq!(clipboard_retry_backoff(6).as_millis(), 64);
+            assert_eq!(clipboard_retry_backoff(9).as_millis(), 64);
+        }
 
         #[test]
         fn cf_html_offsets_are_byte_accurate_for_unicode() {
