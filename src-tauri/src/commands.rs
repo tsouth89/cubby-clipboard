@@ -174,6 +174,12 @@ fn build_ocr_highlights(ocr_words_json: &str, query: &str) -> Option<OcrHighligh
 
 const OCR_SNIPPET_CHAR_LIMIT: usize = 96;
 
+/// Cap on a clip note, mirroring `NOTE_CHAR_LIMIT` in the frontend constants.
+/// A note is a short reminder of what a clip is, so this is generous for that
+/// job while keeping an accidental paste of a whole document out of the
+/// encrypted column and the trigram index.
+const NOTE_CHAR_LIMIT: usize = 500;
+
 /// Returned when a clip's full-resolution image was dropped by retention
 /// (SOU-244). Surfaced to the user when they try to paste/copy the full image.
 pub(crate) const IMAGE_EXPIRED_ERROR: &str =
@@ -321,7 +327,11 @@ fn decrypt_clip_fields(db: &Database, clip: &mut Clip) -> Result<(), String> {
         clip.ocr_words = None;
     }
     // A note is auxiliary too: an unreadable one must not stop the clip loading.
-    if db.crypto.decrypt_optional_text(&mut clip.notes).is_err() {
+    // Logged rather than silently dropped — the note vanishes from the UI either
+    // way, and the log is the only signal that something was there to lose.
+    // Matches how the search index reports the same failure.
+    if let Err(error) = db.crypto.decrypt_optional_text(&mut clip.notes) {
+        log::warn!("CLIPS: Ignoring an unreadable note: {error}");
         clip.notes = None;
     }
     Ok(())
@@ -1532,6 +1542,12 @@ pub async fn set_clip_notes(
 
 async fn set_clip_notes_in_database(db: &Database, id: &str, notes: &str) -> Result<(), String> {
     let trimmed = notes.trim();
+    // The input carries maxLength, so this is the guard for anything that is not
+    // that input. Counted in chars, not bytes, so the limit means the same thing
+    // for a note that is not ASCII.
+    if trimmed.chars().count() > NOTE_CHAR_LIMIT {
+        return Err(format!("A note is limited to {NOTE_CHAR_LIMIT} characters"));
+    }
     let stored = if trimmed.is_empty() {
         None
     } else {
@@ -2627,7 +2643,7 @@ mod tests {
         get_clips_in_database, load_recognized_text, migrate_clip_format_model,
         migrate_encrypted_storage, ocr_text_layout, remove_clip_image_files, restore_hash_material,
         search_clips_in_database, set_clip_notes_in_database, set_clip_ocr_text_in_database,
-        toggle_clip_pin_in_pool, update_clip_text_in_database, ClipboardContent,
+        toggle_clip_pin_in_pool, update_clip_text_in_database, ClipboardContent, NOTE_CHAR_LIMIT,
         OCR_SNIPPET_CHAR_LIMIT,
     };
     use crate::clipboard::CapturedFormat;
@@ -3112,6 +3128,27 @@ mod tests {
         assert!(set_clip_notes_in_database(&database, "missing", "x")
             .await
             .is_err());
+
+        // Bounded for callers that are not the capped input. Counted in chars,
+        // so a multi-byte note is measured the same way as an ASCII one.
+        assert!(
+            set_clip_notes_in_database(&database, "uuid-clip", &"a".repeat(NOTE_CHAR_LIMIT))
+                .await
+                .is_ok(),
+            "a note at the limit should be accepted"
+        );
+        assert!(
+            set_clip_notes_in_database(&database, "uuid-clip", &"a".repeat(NOTE_CHAR_LIMIT + 1))
+                .await
+                .is_err(),
+            "a note past the limit should be refused"
+        );
+        assert!(
+            set_clip_notes_in_database(&database, "uuid-clip", &"é".repeat(NOTE_CHAR_LIMIT))
+                .await
+                .is_ok(),
+            "the limit counts characters, not bytes"
+        );
     }
 
     #[tokio::test]

@@ -282,7 +282,10 @@ export const ClipCard = memo(function ClipCard({
             >
               {preview.slice(0, PREVIEW_CHAR_LIMIT)}
             </p>
-            {clip.notes && (
+            {/* Explicit emptiness check: a note of "0" is a real note, and a
+                truthiness test would drop it while search and the title still
+                treated it as present. */}
+            {clip.notes != null && clip.notes !== '' && (
               <p
                 data-el="clip-note"
                 className="mt-1 flex min-w-0 items-center gap-1 text-[11px] text-primary/85"

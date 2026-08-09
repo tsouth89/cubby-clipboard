@@ -15,6 +15,7 @@ import {
   Type,
 } from 'lucide-react';
 import { ClipboardItem } from '../types';
+import { NOTE_CHAR_LIMIT } from '../constants';
 import { ImageTextViewer } from './ImageTextViewer';
 import { OcrLayout } from '../utils/ocrSelection';
 import {
@@ -367,6 +368,7 @@ export function ClipPreview({
                 event.currentTarget.blur();
               }
             }}
+            maxLength={NOTE_CHAR_LIMIT}
             placeholder="Add a note to find this later"
             aria-label="Note"
             className="min-w-0 flex-1 border-b border-transparent bg-transparent pb-0.5 text-[11px] text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-primary/45"
