@@ -167,6 +167,61 @@ impl IndexState {
         }
 
         self.free_slots.push(slot);
+        self.compact_if_sparse();
+    }
+
+    /// Reclaim slots once most of them are holes.
+    ///
+    /// A freed slot still costs its `Option<IndexedDocument>` header in the
+    /// `documents` vector plus four bytes in `free_slots`, and nothing ever
+    /// returned that memory: a history that peaked at 100k clips and was then
+    /// trimmed to 1k kept 100k slot headers, which is the per-clip budget
+    /// missed by an order of magnitude in the steady state after a cleanup.
+    ///
+    /// Truncating the tail would not help, because retention prunes the
+    /// *oldest* clips and those hold the *lowest* slots. So this compacts
+    /// properly. It is O(documents + postings), which is why it only runs when
+    /// the majority of slots are free -- and because new slots are assigned in
+    /// increasing order of old slot, the remap is monotonic and posting lists
+    /// stay sorted without re-sorting them.
+    fn compact_if_sparse(&mut self) {
+        /// Below this, compaction is not worth the churn -- and it is deliberately
+        /// small, because the threshold is also the floor on how many empty slots
+        /// can be left behind. At 256 a trimmed history settled at 249 slots for
+        /// 10 clips; at 16 it keeps shrinking until the waste is negligible.
+        const MIN_SLOTS: usize = 16;
+
+        if self.documents.len() < MIN_SLOTS || self.free_slots.len() * 2 <= self.documents.len() {
+            return;
+        }
+
+        let mut remap = vec![None; self.documents.len()];
+        let mut compacted = Vec::with_capacity(self.slots.len());
+        for (old_slot, entry) in self.documents.drain(..).enumerate() {
+            if let Some(entry) = entry {
+                remap[old_slot] = Some(compacted.len() as Slot);
+                compacted.push(Some(entry));
+            }
+        }
+        self.documents = compacted;
+
+        for slot in self.slots.values_mut() {
+            *slot = remap[*slot as usize].expect("a live document keeps its slot");
+        }
+
+        for postings in self.postings.values_mut() {
+            postings.retain_mut(|slot| match remap[*slot as usize] {
+                Some(new_slot) => {
+                    *slot = new_slot;
+                    true
+                }
+                None => false,
+            });
+        }
+
+        self.free_slots.clear();
+        self.documents.shrink_to_fit();
+        self.free_slots.shrink_to_fit();
     }
 
     fn matches(&self, query: &str) -> HashSet<String> {
@@ -635,6 +690,80 @@ mod tests {
         let ellipsis =
             SearchDocument::new("some longer body text", "some longer…", None, None, None);
         assert_eq!(ellipsis.preview, "some longer…");
+    }
+
+    /// Trimming a large history must give the memory back.
+    ///
+    /// Retention prunes the oldest clips, which hold the lowest slots, so this
+    /// deletes from the front -- the case tail-truncation would miss.
+    #[test]
+    fn slots_are_reclaimed_after_a_large_history_is_trimmed() {
+        let mut state = IndexState::default();
+        for index in 0..1_000 {
+            state.insert(
+                format!("id{index}"),
+                SearchDocument::new(&format!("clip body number {index}"), "", None, None, None),
+            );
+        }
+        assert_eq!(state.documents.len(), 1_000);
+
+        // Delete the oldest 990, the way retention would.
+        for index in 0..990 {
+            state.remove(&format!("id{index}"));
+        }
+
+        assert_eq!(state.len(), 10, "ten clips should remain");
+        assert!(
+            state.documents.len() <= 32,
+            "slots were not reclaimed: {} slots for 10 clips",
+            state.documents.len()
+        );
+        assert!(state.free_slots.len() <= 32);
+
+        // The survivors are still findable, and the deleted ones are gone.
+        assert!(state.matches("number 995").contains("id995"));
+        assert!(state.matches("number 100").is_empty());
+
+        // Postings must not reference a slot that no longer exists.
+        for slots in state.postings.values() {
+            for slot in slots {
+                assert!(
+                    (*slot as usize) < state.documents.len()
+                        && state.documents[*slot as usize].is_some(),
+                    "posting points at a dead slot"
+                );
+            }
+            let mut sorted = slots.clone();
+            sorted.sort_unstable();
+            assert_eq!(*slots, sorted, "compaction must preserve sorted postings");
+        }
+    }
+
+    /// Compaction rewrites every slot, so the id -> slot map has to move with
+    /// it or lookups silently return the wrong clip.
+    #[test]
+    fn compaction_keeps_id_lookups_pointing_at_the_right_document() {
+        let mut state = IndexState::default();
+        for index in 0..600 {
+            state.insert(
+                format!("id{index}"),
+                SearchDocument::new(&format!("unique marker {index} here"), "", None, None, None),
+            );
+        }
+        for index in 0..500 {
+            state.remove(&format!("id{index}"));
+        }
+
+        for index in 500..600 {
+            let id = format!("id{index}");
+            let document = state
+                .document(&id)
+                .expect("survivor should still be indexed");
+            assert!(
+                document.contains(&format!("unique marker {index}")),
+                "id {id} resolved to the wrong document after compaction"
+            );
+        }
     }
 
     #[test]
