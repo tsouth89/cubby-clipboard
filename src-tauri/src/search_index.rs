@@ -44,9 +44,10 @@ impl SearchDocument {
         notes: Option<&str>,
         source_app: Option<&str>,
     ) -> Self {
+        let content = normalize(content);
         Self {
-            content: normalize(content),
-            preview: normalize(preview),
+            preview: redundant_preview(&content, &normalize(preview)),
+            content,
             ocr: normalize(ocr.unwrap_or_default()),
             notes: normalize(notes.unwrap_or_default()),
             source_app: source_app
@@ -71,71 +72,144 @@ impl SearchDocument {
     }
 }
 
+/// A document plus the id it was indexed under.
+struct IndexedDocument {
+    id: Arc<str>,
+    document: SearchDocument,
+}
+
+/// Slot number for a document. Postings store these rather than clip ids.
+///
+/// A `HashSet<Arc<str>>` per trigram costs a 16-byte fat pointer plus the set's
+/// own per-slot overhead for every posting, and a clip of ordinary prose
+/// produces well over a hundred trigrams -- which made postings, not the stored
+/// text, the dominant cost of the index. A `u32` in a sorted `Vec` is four bytes
+/// with no per-entry overhead, and intersects faster besides.
+type Slot = u32;
+
 #[derive(Default)]
 struct IndexState {
-    documents: HashMap<Arc<str>, SearchDocument>,
-    postings: HashMap<String, HashSet<Arc<str>>>,
+    /// Indexed by [`Slot`]. A removed document leaves a hole, which the next
+    /// insert reuses, so slots stay dense and postings stay small.
+    documents: Vec<Option<IndexedDocument>>,
+    slots: HashMap<Arc<str>, Slot>,
+    free_slots: Vec<Slot>,
+    /// Sorted, deduplicated slots per trigram. Sorted so intersection is a
+    /// linear merge rather than a hash lookup per candidate.
+    postings: HashMap<Box<str>, Vec<Slot>>,
 }
 
 impl IndexState {
+    fn document(&self, id: &str) -> Option<&SearchDocument> {
+        let slot = *self.slots.get(id)?;
+        self.documents
+            .get(slot as usize)
+            .and_then(Option::as_ref)
+            .map(|entry| &entry.document)
+    }
+
+    fn documents(&self) -> impl Iterator<Item = (&Arc<str>, &SearchDocument)> {
+        self.documents
+            .iter()
+            .flatten()
+            .map(|entry| (&entry.id, &entry.document))
+    }
+
+    fn len(&self) -> usize {
+        self.slots.len()
+    }
+
     fn insert(&mut self, id: String, document: SearchDocument) {
         self.remove(&id);
+
         let id: Arc<str> = Arc::from(id);
+        let slot = match self.free_slots.pop() {
+            Some(slot) => slot,
+            None => {
+                self.documents.push(None);
+                (self.documents.len() - 1) as Slot
+            }
+        };
+
         for trigram in document.trigrams() {
-            self.postings.entry(trigram).or_default().insert(id.clone());
+            let postings = self.postings.entry(trigram.into_boxed_str()).or_default();
+            // Kept sorted on insert so `matches` can merge without sorting.
+            if let Err(position) = postings.binary_search(&slot) {
+                postings.insert(position, slot);
+            }
         }
-        self.documents.insert(id, document);
+
+        self.slots.insert(id.clone(), slot);
+        self.documents[slot as usize] = Some(IndexedDocument { id, document });
     }
 
     fn remove(&mut self, id: &str) {
-        let Some(document) = self.documents.remove(id) else {
+        let Some(slot) = self.slots.remove(id) else {
             return;
         };
-        for trigram in document.trigrams() {
-            let remove_posting = self.postings.get_mut(&trigram).is_some_and(|ids| {
-                ids.remove(id);
-                ids.is_empty()
-            });
-            if remove_posting {
-                self.postings.remove(&trigram);
+        let Some(entry) = self.documents[slot as usize].take() else {
+            return;
+        };
+
+        for trigram in entry.document.trigrams() {
+            let empty = self
+                .postings
+                .get_mut(trigram.as_str())
+                .is_some_and(|slots| {
+                    if let Ok(position) = slots.binary_search(&slot) {
+                        slots.remove(position);
+                    }
+                    slots.is_empty()
+                });
+            if empty {
+                self.postings.remove(trigram.as_str());
             }
         }
+
+        self.free_slots.push(slot);
     }
 
     fn matches(&self, query: &str) -> HashSet<String> {
         let query = normalize(query);
         let query_trigrams = trigrams(&query);
         if query_trigrams.is_empty() {
+            // Queries shorter than a trigram cannot use the index at all.
             return self
-                .documents
-                .iter()
+                .documents()
                 .filter(|(_, document)| document.contains(&query))
                 .map(|(id, _)| id.to_string())
                 .collect();
         }
 
-        let mut postings = query_trigrams
-            .iter()
-            .map(|trigram| self.postings.get(trigram))
-            .collect::<Vec<_>>();
-        if postings.iter().any(|posting| posting.is_none()) {
-            return HashSet::new();
-        }
-        postings.sort_by_key(|posting| posting.map_or(0, HashSet::len));
-
-        let mut candidates = postings[0].cloned().unwrap_or_default().clone();
-        for posting in postings.into_iter().skip(1).flatten() {
-            candidates.retain(|id| posting.contains(id));
-            if candidates.is_empty() {
-                break;
+        let mut postings = Vec::with_capacity(query_trigrams.len());
+        for trigram in &query_trigrams {
+            match self.postings.get(trigram.as_str()) {
+                // A trigram nothing has means nothing can match all of them.
+                None => return HashSet::new(),
+                Some(slots) => postings.push(slots.as_slice()),
             }
         }
-        candidates.retain(|id| {
-            self.documents
-                .get(id)
-                .is_some_and(|document| document.contains(&query))
-        });
-        candidates.into_iter().map(|id| id.to_string()).collect()
+        // Start from the rarest trigram so the first intersection is as small
+        // as possible.
+        postings.sort_by_key(|slots| slots.len());
+
+        let mut candidates = postings[0].to_vec();
+        for slots in postings.into_iter().skip(1) {
+            candidates = intersect_sorted(&candidates, slots);
+            if candidates.is_empty() {
+                return HashSet::new();
+            }
+        }
+
+        // Trigram agreement is necessary but not sufficient -- the trigrams of
+        // a query can all be present in a document in the wrong order -- so the
+        // surviving candidates are still checked for the literal substring.
+        candidates
+            .into_iter()
+            .filter_map(|slot| self.documents[slot as usize].as_ref())
+            .filter(|entry| entry.document.contains(&query))
+            .map(|entry| entry.id.to_string())
+            .collect()
     }
 }
 
@@ -240,7 +314,7 @@ impl SearchIndex {
             // cannot slip in between the check and the publish and get lost.
             let mut state = self.state.write();
             if self.generation.load(Ordering::Acquire) == generation {
-                let count = next.documents.len();
+                let count = next.len();
                 *state = Some(next);
                 log::info!("SEARCH: Built encrypted-safe in-memory index for {count} clips");
                 return Ok(());
@@ -263,7 +337,7 @@ impl SearchIndex {
             return Vec::new();
         };
         let mut counts: HashMap<&str, usize> = HashMap::new();
-        for document in state.documents.values() {
+        for (_, document) in state.documents() {
             if let Some(app) = document.source_app.as_deref() {
                 *counts.entry(app).or_default() += 1;
             }
@@ -288,8 +362,7 @@ impl SearchIndex {
         let state = self.state.read();
         state.as_ref().map_or_else(HashSet::new, |state| {
             state
-                .documents
-                .iter()
+                .documents()
                 .filter(|(_, document)| {
                     document
                         .source_app
@@ -312,7 +385,7 @@ impl SearchIndex {
     ) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         if let Some(state) = self.state.write().as_mut() {
-            let existing = state.documents.get(id).cloned().unwrap_or_default();
+            let existing = state.document(id).cloned().unwrap_or_default();
             let searchable_content = if clip_type != "image" {
                 String::from_utf8_lossy(content).into_owned()
             } else {
@@ -337,7 +410,7 @@ impl SearchIndex {
     pub fn update_notes(&self, id: &str, notes: &str) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         if let Some(state) = self.state.write().as_mut() {
-            if let Some(mut document) = state.documents.get(id).cloned() {
+            if let Some(mut document) = state.document(id).cloned() {
                 document.notes = normalize(notes);
                 state.insert(id.to_string(), document);
             }
@@ -347,7 +420,7 @@ impl SearchIndex {
     pub fn update_ocr(&self, id: &str, ocr: &str) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         if let Some(state) = self.state.write().as_mut() {
-            if let Some(mut document) = state.documents.get(id).cloned() {
+            if let Some(mut document) = state.document(id).cloned() {
                 document.ocr = normalize(ocr);
                 state.insert(id.to_string(), document);
             }
@@ -369,6 +442,42 @@ impl SearchIndex {
 
 fn normalize(value: &str) -> String {
     value.to_lowercase()
+}
+
+/// Drop a preview that the content already contains.
+///
+/// `text_preview` is a truncated copy of the clip's own text, so for a text
+/// clip it is a substring of `content` and storing it doubles the resident cost
+/// of the clip while adding nothing searchable: both `contains` and `trigrams`
+/// take the union of the fields, and the union with a subset is the set.
+///
+/// Image clips are the case that keeps this field alive at all -- their content
+/// is empty and the preview is the only text they have -- as is any preview
+/// that is not a clean prefix, such as one with an ellipsis appended.
+fn redundant_preview(content: &str, preview: &str) -> String {
+    if preview.is_empty() || content.contains(preview) {
+        String::new()
+    } else {
+        preview.to_string()
+    }
+}
+
+/// Linear merge of two sorted, deduplicated slot lists.
+fn intersect_sorted(left: &[Slot], right: &[Slot]) -> Vec<Slot> {
+    let mut result = Vec::with_capacity(left.len().min(right.len()));
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() && j < right.len() {
+        match left[i].cmp(&right[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                result.push(left[i]);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    result
 }
 
 fn trigrams(value: &str) -> HashSet<String> {
@@ -399,6 +508,166 @@ mod tests {
             state.matches("CONFIRMATION 4j7"),
             HashSet::from(["one".to_string()])
         );
+    }
+
+    /// The index must return exactly what a brute-force scan would.
+    ///
+    /// Trigram filtering is an optimisation over "check every document", so any
+    /// disagreement is a bug -- a missing hit means a clip the user cannot find.
+    #[test]
+    fn index_agrees_with_a_brute_force_scan() {
+        let corpus = [
+            ("a", "Release confirmation 4J7K for the Wilmore office"),
+            ("b", "release notes: clipboard history and paste engine"),
+            ("c", "unrelated content about gardening"),
+            ("d", "CONFIRMATION of receipt, reference 4J7K"),
+            ("e", "café · Ελληνικά · 日本語 · emoji 😀 tail"),
+            ("f", ""),
+        ];
+
+        let mut state = IndexState::default();
+        for (id, text) in corpus {
+            state.insert(
+                id.to_string(),
+                SearchDocument::new(text, "", None, None, None),
+            );
+        }
+
+        for query in [
+            "release",
+            "RELEASE",
+            "4j7k",
+            "confirmation",
+            "clipboard history",
+            "日本語",
+            "café",
+            "😀",
+            "gardening",
+            "nothing matches this",
+            "ab",
+            "",
+            "  ",
+        ] {
+            let normalized = normalize(query);
+            let expected: HashSet<String> = corpus
+                .iter()
+                .filter(|(_, text)| normalize(text).contains(&normalized))
+                .map(|(id, _)| (*id).to_string())
+                .collect();
+            assert_eq!(
+                state.matches(query),
+                expected,
+                "index and scan disagree for {query:?}"
+            );
+        }
+    }
+
+    /// Slots are reused after a removal, so a stale posting would make a new
+    /// clip answer the deleted clip's queries.
+    #[test]
+    fn a_reused_slot_does_not_inherit_the_removed_clips_matches() {
+        let mut state = IndexState::default();
+        state.insert(
+            "first".to_string(),
+            SearchDocument::new("distinctive alpha payload", "", None, None, None),
+        );
+        assert!(state.matches("distinctive").contains("first"));
+
+        state.remove("first");
+        assert!(state.matches("distinctive").is_empty());
+        assert_eq!(state.free_slots.len(), 1, "the slot should be reusable");
+
+        state.insert(
+            "second".to_string(),
+            SearchDocument::new("completely separate bravo text", "", None, None, None),
+        );
+        assert!(state.matches("bravo").contains("second"));
+        assert!(
+            state.matches("distinctive").is_empty(),
+            "the reused slot answered the removed clip's query"
+        );
+        assert_eq!(state.len(), 1);
+    }
+
+    /// Removing every document must leave no postings behind, or the index
+    /// grows monotonically across a long session of captures and deletions.
+    #[test]
+    fn postings_are_emptied_when_documents_go_away() {
+        let mut state = IndexState::default();
+        for index in 0..8 {
+            state.insert(
+                format!("id{index}"),
+                SearchDocument::new(&format!("payload number {index}"), "", None, None, None),
+            );
+        }
+        assert!(!state.postings.is_empty());
+
+        for index in 0..8 {
+            state.remove(&format!("id{index}"));
+        }
+        assert!(state.postings.is_empty(), "postings leaked after removal");
+        assert_eq!(state.len(), 0);
+    }
+
+    #[test]
+    fn a_preview_the_content_already_holds_is_not_stored_twice() {
+        // Text clip: the preview is a truncation of the content.
+        let document = SearchDocument::new(
+            "the full clip text goes here",
+            "the full clip",
+            None,
+            None,
+            None,
+        );
+        assert!(document.preview.is_empty(), "redundant preview was stored");
+        assert!(
+            document.contains("the full clip"),
+            "still searchable via content"
+        );
+
+        // Image clip: content is empty, so the preview is the only text there
+        // is and must be kept.
+        let image = SearchDocument::new("", "Screenshot of the invoice", None, None, None);
+        assert_eq!(image.preview, "screenshot of the invoice");
+        assert!(image.contains("invoice"));
+
+        // A preview that is not a clean substring is kept as-is.
+        let ellipsis =
+            SearchDocument::new("some longer body text", "some longer…", None, None, None);
+        assert_eq!(ellipsis.preview, "some longer…");
+    }
+
+    #[test]
+    fn sorted_intersection_keeps_only_common_slots() {
+        assert_eq!(intersect_sorted(&[1, 3, 5, 7], &[3, 4, 5, 9]), vec![3, 5]);
+        assert_eq!(intersect_sorted(&[], &[1, 2]), Vec::<Slot>::new());
+        assert_eq!(intersect_sorted(&[1, 2], &[]), Vec::<Slot>::new());
+        assert_eq!(intersect_sorted(&[1, 2, 3], &[1, 2, 3]), vec![1, 2, 3]);
+        assert_eq!(intersect_sorted(&[1, 2], &[3, 4]), Vec::<Slot>::new());
+    }
+
+    #[test]
+    fn postings_stay_sorted_and_deduplicated_across_reinserts() {
+        let mut state = IndexState::default();
+        for index in 0..5 {
+            state.insert(
+                format!("id{index}"),
+                SearchDocument::new("shared trigram body", "", None, None, None),
+            );
+        }
+        // Re-insert an existing id: the slot is reused, not duplicated.
+        state.insert(
+            "id2".to_string(),
+            SearchDocument::new("shared trigram body", "", None, None, None),
+        );
+
+        for slots in state.postings.values() {
+            let mut sorted = slots.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(*slots, sorted, "postings must stay sorted and unique");
+        }
+        assert_eq!(state.matches("shared trigram").len(), 5);
     }
 
     #[test]
