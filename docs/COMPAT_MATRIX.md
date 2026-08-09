@@ -37,7 +37,7 @@ stops at the clipboard boundary rather than standing up an app instance.
 | `packaged_app` | Notepad (Store-packaged on Windows 11) | Launched through the `notepad.exe` stub, which hands off to another process. |
 | `explorer` | File Explorer | The file-payload row: see below. |
 | `terminal` | PowerShell in Windows Terminal | Needs `wt.exe`. |
-| `browser` | Edge, Chrome, or Firefox | Runs against a generated local page with a labelled textarea. |
+| `browser` | Edge, then Chrome | Runs against a generated local page with a labelled textarea. Chromium-based only; see below. |
 | `ide` | VS Code, then Notepad++ | Skips when neither exposes an automatable control. |
 | `office` | Word, then WordPad | Opens an RTF document. |
 | `remote_session` | The owned `EDIT` control, driven with `PasteStrategy::RemoteSession` | Exercises the remote-session timing path on any machine. |
@@ -80,6 +80,12 @@ These were all found the hard way; changing them will silently weaken the suite.
   line, which would leave the row driving an unrelated window.
 - **Chromium needs `--force-renderer-accessibility`.** Page content is absent
   from the automation tree without it.
+- **The browser row is Chromium-only, deliberately.** `--user-data-dir` and
+  `--force-renderer-accessibility` are Chromium flags. Firefox uses `-profile`
+  and initialises accessibility on demand, so handing it this argument list
+  would let an existing Firefox session take the URL and leave the row driving
+  the wrong window. Adding Firefox means giving it its own arguments and
+  verifying them, not appending to the candidate list.
 - **Activate, then focus, then paste.** Activating a window can move focus
   inside it, so focusing a control first is silently undone.
 - **The terminal row uses PowerShell, not `cmd.exe`.** `cmd`'s `set /p` reads
@@ -109,8 +115,13 @@ because the two obvious approaches each fail on half the rows.
   already gone.
 
 So each row closes its window and then terminates only processes of that
-executable that did not exist before the row started. Two rows deliberately opt
-out of the terminate half:
+executable that did not exist before the row started. This happens in the
+launched application's `Drop`, not at the end of the driving function: a row
+that fails early -- no window appeared, no automatable control -- is the one
+most likely to have left something on screen, and cleanup written after the
+last `?` would skip exactly those cases.
+
+Two rows deliberately opt out of the terminate half:
 
 - **Browsers.** A browser runs a process per renderer and spawns them
   constantly, so killing every `msedge.exe` that appeared during the run would

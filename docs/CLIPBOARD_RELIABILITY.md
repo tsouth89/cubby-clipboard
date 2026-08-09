@@ -129,7 +129,7 @@ name for content Cubby cannot retain durably.
 The delayed-rendering owner is retired deliberately rather than just destroyed:
 its payloads are dropped, clipboard ownership is released, and the message queue
 is drained before the next fixture is written. Skipping any of that reintroduces
-#164, where the next writer's `EmptyClipboard` made Windows send
+issue #164, where the next writer's `EmptyClipboard` made Windows send
 `WM_RENDERALLFORMATS` to the still-owning window, whose handler opened and
 closed the clipboard on the same thread -- closing the one `clipboard_rs` was
 using and failing the `virtual_only` fixture with `ERROR_CLIPBOARD_NOT_OPEN`

@@ -440,7 +440,13 @@ mod windows_matrix {
         }
         let entries = std::fs::read_dir(directory).ok()?;
         for entry in entries.flatten() {
-            if entry.file_type().ok()?.is_dir() {
+            // `?` here would abandon the entire search on the first entry whose
+            // type cannot be read -- a protected or vanished item -- and report
+            // the application as not installed.
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
                 if let Some(found) = search_shallow(&entry.path(), name, depth - 1) {
                     return Some(found);
                 }
@@ -758,10 +764,37 @@ mod windows_matrix {
     struct LaunchedApp {
         child: Option<Child>,
         keep: bool,
+        /// Executable name, for finding processes this run created.
+        exe_name: String,
+        /// Processes of `exe_name` that existed before the launch. Anything not
+        /// in this list is ours to clean up.
+        pids_before: Vec<u32>,
+        /// Whether leftover processes may be terminated. False for browsers and
+        /// for windows owned by a long-running host.
+        terminate_leftovers: bool,
+        /// The window this row drove, once it has been resolved.
+        window: std::cell::Cell<Option<isize>>,
     }
 
     impl LaunchedApp {
         fn spawn(path: &Path, args: &[&str], keep: bool) -> Result<Self, String> {
+            Self::spawn_tracked(path, args, keep, false)
+        }
+
+        fn spawn_tracked(
+            path: &Path,
+            args: &[&str],
+            keep: bool,
+            terminate_leftovers: bool,
+        ) -> Result<Self, String> {
+            let exe_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string();
+            // Snapshot before spawning, so cleanup can tell this run's
+            // processes from ones the user already had open.
+            let pids_before = pids_for_exe(&exe_name);
             let child = Command::new(path)
                 .args(args)
                 .spawn()
@@ -769,22 +802,52 @@ mod windows_matrix {
             Ok(Self {
                 child: Some(child),
                 keep,
+                exe_name,
+                pids_before,
+                terminate_leftovers,
+                window: std::cell::Cell::new(None),
             })
         }
 
         fn pid(&self) -> u32 {
             self.child.as_ref().map(Child::id).unwrap_or_default()
         }
+
+        /// Record the window to close on cleanup. Set as soon as the row
+        /// resolves it, so a later failure still closes it.
+        fn track_window(&self, hwnd: HWND) {
+            self.window.set(Some(hwnd.0 as isize));
+        }
     }
 
+    /// Cleanup lives in `Drop` rather than at the end of the happy path.
+    ///
+    /// The earlier version closed the window and swept leftover processes after
+    /// the last `?` in the driving function, so every early return -- a window
+    /// that never appeared, an app with no automatable control -- skipped it and
+    /// left the application running. Cleanup that only happens when the row
+    /// succeeds is exactly backwards: a failing row is the one most likely to
+    /// have left something on screen.
     impl Drop for LaunchedApp {
         fn drop(&mut self) {
             if self.keep {
                 return;
             }
+
+            if let Some(hwnd) = self.window.get() {
+                close_window(HWND(hwnd as *mut std::ffi::c_void));
+            }
+
             if let Some(mut child) = self.child.take() {
                 let _ = child.kill();
                 let _ = child.wait();
+            }
+
+            if self.terminate_leftovers {
+                // Give the window a moment to close on its own before
+                // resorting to terminating whatever is left.
+                thread::sleep(Duration::from_millis(400));
+                kill_new_processes(&self.exe_name, &self.pids_before);
             }
         }
     }
@@ -1049,9 +1112,8 @@ mod windows_matrix {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default();
-        let pids_before = pids_for_exe(exe_name);
 
-        let launched = match LaunchedApp::spawn(path, args, keep) {
+        let launched = match LaunchedApp::spawn_tracked(path, args, keep, terminate_leftovers) {
             Ok(launched) => launched,
             Err(error) => {
                 return DriveOutcome::Failed(vec![failure(
@@ -1117,6 +1179,9 @@ mod windows_matrix {
             Ok(resolved) => resolved,
             Err(error) => return DriveOutcome::NotAutomatable(error),
         };
+        // From here on the window is closed by `LaunchedApp::drop`, whichever
+        // way this function returns.
+        launched.track_window(hwnd);
 
         let paste_result = (|| -> Result<(), String> {
             // Activating a window, focusing a control inside it, and having the
@@ -1176,23 +1241,6 @@ mod windows_matrix {
             Ok(()) => checks += 1,
             Err(error) => {
                 failures.push(failure(class, app, Format::UnicodeText, Step::Paste, error))
-            }
-        }
-
-        // Leaving windows behind was a real defect in the first version of this
-        // harness. Killing the spawned child is not enough: Windows 11 Notepad
-        // and every browser hand the launch off to another process and exit, so
-        // the child we hold is already gone. Closing the window is not enough
-        // either, because an application asked to close with text pasted into
-        // an unsaved document puts up a save prompt and stays on screen.
-        //
-        // So: ask the window to close, then terminate any process of this
-        // executable that did not exist before the row started.
-        if !keep {
-            close_window(hwnd);
-            if terminate_leftovers {
-                thread::sleep(Duration::from_millis(400));
-                kill_new_processes(exe_name, &pids_before);
             }
         }
 
@@ -1272,7 +1320,14 @@ mod windows_matrix {
     /// Browsers refuse top-level `data:` navigation, so the row writes a real
     /// HTML file with a textarea and opens it over `file://`.
     fn run_browser_row(class: AppClass, options: &Options) -> RowResult {
-        let candidates = ["msedge.exe", "chrome.exe", "firefox.exe"];
+        // Chromium-based only. The flags below (`--user-data-dir`,
+        // `--force-renderer-accessibility`) are Chromium's; Firefox uses
+        // `-profile` and initialises accessibility on demand instead, so
+        // passing these to it would let an existing Firefox session take the
+        // URL and leave the row driving somebody else's window. Adding Firefox
+        // means giving it its own argument list and verifying it, not extending
+        // this array.
+        let candidates = ["msedge.exe", "chrome.exe"];
         let mut looked_for = Vec::new();
         let mut chosen = None;
         for executable in candidates {
