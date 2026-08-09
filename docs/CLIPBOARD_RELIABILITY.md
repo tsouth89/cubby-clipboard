@@ -126,21 +126,23 @@ sleep. The virtual-file fixtures advertise `FileGroupDescriptorW`; their text
 fallback is deliberately not captured because it is normally a path or display
 name for content Cubby cannot retain durably.
 
-Known flake: the `virtual_only` fixture intermittently fails to publish with
-`OSError(1418): Thread does not have a clipboard open`, and the run then times
-out having observed six of seven fixtures. It reproduces at roughly one run in
-fifteen on a busy machine, both before and after the delayed-rendering fixtures
-were added, so a single red run is not by itself a capture regression. See #164
-for the suspected cause -- the delayed writer's
-`WM_RENDERALLFORMATS` handler opening the clipboard on the same thread as an
-in-flight `clipboard_rs` write. Re-run the suite before investigating, and treat
-a repeatable failure or any non-zero `read_failures` as a genuine defect.
+The delayed-rendering owner is retired deliberately rather than just destroyed:
+its payloads are dropped, clipboard ownership is released, and the message queue
+is drained before the next fixture is written. Skipping any of that reintroduces
+#164, where the next writer's `EmptyClipboard` made Windows send
+`WM_RENDERALLFORMATS` to the still-owning window, whose handler opened and
+closed the clipboard on the same thread -- closing the one `clipboard_rs` was
+using and failing the `virtual_only` fixture with `ERROR_CLIPBOARD_NOT_OPEN`
+(1418) roughly once every fifteen runs. The handler now also returns without
+touching the clipboard when it has nothing left to render.
 
 This suite proves the local Windows clipboard can materialize supported payloads
 without normalization or format loss and can reject unsupported file payloads
-without confusing them for stored history. Application-specific compatibility
-still belongs in the manual matrix below; passing the fixtures does not claim
-that Office, browsers, remote clients, or elevated targets have been validated.
+without confusing them for stored history. Whether real applications accept
+those payloads is a separate question, answered by the automated compatibility
+matrix in `docs/COMPAT_MATRIX.md`; passing the fixtures on its own does not
+claim that Office, browsers, remote clients, or elevated targets have been
+validated.
 
 Production materialization uses the same bounded retry margin: ten attempts with
 exponential backoff capped at 64 ms, allowing up to 319 ms for a clipboard owner
