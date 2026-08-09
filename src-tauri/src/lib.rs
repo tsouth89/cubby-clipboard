@@ -81,6 +81,9 @@ pub fn run_app() {
         .block_on(async { Database::new(&db_path_str).await })
         .unwrap_or_else(|error| panic!("Cubby storage initialization failed: {error}"));
 
+    // Carried into `setup`: the migration below runs before the log plugin is
+    // installed, so its failure message has nowhere to go until then.
+    let mut dedup_error: Option<String> = None;
     rt.block_on(async {
         db.migrate().await.expect("Cubby database migration failed");
         let migrated = commands::migrate_encrypted_storage(&db)
@@ -94,12 +97,17 @@ pub fn run_app() {
             .unwrap_or_else(|error| panic!("Cubby clipboard-format migration failed: {error}"));
 
         // Last, because the two migrations above rewrite content_hash and can
-        // create the duplicates this collapses. Logged rather than fatal: a
+        // create the duplicates this collapses. Reported rather than fatal: a
         // failure leaves the database exactly as it was on the previous
         // version, which still works, and refusing to start over a hardening
         // step would be a worse outcome than running unconstrained.
+        //
+        // The message is carried out to `setup` rather than logged here. This
+        // runs before the log plugin is installed, so a `log::error!` at this
+        // point goes nowhere -- which would have made "report the failure" a
+        // promise the code did not keep.
         if let Err(error) = db.enforce_content_hash_uniqueness().await {
-            log::error!("STORAGE: Could not enforce unique clip hashes: {error}");
+            dedup_error = Some(error);
         }
     });
 
@@ -248,6 +256,13 @@ pub fn run_app() {
         })
         .setup(move |app| {
             log::info!("Cubby starting...");
+
+            // Deferred from before the log plugin existed, so a failed
+            // uniqueness migration is actually visible rather than silently
+            // dropped on the floor.
+            if let Some(error) = dedup_error.take() {
+                log::error!("STORAGE: Could not enforce unique clip hashes: {error}");
+            }
 
             // Initialize Settings Manager
             let db_for_settings = db_arc.clone();

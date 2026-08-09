@@ -97,18 +97,22 @@ impl Database {
     /// reconciliation rolls back and the old non-unique index is left in place:
     /// an unconstrained database that works beats a half-migrated one.
     pub async fn enforce_content_hash_uniqueness(&self) -> Result<u64, String> {
-        let duplicated: Vec<String> = sqlx::query_scalar(
-            "SELECT content_hash FROM clips GROUP BY content_hash HAVING COUNT(*) > 1",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| format!("could not look for duplicate clips: {error}"))?;
-
         let mut transaction = self
             .pool
             .begin()
             .await
             .map_err(|error| format!("could not start the deduplication: {error}"))?;
+
+        // Read the duplicate list inside the transaction. Read outside it, a
+        // write landing between the snapshot and `CREATE UNIQUE INDEX` would
+        // leave a duplicate the reconciliation never saw, failing the index and
+        // leaving the database unconstrained for that run.
+        let duplicated: Vec<String> = sqlx::query_scalar(
+            "SELECT content_hash FROM clips GROUP BY content_hash HAVING COUNT(*) > 1",
+        )
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|error| format!("could not look for duplicate clips: {error}"))?;
 
         let mut orphaned_images: Vec<String> = Vec::new();
         let mut removed = 0_u64;
@@ -237,6 +241,12 @@ impl Database {
         }
 
         if removed > 0 {
+            // The in-memory index is built from `clips`, so entries for the
+            // rows just deleted would otherwise survive as hits pointing at
+            // uuids that no longer exist. `remove_duplicate_clips` invalidates
+            // for the same reason. At startup the index has not been built yet
+            // and this is a no-op; it matters for any later caller.
+            self.search_index.invalidate();
             log::info!("STORAGE: Removed {removed} duplicate clips before enforcing unique hashes");
         }
         Ok(removed)
