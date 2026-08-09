@@ -483,7 +483,9 @@ fn capture_clipboard_update(
     // as an image rather than as an unreliable file reference.
     let has_file_payload = clipboard_has_file_payload_format();
     let has_image_payload = clipboard_has_image_format();
-    if has_file_payload && !has_image_payload {
+    if crate::clipboard_policy::classify_file_payload(has_file_payload, has_image_payload)
+        == crate::clipboard_policy::FilePayloadPolicy::IgnoreFilePayload
+    {
         note_clipboard_event(sequence);
         log::debug!(
             "CLIPBOARD: Sequence {} contained a file payload; intentionally ignoring it",

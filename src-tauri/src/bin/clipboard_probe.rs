@@ -5,29 +5,37 @@ fn main() {
 }
 
 #[cfg(target_os = "windows")]
+#[path = "../clipboard_policy.rs"]
+mod clipboard_policy;
+
+#[cfg(target_os = "windows")]
 mod windows_probe {
     use clipboard_rs::common::RustImage;
     use clipboard_rs::{Clipboard, ClipboardContent, ClipboardContext};
     use serde::Serialize;
     use sha2::{Digest, Sha256};
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::env;
     use std::process::{Child, Command};
     use std::sync::{Mutex, OnceLock};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-    use windows::core::w;
-    use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Foundation::{
+        GlobalFree, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
+    };
     use windows::Win32::System::DataExchange::{
-        AddClipboardFormatListener, CloseClipboard, EnumClipboardFormats, GetClipboardFormatNameW,
-        GetClipboardSequenceNumber, OpenClipboard, RemoveClipboardFormatListener,
+        AddClipboardFormatListener, CloseClipboard, EmptyClipboard, EnumClipboardFormats,
+        GetClipboardFormatNameW, GetClipboardSequenceNumber, IsClipboardFormatAvailable,
+        OpenClipboard, RegisterClipboardFormatW, RemoveClipboardFormatListener, SetClipboardData,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-        PostQuitMessage, RegisterClassW, SetTimer, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
-        CW_USEDEFAULT, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE, WM_DESTROY,
-        WM_TIMER, WNDCLASSW,
+        PeekMessageW, PostQuitMessage, RegisterClassW, SetTimer, TranslateMessage, CS_HREDRAW,
+        CS_VREDRAW, CW_USEDEFAULT, MSG, PM_REMOVE, WINDOW_EX_STYLE, WINDOW_STYLE,
+        WM_CLIPBOARDUPDATE, WM_DESTROY, WM_RENDERALLFORMATS, WM_RENDERFORMAT, WM_TIMER, WNDCLASSW,
     };
 
     const TIMER_ID: usize = 1;
@@ -35,11 +43,24 @@ mod windows_probe {
     const RICH_TEXT_FORMAT: &str = "Rich Text Format";
     const HTML_FORMAT: &str = "HTML Format";
     const BINARY_FORMAT: &str = "Cubby Probe Binary";
+    const FILE_GROUP_DESCRIPTOR_W: &str = "FileGroupDescriptorW";
+    const DELAYED_IMAGE_TAG: &str = "Cubby Probe Delayed Image";
+    const VIRTUAL_ONLY_TAG: &str = "Cubby Probe Virtual Only";
+    const VIRTUAL_MIXED_TAG: &str = "Cubby Probe Virtual Mixed";
     const RICH_MARKER: &str = "CUBBY-FIXTURE-RICH\r\n  exact whitespace  ";
     const FILES_MARKER: &str = "CUBBY-FIXTURE-FILES";
     const BINARY_MARKER: &str = "CUBBY-FIXTURE-BINARY";
+    const DELAYED_RICH_MARKER: &str = "CUBBY-FIXTURE-DELAYED\r\n  rendered on demand  ";
+    const VIRTUAL_MIXED_MARKER: &str = "CUBBY-FIXTURE-VIRTUAL-TEXT-FALLBACK";
 
     static STATE: OnceLock<Mutex<ProbeState>> = OnceLock::new();
+    static DELAYED_WRITER_STATE: OnceLock<Mutex<DelayedWriterState>> = OnceLock::new();
+
+    #[derive(Default)]
+    struct DelayedWriterState {
+        payloads: HashMap<u32, Vec<u8>>,
+        render_errors: Vec<String>,
+    }
 
     #[derive(Debug)]
     struct Config {
@@ -126,10 +147,18 @@ mod windows_probe {
                 .collect::<HashSet<_>>()
         });
         let expected_fixtures = config.fixtures.then(|| {
-            ["rich", "files", "binary"]
-                .into_iter()
-                .map(str::to_string)
-                .collect::<HashSet<_>>()
+            [
+                "rich",
+                "files",
+                "binary",
+                "delayed_rich",
+                "delayed_image",
+                "virtual_only",
+                "virtual_mixed",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<HashSet<_>>()
         });
 
         STATE
@@ -429,7 +458,312 @@ mod windows_probe {
             "binary",
         )?;
 
+        let delayed_window = create_delayed_writer_window()?;
+        publish_delayed_fixture(
+            delayed_window,
+            vec![
+                (13, unicode_clipboard_bytes(DELAYED_RICH_MARKER)),
+                (registered_format(HTML_FORMAT)?, cf_html_payload()),
+                (
+                    registered_format(RICH_TEXT_FORMAT)?,
+                    fixture_rtf().as_bytes().to_vec(),
+                ),
+            ],
+            "delayed_rich",
+        )?;
+        pump_delayed_writer_messages(Duration::from_millis(750));
+        check_delayed_render_errors()?;
+
+        publish_delayed_fixture(
+            delayed_window,
+            vec![
+                (8, delayed_image_dib()),
+                (registered_format(DELAYED_IMAGE_TAG)?, vec![1]),
+            ],
+            "delayed_image",
+        )?;
+        pump_delayed_writer_messages(Duration::from_millis(750));
+        // The listener's exact RGBA assertion is authoritative for this
+        // fixture. Some clipboard readers request CF_DIB again after it has
+        // already materialized, when no clipboard is open on the owner thread.
+
+        unsafe {
+            let _ = DestroyWindow(delayed_window);
+        }
+
+        set_fixture(
+            &clipboard,
+            || {
+                vec![
+                    ClipboardContent::Other(
+                        FILE_GROUP_DESCRIPTOR_W.to_string(),
+                        virtual_file_descriptor(),
+                    ),
+                    ClipboardContent::Other(VIRTUAL_ONLY_TAG.to_string(), vec![1]),
+                ]
+            },
+            "virtual_only",
+        )?;
+        // Destroying the delayed-rendering owner can queue one final update
+        // ahead of this unsupported payload. Let the listener exhaust both
+        // read paths for that update and this one before replacing it.
+        thread::sleep(Duration::from_millis(900));
+
+        set_fixture(
+            &clipboard,
+            || {
+                vec![
+                    ClipboardContent::Text(VIRTUAL_MIXED_MARKER.to_string()),
+                    ClipboardContent::Other(
+                        FILE_GROUP_DESCRIPTOR_W.to_string(),
+                        virtual_file_descriptor(),
+                    ),
+                    ClipboardContent::Other(VIRTUAL_MIXED_TAG.to_string(), vec![1]),
+                ]
+            },
+            "virtual_mixed",
+        )?;
+
         Ok(())
+    }
+
+    fn create_delayed_writer_window() -> Result<HWND, String> {
+        unsafe {
+            let module = GetModuleHandleW(None).map_err(|error| error.to_string())?;
+            let instance = HINSTANCE(module.0);
+            let class_name = w!("CubbyClipboardDelayedWriter");
+            let window_class = WNDCLASSW {
+                lpfnWndProc: Some(delayed_writer_window_proc),
+                hInstance: instance,
+                lpszClassName: class_name,
+                ..Default::default()
+            };
+
+            if RegisterClassW(&window_class) == 0 {
+                return Err(windows::core::Error::from_thread().to_string());
+            }
+
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                class_name,
+                w!("Cubby Clipboard Delayed Writer"),
+                WINDOW_STYLE::default(),
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                0,
+                0,
+                None,
+                None,
+                Some(instance),
+                None,
+            )
+            .map_err(|error| error.to_string())
+        }
+    }
+
+    fn publish_delayed_fixture(
+        hwnd: HWND,
+        payloads: Vec<(u32, Vec<u8>)>,
+        name: &str,
+    ) -> Result<(), String> {
+        let state_cell = DELAYED_WRITER_STATE.get_or_init(Default::default);
+        {
+            let mut state = state_cell.lock().expect("delayed writer state lock");
+            state.payloads = payloads.into_iter().collect();
+            state.render_errors.clear();
+        }
+
+        unsafe {
+            OpenClipboard(Some(hwnd)).map_err(|error| error.to_string())?;
+            EmptyClipboard().map_err(|error| error.to_string())?;
+            let formats = state_cell
+                .lock()
+                .expect("delayed writer state lock")
+                .payloads
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            for format in &formats {
+                // Delayed rendering is requested by passing a null handle. The
+                // Win32 API returns null for this successful case, so the
+                // windows crate wrapper reports an error even though the format
+                // was registered. Availability is verified after closing.
+                let _ = SetClipboardData(*format, None);
+            }
+            CloseClipboard().map_err(|error| error.to_string())?;
+
+            for format in formats {
+                if IsClipboardFormatAvailable(format).is_err() {
+                    return Err(format!(
+                        "failed to advertise delayed format {format} for fixture {name}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn pump_delayed_writer_messages(duration: Duration) {
+        let deadline = Instant::now() + duration;
+        unsafe {
+            let mut message = MSG::default();
+            while Instant::now() < deadline {
+                while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+
+    fn check_delayed_render_errors() -> Result<(), String> {
+        let errors = DELAYED_WRITER_STATE
+            .get_or_init(Default::default)
+            .lock()
+            .expect("delayed writer state lock")
+            .render_errors
+            .clone();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    unsafe extern "system" fn delayed_writer_window_proc(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match message {
+            WM_RENDERFORMAT => {
+                render_delayed_format(wparam.0 as u32);
+                LRESULT(0)
+            }
+            WM_RENDERALLFORMATS => {
+                if OpenClipboard(Some(hwnd)).is_ok() {
+                    let formats = DELAYED_WRITER_STATE
+                        .get_or_init(Default::default)
+                        .lock()
+                        .expect("delayed writer state lock")
+                        .payloads
+                        .keys()
+                        .copied()
+                        .collect::<Vec<_>>();
+                    for format in formats {
+                        render_delayed_format(format);
+                    }
+                    let _ = CloseClipboard();
+                }
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, message, wparam, lparam),
+        }
+    }
+
+    unsafe fn render_delayed_format(format: u32) {
+        let payload = DELAYED_WRITER_STATE
+            .get_or_init(Default::default)
+            .lock()
+            .expect("delayed writer state lock")
+            .payloads
+            .get(&format)
+            .cloned();
+        let Some(payload) = payload else {
+            // A reader may ask again while the previous delayed fixture is
+            // being replaced. A successfully rendered format has already been
+            // removed from this map and remains owned by the clipboard.
+            return;
+        };
+
+        let memory = match GlobalAlloc(GMEM_MOVEABLE, payload.len()) {
+            Ok(memory) => memory,
+            Err(error) => {
+                record_delayed_render_error(format!(
+                    "failed to allocate delayed format {format}: {error}"
+                ));
+                return;
+            }
+        };
+        let destination = GlobalLock(memory);
+        if destination.is_null() {
+            let _ = GlobalFree(Some(memory));
+            record_delayed_render_error(format!("failed to lock delayed format {format}"));
+            return;
+        }
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), destination.cast::<u8>(), payload.len());
+        let _ = GlobalUnlock(memory);
+
+        match SetClipboardData(format, Some(HANDLE(memory.0))) {
+            Ok(_) => {
+                DELAYED_WRITER_STATE
+                    .get_or_init(Default::default)
+                    .lock()
+                    .expect("delayed writer state lock")
+                    .payloads
+                    .remove(&format);
+            }
+            Err(error) => {
+                let _ = GlobalFree(Some(memory));
+                record_delayed_render_error(format!(
+                    "failed to render delayed format {format}: {error}"
+                ));
+            }
+        }
+    }
+
+    fn record_delayed_render_error(error: String) {
+        DELAYED_WRITER_STATE
+            .get_or_init(Default::default)
+            .lock()
+            .expect("delayed writer state lock")
+            .render_errors
+            .push(error);
+    }
+
+    fn registered_format(name: &str) -> Result<u32, String> {
+        let wide = name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let format = unsafe { RegisterClipboardFormatW(PCWSTR(wide.as_ptr())) };
+        (format != 0)
+            .then_some(format)
+            .ok_or_else(|| format!("failed to register clipboard format {name}"))
+    }
+
+    fn unicode_clipboard_bytes(text: &str) -> Vec<u8> {
+        text.encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    }
+
+    fn delayed_image_dib() -> Vec<u8> {
+        let mut dib = Vec::with_capacity(56);
+        dib.extend_from_slice(&40_u32.to_le_bytes());
+        dib.extend_from_slice(&2_i32.to_le_bytes());
+        dib.extend_from_slice(&2_i32.to_le_bytes());
+        dib.extend_from_slice(&1_u16.to_le_bytes());
+        dib.extend_from_slice(&32_u16.to_le_bytes());
+        dib.extend_from_slice(&0_u32.to_le_bytes());
+        dib.extend_from_slice(&16_u32.to_le_bytes());
+        dib.extend_from_slice(&0_i32.to_le_bytes());
+        dib.extend_from_slice(&0_i32.to_le_bytes());
+        dib.extend_from_slice(&0_u32.to_le_bytes());
+        dib.extend_from_slice(&0_u32.to_le_bytes());
+        // Positive DIB heights are bottom-up. Pixels are stored as BGRA.
+        dib.extend_from_slice(&[255, 0, 0, 255, 255, 255, 255, 255]);
+        dib.extend_from_slice(&[0, 0, 255, 255, 0, 255, 0, 255]);
+        dib
+    }
+
+    fn virtual_file_descriptor() -> Vec<u8> {
+        // FILEGROUPDESCRIPTORW begins with cItems. The production policy only
+        // needs the advertised format; no code should materialize its members.
+        1_u32.to_le_bytes().to_vec()
     }
 
     fn set_fixture(
@@ -441,10 +775,12 @@ mod windows_probe {
         for attempt in 0..10_u32 {
             match clipboard.set(contents()) {
                 Ok(()) => {
-                    // Leave enough time for the listener's bounded read retries.
-                    // Clipboard owners and monitors can transiently contend even
-                    // after WM_CLIPBOARDUPDATE has been delivered.
-                    thread::sleep(Duration::from_millis(500));
+                    // Leave enough time for both bounded text and image retry
+                    // windows. A deliberately unsupported virtual-only fixture
+                    // exhausts both before it can be classified, so replacing
+                    // it earlier lets the next fixture race ahead of the queued
+                    // WM_CLIPBOARDUPDATE.
+                    thread::sleep(Duration::from_millis(800));
                     return Ok(());
                 }
                 Err(error) => {
@@ -674,7 +1010,8 @@ mod windows_probe {
 
     unsafe fn capture_event() {
         let sequence = GetClipboardSequenceNumber();
-        let (formats, format_error) = read_formats_with_retry();
+        let (mut formats, format_error) = read_formats_with_retry();
+        augment_known_fixture_formats(&mut formats);
         let has_unicode_text = formats.iter().any(|format| format == "CF_UNICODETEXT");
         let (text, attempted_text_error) = read_text_with_retry();
         let text_error = has_unicode_text
@@ -702,7 +1039,7 @@ mod windows_probe {
                 .is_some()
         });
         let fixture_result = fixture_mode
-            .then(|| text.as_deref().and_then(validate_fixture))
+            .then(|| validate_fixture(text.as_deref(), &formats, image.as_ref()))
             .flatten();
         let text_sha256 = text.as_ref().map(|value| {
             let mut hasher = Sha256::new();
@@ -809,20 +1146,37 @@ mod windows_probe {
         }
     }
 
-    fn validate_fixture(text: &str) -> Option<(&'static str, Result<(), String>)> {
+    fn validate_fixture(
+        text: Option<&str>,
+        formats: &[String],
+        image: Option<&ImageSnapshot>,
+    ) -> Option<(&'static str, Result<(), String>)> {
         let name = match text {
-            RICH_MARKER => "rich",
-            FILES_MARKER => "files",
-            BINARY_MARKER => "binary",
+            Some(RICH_MARKER) => "rich",
+            Some(FILES_MARKER) => "files",
+            Some(BINARY_MARKER) => "binary",
+            Some(DELAYED_RICH_MARKER) => "delayed_rich",
+            Some(VIRTUAL_MIXED_MARKER) => "virtual_mixed",
+            _ if image.is_some_and(|image| {
+                image.width == 2 && image.height == 2 && image.sha256 == delayed_image_sha256()
+            }) =>
+            {
+                "delayed_image"
+            }
+            _ if formats.iter().any(|format| format == VIRTUAL_ONLY_TAG) => "virtual_only",
             _ => return None,
         };
-        Some((name, validate_fixture_payload(name)))
+        Some((name, validate_fixture_payload(name, formats, image)))
     }
 
-    fn validate_fixture_payload(name: &str) -> Result<(), String> {
+    fn validate_fixture_payload(
+        name: &str,
+        formats: &[String],
+        image: Option<&ImageSnapshot>,
+    ) -> Result<(), String> {
         let mut last_error = None;
         for attempt in 0..10_u32 {
-            match validate_fixture_payload_once(name) {
+            match validate_fixture_payload_once(name, formats, image) {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     last_error = Some(error);
@@ -835,10 +1189,14 @@ mod windows_probe {
         Err(last_error.unwrap_or_else(|| format!("fixture {name} validation failed")))
     }
 
-    fn validate_fixture_payload_once(name: &str) -> Result<(), String> {
+    fn validate_fixture_payload_once(
+        name: &str,
+        formats: &[String],
+        image: Option<&ImageSnapshot>,
+    ) -> Result<(), String> {
         let clipboard = ClipboardContext::new().map_err(|error| error.to_string())?;
         match name {
-            "rich" => {
+            "rich" | "delayed_rich" => {
                 assert_clipboard_buffer(&clipboard, HTML_FORMAT, &cf_html_payload())?;
                 assert_clipboard_buffer(&clipboard, RICH_TEXT_FORMAT, fixture_rtf().as_bytes())?;
                 let html = clipboard.get_html().map_err(|error| error.to_string())?;
@@ -857,7 +1215,59 @@ mod windows_probe {
                 validate_physical_file_fixture(&files)?;
             }
             "binary" => assert_clipboard_buffer(&clipboard, BINARY_FORMAT, &fixture_binary())?,
+            "delayed_image" => validate_delayed_image(image)?,
+            "virtual_only" | "virtual_mixed" => validate_virtual_file_policy(name, formats, image)?,
             _ => return Err(format!("unknown fixture {name}")),
+        }
+        Ok(())
+    }
+
+    fn validate_delayed_image(image: Option<&ImageSnapshot>) -> Result<(), String> {
+        let image = image.ok_or_else(|| "delayed image was not materialized".to_string())?;
+        if (image.width, image.height) != (2, 2) {
+            return Err(format!(
+                "delayed image dimensions differed: {}x{}",
+                image.width, image.height
+            ));
+        }
+        let expected = delayed_image_sha256();
+        if image.sha256 != expected {
+            return Err("delayed image RGBA bytes differed".to_string());
+        }
+        Ok(())
+    }
+
+    fn delayed_image_sha256() -> String {
+        let expected_pixels = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let mut hasher = Sha256::new();
+        hasher.update(expected_pixels);
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn validate_virtual_file_policy(
+        name: &str,
+        formats: &[String],
+        image: Option<&ImageSnapshot>,
+    ) -> Result<(), String> {
+        if !formats
+            .iter()
+            .any(|format| format == FILE_GROUP_DESCRIPTOR_W)
+        {
+            return Err("virtual-file descriptor was not advertised".to_string());
+        }
+        if image.is_some() {
+            return Err("virtual-file fixture unexpectedly materialized an image".to_string());
+        }
+        let has_image_format = formats
+            .iter()
+            .any(|format| matches!(format.as_str(), "CF_BITMAP" | "CF_DIB" | "CF_DIBV5" | "PNG"));
+        let policy = crate::clipboard_policy::classify_file_payload(true, has_image_format);
+        if policy != crate::clipboard_policy::FilePayloadPolicy::IgnoreFilePayload {
+            return Err(format!(
+                "{name} was not classified as an ignored file payload"
+            ));
         }
         Ok(())
     }
@@ -959,6 +1369,28 @@ mod windows_probe {
         )
     }
 
+    fn augment_known_fixture_formats(formats: &mut Vec<String>) {
+        // Format enumeration can transiently return an empty list even while a
+        // known format is readable. Production capture follows the same rule:
+        // probe important formats directly instead of trusting enumeration as
+        // the only authority.
+        for name in [
+            FILE_GROUP_DESCRIPTOR_W,
+            DELAYED_IMAGE_TAG,
+            VIRTUAL_ONLY_TAG,
+            VIRTUAL_MIXED_TAG,
+        ] {
+            let Ok(format) = registered_format(name) else {
+                continue;
+            };
+            if unsafe { IsClipboardFormatAvailable(format) }.is_ok()
+                && !formats.iter().any(|existing| existing == name)
+            {
+                formats.push(name.to_string());
+            }
+        }
+    }
+
     fn read_text_with_retry() -> (Option<String>, Option<String>) {
         let clipboard = match ClipboardContext::new() {
             Ok(clipboard) => clipboard,
@@ -993,10 +1425,10 @@ mod windows_probe {
             match clipboard.get_image() {
                 Ok(image) => {
                     let (width, height) = image.get_size();
-                    match image.to_png() {
-                        Ok(png) => {
+                    match image.to_rgba8() {
+                        Ok(rgba) => {
                             let mut hasher = Sha256::new();
-                            hasher.update(png.get_bytes());
+                            hasher.update(rgba.as_raw());
                             return (
                                 Some(ImageSnapshot {
                                     width,
@@ -1007,7 +1439,7 @@ mod windows_probe {
                             );
                         }
                         Err(error) => {
-                            return (None, Some(format!("image encoding failed: {error}")));
+                            return (None, Some(format!("image decoding failed: {error}")));
                         }
                     }
                 }
