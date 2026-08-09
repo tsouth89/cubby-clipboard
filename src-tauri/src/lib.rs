@@ -52,9 +52,9 @@ mod ditto_import;
 mod models;
 mod ocr;
 mod ocr_queue;
+pub mod paste_engine;
 // SBS-219 budgets. Compiled for tests (which measure them) and for the
 // dev-harness binaries; a release build compiles neither arm.
-pub mod paste_engine;
 #[cfg(any(test, feature = "dev-harness"))]
 pub mod perf_budget;
 mod search_index;
