@@ -65,7 +65,9 @@ at 100,000. History is uncapped by default. The index is held in memory because
 the database is encrypted and cannot be searched by SQL (SBS-211), so this is a
 consequence of the privacy design rather than an oversight — but it means idle
 memory on a very large history is dominated by it, and the `idle_memory` budget
-will be met or missed by this number rather than by the WebView.
+will be met or missed by this number rather than by the WebView. Tracked in
+#169, which records where the bytes go and the cheapest directions to reduce
+them.
 
 **Per-clip database cost is not the problem.** 922 B for a 170-byte clip is
 mostly encryption overhead and the content hash, and it grows linearly.
