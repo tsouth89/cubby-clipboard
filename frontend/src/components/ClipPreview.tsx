@@ -12,10 +12,12 @@ import {
   Pencil,
   Pin,
   ScanText,
+  StickyNote,
   Trash2,
   Type,
 } from 'lucide-react';
 import { ClipboardItem } from '../types';
+import { NOTE_CHAR_LIMIT } from '../constants';
 import { ImageTextViewer } from './ImageTextViewer';
 import { OcrLayout } from '../utils/ocrSelection';
 import {
@@ -53,6 +55,8 @@ interface ClipPreviewProps {
   onCopyText: (text: string) => void;
   /** Save edited text back to the clip. Text clips only. */
   onSaveText: (clipId: string, text: string) => Promise<void>;
+  /** Save (or clear, when empty) the clip's note. */
+  onSaveNotes: (clipId: string, notes: string) => Promise<void>;
   /** Persist (or clear) the hidden flag for this clip. */
   onToggleHidden: (clipId: string) => void;
   /** Set when this hidden clip has been revealed for the session. */
@@ -82,6 +86,7 @@ export function ClipPreview({
   onRescanOcr,
   onCopyText,
   onSaveText,
+  onSaveNotes,
   onToggleHidden,
   revealed,
   onToggleReveal,
@@ -94,6 +99,12 @@ export function ClipPreview({
   const [scanDraft, setScanDraft] = useState<string | null>(null);
   const [scanBusy, setScanBusy] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Local working copy of the note so typing stays responsive; saved on blur.
+  const [noteDraft, setNoteDraft] = useState('');
+  // Set synchronously by Escape so the blur it triggers can tell a cancel from
+  // an ordinary focus loss. A ref, not state, because blur runs before a
+  // re-render would deliver the new value.
+  const noteCancelled = useRef(false);
   const [details, setDetails] = useState<ClipDetails | null>(null);
   const [detailsError, setDetailsError] = useState<string | null>(null);
   // Hiding has to cover this pane too, or selecting a hidden clip would put its
@@ -163,6 +174,12 @@ export function ClipPreview({
   useEffect(() => {
     setScanDraft(null);
   }, [clipId]);
+  // Follow the selection rather than the keystrokes, so switching clips shows
+  // the new clip's note instead of carrying the previous one across.
+  useEffect(() => {
+    noteCancelled.current = false;
+    setNoteDraft(clip?.notes ?? '');
+  }, [clipId, clip?.notes]);
 
   const imageMetadata = useMemo(() => parseImageMetadata(clip?.metadata), [clip?.metadata]);
   // Wait for the full payload rather than showing the row's thumbnail first.
@@ -378,6 +395,45 @@ export function ClipPreview({
           )}
         </div>
       )}
+
+      <div className="shrink-0 border-t border-white/[0.07] px-4 py-3">
+        <label className="flex items-center gap-2">
+          <StickyNote size={12} className="shrink-0 text-muted-foreground" />
+          <input
+            value={noteDraft}
+            onChange={(event) => setNoteDraft(event.target.value)}
+            onBlur={() => {
+              // Escape blurs to commit the cancel, so the revert has to happen
+              // here: setNoteDraft has not been applied by the time this runs,
+              // and noteDraft still holds the text the user asked to discard.
+              if (noteCancelled.current) {
+                noteCancelled.current = false;
+                setNoteDraft(clip.notes ?? '');
+                return;
+              }
+              const next = noteDraft.trim();
+              if (next !== (clip.notes ?? '')) void onSaveNotes(clip.id, next);
+            }}
+            onKeyDown={(event) => {
+              // While an IME is composing, Enter and Escape belong to the
+              // candidate window, not to this field: Enter accepts a candidate
+              // and Escape abandons one. Acting on either would commit or
+              // discard a note the user is still in the middle of typing.
+              if (event.nativeEvent.isComposing) return;
+              if (event.key === 'Enter') event.currentTarget.blur();
+              if (event.key === 'Escape') {
+                event.stopPropagation();
+                noteCancelled.current = true;
+                event.currentTarget.blur();
+              }
+            }}
+            maxLength={NOTE_CHAR_LIMIT}
+            placeholder="Add a note to find this later"
+            aria-label="Note"
+            className="min-w-0 flex-1 border-b border-transparent bg-transparent pb-0.5 text-[11px] text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-primary/45"
+          />
+        </label>
+      </div>
 
       <div className="shrink-0 space-y-1 border-t border-white/[0.07] px-4 py-3">
         <MetaRow label="Source" value={label} />

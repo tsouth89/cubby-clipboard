@@ -440,6 +440,19 @@ export function HistoryWindow() {
     },
     [loadClips]
   );
+  const handleSaveNotes = useCallback(async (clipId: string, notes: string) => {
+    try {
+      await invoke('set_clip_notes', { id: clipId, notes });
+      // Cheap local update so the row's note appears immediately; a note also
+      // changes what search matches, but not the current result set.
+      setClips((current) =>
+        current.map((clip) => (clip.id === clipId ? { ...clip, notes: notes || null } : clip))
+      );
+    } catch (error) {
+      console.error('Failed to save the note:', error);
+      toast.error('Failed to save the note');
+    }
+  }, []);
 
   const handleSaveOcrText = useCallback(async (clipId: string, text: string) => {
     try {
@@ -890,6 +903,7 @@ export function HistoryWindow() {
             onRescanOcr={handleRescanOcr}
             onCopyText={handleCopySelection}
             onSaveText={handleSaveText}
+            onSaveNotes={handleSaveNotes}
             onToggleHidden={handleToggleHidden}
             revealed={selectedClipId ? revealed.get(selectedClipId) : undefined}
             onToggleReveal={handleToggleReveal}

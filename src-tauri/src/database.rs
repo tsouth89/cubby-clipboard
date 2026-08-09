@@ -201,6 +201,12 @@ impl Database {
         )
         .await?;
 
+        // A user-written note attached to a clip (SOU-588), so something with no
+        // memorable text — a UUID, half an address — can still be found later.
+        // Encrypted at rest like every other clip field, and NULL for every row
+        // that predates the column.
+        add_column_if_missing(&self.pool, "ALTER TABLE clips ADD COLUMN notes TEXT").await?;
+
         // Per-clip "hide from the list" flag (SOU-586). Purely a display state:
         // the content stays encrypted at rest exactly as before and still pastes
         // normally. 0 = shown.

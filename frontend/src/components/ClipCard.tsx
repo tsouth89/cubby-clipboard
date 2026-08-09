@@ -10,6 +10,7 @@ import {
   Image as ImageIcon,
   MoreHorizontal,
   Pin,
+  StickyNote,
 } from 'lucide-react';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { PREVIEW_CHAR_LIMIT } from '../constants';
@@ -321,6 +322,19 @@ export const ClipCard = memo(function ClipCard({
             >
               {preview.slice(0, PREVIEW_CHAR_LIMIT)}
             </p>
+            {/* Explicit emptiness check: a note of "0" is a real note, and a
+                truthiness test would drop it while search and the title still
+                treated it as present. */}
+            {clip.notes != null && clip.notes !== '' && (
+              <p
+                data-el="clip-note"
+                className="mt-1 flex min-w-0 items-center gap-1 text-[11px] text-primary/85"
+                title={clip.notes}
+              >
+                <StickyNote size={10} className="shrink-0" />
+                <span className="truncate">{clip.notes}</span>
+              </p>
+            )}
             <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
               {clip.is_pinned && (
                 <>

@@ -64,6 +64,10 @@ struct BackupClip {
     /// those clips were not hidden, which is what `false` says.
     #[serde(default)]
     is_hidden: bool,
+    /// Defaulted like the rest: a bundle written before notes existed simply
+    /// has none, which is what None says.
+    #[serde(default)]
+    notes: Option<String>,
     #[serde(default)]
     source_app: Option<String>,
     #[serde(default)]
@@ -94,6 +98,7 @@ type ExportRow = (
     String,                        // text_preview (encrypted)
     bool,                          // is_pinned
     bool,                          // is_hidden
+    Option<String>,                // notes (encrypted)
     Option<String>,                // source_app (encrypted)
     Option<String>,                // source_icon (encrypted)
     Option<String>,                // metadata (encrypted)
@@ -140,6 +145,7 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
                clips.text_preview,
                clips.is_pinned,
                clips.is_hidden,
+               clips.notes,
                clips.source_app,
                clips.source_icon,
                clips.metadata,
@@ -163,6 +169,7 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
         text_preview,
         is_pinned,
         is_hidden,
+        notes,
         source_app,
         source_icon,
         metadata,
@@ -195,6 +202,7 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
             text_preview,
             is_pinned,
             is_hidden,
+            notes: decrypt_optional(notes),
             source_app: decrypt_optional(source_app),
             source_icon: decrypt_optional(source_icon),
             metadata: decrypt_optional(metadata),
@@ -379,9 +387,9 @@ pub async fn import_backup(
                 uuid, clip_type, content, text_preview, content_hash, folder_id,
                 is_deleted, is_thumbnail, source_app, source_icon, metadata,
                 ocr_text, ocr_status, full_image_expired, created_at, last_accessed, is_pinned,
-                is_hidden
+                is_hidden, notes
             )
-            VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(Uuid::new_v4().to_string())
@@ -403,6 +411,8 @@ pub async fn import_backup(
         // visible: the column defaults to 0, so omitting this would silently
         // undo the protection on every round trip.
         .bind(i64::from(clip.is_hidden))
+        // Encrypted on the way back in, like every other text column.
+        .bind(encrypt_optional(clip.notes.as_deref()))
         .execute(&db.pool)
         .await;
 
@@ -550,6 +560,83 @@ mod tests {
                 ("an ordinary note".to_string(), false),
             ],
             "the hidden flag must survive export and import"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    async fn set_note(db: &Database, text: &str, note: &str) {
+        let material = crate::clipboard::build_clip_hash_material(
+            "text",
+            text.as_bytes(),
+            std::iter::empty::<(&str, &[u8])>(),
+        );
+        let affected = sqlx::query("UPDATE clips SET notes = ? WHERE content_hash = ?")
+            .bind(db.crypto.encrypt_optional_text(Some(note)).unwrap())
+            .bind(db.crypto.keyed_hash(&material))
+            .execute(&db.pool)
+            .await
+            .unwrap()
+            .rows_affected();
+        assert_eq!(affected, 1, "the clip to annotate should exist");
+    }
+
+    async fn notes_of(db: &Database) -> Vec<Option<String>> {
+        let rows: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT notes FROM clips WHERE is_deleted = 0 ORDER BY id")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        rows.into_iter()
+            .map(|value| {
+                let mut holder = value;
+                db.crypto.decrypt_optional_text(&mut holder).ok();
+                holder
+            })
+            .collect()
+    }
+
+    /// A note is the only record of why a clip was worth keeping, so losing it
+    /// on a round trip quietly destroys the thing that made the clip findable.
+    #[tokio::test]
+    async fn notes_survive_a_round_trip() {
+        let source = test_database().await;
+        insert_clip(&source, "9f2c1b7e-40aa-4f11-b0d2-77c9e1f00a31", false, None).await;
+        insert_clip(&source, "an unannotated clip", false, None).await;
+        set_note(
+            &source,
+            "9f2c1b7e-40aa-4f11-b0d2-77c9e1f00a31",
+            "staging api key",
+        )
+        .await;
+
+        let path = temp_path("notes");
+        let path_str = path.to_string_lossy().to_string();
+        export_backup(&source, &path_str, "correct horse")
+            .await
+            .unwrap();
+
+        let target = test_database().await;
+        import_backup(&target, &path_str, "correct horse", false)
+            .await
+            .unwrap();
+
+        let mut restored = notes_of(&target).await;
+        restored.sort();
+        assert_eq!(
+            restored,
+            vec![None, Some("staging api key".to_string())],
+            "the note must survive export and import"
+        );
+
+        // And it must not sit in the clear in the restored database.
+        let raw: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT notes FROM clips WHERE notes IS NOT NULL")
+                .fetch_all(&target.pool)
+                .await
+                .unwrap();
+        assert!(
+            raw.iter().flatten().all(|value| !value.contains("staging")),
+            "the restored note must be encrypted at rest"
         );
         let _ = std::fs::remove_file(&path);
     }
