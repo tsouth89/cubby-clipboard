@@ -102,6 +102,12 @@ export function ClipPreview({
   // renderer until the user reveals it.
   const withheld = Boolean(clip?.is_hidden) && !revealed;
   const clipId = withheld ? null : (clip?.id ?? null);
+  const isImage = clip?.clip_type === 'image';
+  // A reveal already fetched this clip's payload, so refetching it here would
+  // decrypt the same content a second time and leave the pane blank until it
+  // landed. Images are the exception: the reveal copy carries content only, and
+  // the word boxes and expiry flag still have to be fetched.
+  const shouldFetch = clipId !== null && (!revealed || isImage);
 
   // The list row carries only a preview (and a thumbnail for images). Pull the
   // full payload when a clip is actually selected, and drop a late response for
@@ -122,7 +128,7 @@ export function ClipPreview({
       setDetails(null);
       setDetailsError(null);
     }
-    if (!clipId) return;
+    if (!clipId || !shouldFetch) return;
 
     let active = true;
     invoke<ClipDetails>('get_clip_details', { id: clipId })
@@ -142,7 +148,7 @@ export function ClipPreview({
     return () => {
       active = false;
     };
-  }, [clipId, ocrReady]);
+  }, [clipId, ocrReady, shouldFetch]);
 
   // Abandon an unsaved edit when the selection moves — silently carrying a
   // draft onto a different clip and saving it there would be destructive.
@@ -158,7 +164,6 @@ export function ClipPreview({
     setScanDraft(null);
   }, [clipId]);
 
-  const isImage = clip?.clip_type === 'image';
   const imageMetadata = useMemo(() => parseImageMetadata(clip?.metadata), [clip?.metadata]);
   // Wait for the full payload rather than showing the row's thumbnail first.
   // Swapping the image under the viewer means fit and 1:1 are computed against
@@ -167,9 +172,12 @@ export function ClipPreview({
   // where it is the best thing left to show.
   const imageSrc = useMemo(() => {
     if (!isImage) return null;
-    if (details) return imageSrcFromContent(details.content);
+    // A reveal fetches the full payload, not the row's thumbnail, so showing it
+    // before this component's own fetch lands does not cause that zoom jump.
+    const full = details?.content ?? revealed?.content;
+    if (full) return imageSrcFromContent(full);
     return detailsError ? imageSrcFromContent(clip?.content) : null;
-  }, [isImage, details, detailsError, clip?.content]);
+  }, [isImage, details, revealed?.content, detailsError, clip?.content]);
 
   if (!clip) {
     return (
@@ -206,7 +214,10 @@ export function ClipPreview({
   }
 
   const label = sourceLabel(clip.source_app, clip.clip_type);
-  const text = isImage ? '' : (details?.content ?? clip.content ?? clip.preview);
+  // The row itself carries no content while hidden, so a revealed clip has to
+  // read from the copy the reveal fetched or the pane renders empty.
+  const source = revealed ?? clip;
+  const text = isImage ? '' : (details?.content ?? source.content ?? clip.preview);
   const kind = isImage ? imageLabel(label) : contentKind(text, clip.clip_type);
   const captured = (() => {
     const parsed = new Date(clip.created_at);
