@@ -487,9 +487,7 @@ mod windows_probe {
         // fixture. Some clipboard readers request CF_DIB again after it has
         // already materialized, when no clipboard is open on the owner thread.
 
-        unsafe {
-            let _ = DestroyWindow(delayed_window);
-        }
+        retire_delayed_writer(delayed_window)?;
 
         set_fixture(
             &clipboard,
@@ -650,6 +648,39 @@ mod windows_probe {
         Ok(())
     }
 
+    /// Take the delayed-rendering owner out of the picture before the next
+    /// fixture is written.
+    ///
+    /// Destroying the window on its own is not enough. While it still owns the
+    /// clipboard, the next writer's `EmptyClipboard` makes Windows send
+    /// `WM_RENDERALLFORMATS` to it, and that handler opens and closes the
+    /// clipboard on this same thread -- closing the one `clipboard_rs` is in
+    /// the middle of using, which surfaces as `ERROR_CLIPBOARD_NOT_OPEN`
+    /// (1418) on the `virtual_only` fixture. Dropping the payloads, releasing
+    /// ownership, and draining the queue first means no render handler can be
+    /// in flight when the next fixture starts.
+    fn retire_delayed_writer(hwnd: HWND) -> Result<(), String> {
+        DELAYED_WRITER_STATE
+            .get_or_init(Default::default)
+            .lock()
+            .expect("delayed writer state lock")
+            .payloads
+            .clear();
+
+        open_and_empty_clipboard(hwnd)
+            .map_err(|error| format!("failed to release the delayed clipboard owner: {error}"))?;
+        unsafe {
+            CloseClipboard().map_err(|error| error.to_string())?;
+        }
+
+        pump_delayed_writer_messages(Duration::from_millis(150));
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        pump_delayed_writer_messages(Duration::from_millis(150));
+        Ok(())
+    }
+
     fn pump_delayed_writer_messages(duration: Duration) {
         let deadline = Instant::now() + duration;
         unsafe {
@@ -690,6 +721,21 @@ mod windows_probe {
                 LRESULT(0)
             }
             WM_RENDERALLFORMATS => {
+                // Nothing left to render means nothing to open the clipboard
+                // for. This guard is what keeps the handler from closing a
+                // clipboard that another writer on this thread has open: once
+                // the fixture has been retired, the handler must not touch the
+                // clipboard at all.
+                let pending = DELAYED_WRITER_STATE
+                    .get_or_init(Default::default)
+                    .lock()
+                    .expect("delayed writer state lock")
+                    .payloads
+                    .len();
+                if pending == 0 {
+                    return LRESULT(0);
+                }
+
                 match OpenClipboard(Some(hwnd)) {
                     Ok(()) => {
                         let formats = DELAYED_WRITER_STATE
