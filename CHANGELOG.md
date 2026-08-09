@@ -2,9 +2,26 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
-## v1.2.6
+## v1.3.0
+
+### Added
+- A dedicated History window, separate from the Win+V flyout, with a larger image preview you can read and select text from
+- Multi-select in the History window, with copy, paste, delete, and move applied to everything selected
+- Filter history by source application and by date range, with per-app counts and quick date presets
+- Edit the text of a stored clip in place
+- Notes on a clip, searchable alongside its content and its recognized text
+- On-demand Scan Text on an image clip, with an editable box for correcting the recognized text before you use it
+- Encrypted local backup export and import, protected by a passphrase so a bundle can be restored on another machine
+- A per-clip visibility toggle for keeping sensitive content hidden in the list
+
+### Fixed
+- Stop a failed duplicate check from storing a second copy of a clip. The database now enforces uniqueness itself, and duplicates already in your history are merged on first launch, keeping pins, folders, notes, and hidden state
+- Keep history ordering total, so scrolling can no longer repeat or skip a clip
+- Four capture and paste failure paths, alongside signing the shipped binaries so Windows stops flagging them
+- Accessibility problems found by a static audit, including missing names for icon-only buttons
 
 ### Changed
+- Search uses roughly a fifth of the memory it used to per clip, and returns results faster on a large history
 - Refreshed the interface icon set. The filter, settings, shield, play, pause, file, and flask icons are redrawn with the same meanings and slightly different shapes
 
 ## v1.2.5
