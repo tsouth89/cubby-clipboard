@@ -72,8 +72,13 @@ export const ClipCard = memo(function ClipCard({
   onToggleSelect,
 }: ClipCardProps) {
   // A hidden row arrives carrying no content. Once revealed for the session the
-  // real payload is fetched separately, so render that in its place.
-  const clip = revealed ?? row;
+  // real payload is fetched separately, so render that in its place — but only
+  // the payload. The revealed copy is a snapshot taken when the fetch returned,
+  // so taking metadata from it too would freeze the pin state and the timestamp
+  // at that moment until the reveal was dropped.
+  const clip = revealed
+    ? { ...row, content: revealed.content, preview: revealed.preview }
+    : row;
   const isHidden = (row.is_hidden ?? false) && !revealed;
 
   const imageSrc = useMemo(

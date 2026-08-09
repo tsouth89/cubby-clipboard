@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { toast } from 'sonner';
 import { ClipboardItem } from '../types';
 
 /**
@@ -52,6 +53,10 @@ export function useRevealedClips() {
     } catch (error) {
       console.error('Failed to reveal clip:', error);
       pending.current.delete(clip.id);
+      // The eye button has no other failure state: without this the row simply
+      // stays blank and the click looks ignored. The persisted hide toggle
+      // already toasts on failure, so this matches it.
+      toast.error('Could not reveal this clip');
     }
   }, []);
 
