@@ -415,6 +415,11 @@ export function ClipPreview({
               if (next !== (clip.notes ?? '')) void onSaveNotes(clip.id, next);
             }}
             onKeyDown={(event) => {
+              // While an IME is composing, Enter and Escape belong to the
+              // candidate window, not to this field: Enter accepts a candidate
+              // and Escape abandons one. Acting on either would commit or
+              // discard a note the user is still in the middle of typing.
+              if (event.nativeEvent.isComposing) return;
               if (event.key === 'Enter') event.currentTarget.blur();
               if (event.key === 'Escape') {
                 event.stopPropagation();
