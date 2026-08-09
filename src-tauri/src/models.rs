@@ -116,6 +116,10 @@ pub struct Clip {
     // A note the user attached to this clip (SOU-588). Encrypted at rest like
     // the rest of the clip; None for rows written before the column existed.
     pub notes: Option<String>,
+    // The user asked for this clip's content to be hidden from the list
+    // (SOU-586). Display state only: the row is still encrypted the same way,
+    // still searchable, and still pastes its real content.
+    pub is_hidden: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_accessed: chrono::DateTime<chrono::Utc>,
 }
@@ -140,6 +144,7 @@ impl<'r> FromRow<'r, SqliteRow> for Clip {
             ocr_words: row.try_get("ocr_words")?,
             full_image_expired: row.try_get("full_image_expired")?,
             notes: row.try_get("notes")?,
+            is_hidden: row.try_get("is_hidden")?,
             created_at: row.try_get("created_at")?,
             last_accessed: row.try_get("last_accessed")?,
         })
@@ -210,6 +215,10 @@ pub struct ClipboardItem {
     // The user's note for this clip (SOU-588), shown on the row so it can be
     // recognized without opening it.
     pub notes: Option<String>,
+    // The user hid this clip's content from the list (SOU-586). When set, this
+    // item carries no content or preview at all — the UI shows a placeholder,
+    // and revealing it for the session fetches the real payload on demand.
+    pub is_hidden: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

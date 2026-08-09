@@ -7,6 +7,8 @@ import {
   Clock,
   Copy,
   ExternalLink,
+  Eye,
+  EyeOff,
   Pencil,
   Pin,
   ScanText,
@@ -35,6 +37,9 @@ export interface ClipDetails {
   ocr_layout: OcrLayout | null;
 }
 
+const actionClass =
+  'inline-flex items-center gap-1.5 rounded-md border border-white/[0.09] bg-white/[0.05] px-2.5 py-1.5 text-[11px] font-medium text-foreground transition-colors hover:bg-white/[0.1] disabled:opacity-40';
+
 interface ClipPreviewProps {
   clip: ClipboardItem | null;
   onCopy: (clipId: string, plainText?: boolean) => void;
@@ -52,6 +57,12 @@ interface ClipPreviewProps {
   onSaveText: (clipId: string, text: string) => Promise<void>;
   /** Save (or clear, when empty) the clip's note. */
   onSaveNotes: (clipId: string, notes: string) => Promise<void>;
+  /** Persist (or clear) the hidden flag for this clip. */
+  onToggleHidden: (clipId: string) => void;
+  /** Set when this hidden clip has been revealed for the session. */
+  revealed?: ClipboardItem;
+  /** Reveal or re-hide for the session, without touching the persisted flag. */
+  onToggleReveal?: (clipId: string) => void;
   onTogglePin: (clipId: string) => void;
   onDelete: (clipId: string) => void;
 }
@@ -76,6 +87,9 @@ export function ClipPreview({
   onCopyText,
   onSaveText,
   onSaveNotes,
+  onToggleHidden,
+  revealed,
+  onToggleReveal,
   onTogglePin,
   onDelete,
 }: ClipPreviewProps) {
@@ -93,7 +107,18 @@ export function ClipPreview({
   const noteCancelled = useRef(false);
   const [details, setDetails] = useState<ClipDetails | null>(null);
   const [detailsError, setDetailsError] = useState<string | null>(null);
-  const clipId = clip?.id ?? null;
+  // Hiding has to cover this pane too, or selecting a hidden clip would put its
+  // content straight back on screen. Withheld the same way as the list row: the
+  // details fetch is skipped entirely, so the payload never reaches the
+  // renderer until the user reveals it.
+  const withheld = Boolean(clip?.is_hidden) && !revealed;
+  const clipId = withheld ? null : (clip?.id ?? null);
+  const isImage = clip?.clip_type === 'image';
+  // A reveal already fetched this clip's payload, so refetching it here would
+  // decrypt the same content a second time and leave the pane blank until it
+  // landed. Images are the exception: the reveal copy carries content only, and
+  // the word boxes and expiry flag still have to be fetched.
+  const shouldFetch = clipId !== null && (!revealed || isImage);
 
   // The list row carries only a preview (and a thumbnail for images). Pull the
   // full payload when a clip is actually selected, and drop a late response for
@@ -114,7 +139,7 @@ export function ClipPreview({
       setDetails(null);
       setDetailsError(null);
     }
-    if (!clipId) return;
+    if (!clipId || !shouldFetch) return;
 
     let active = true;
     invoke<ClipDetails>('get_clip_details', { id: clipId })
@@ -134,7 +159,7 @@ export function ClipPreview({
     return () => {
       active = false;
     };
-  }, [clipId, ocrReady]);
+  }, [clipId, ocrReady, shouldFetch]);
 
   // Abandon an unsaved edit when the selection moves — silently carrying a
   // draft onto a different clip and saving it there would be destructive.
@@ -156,7 +181,6 @@ export function ClipPreview({
     setNoteDraft(clip?.notes ?? '');
   }, [clipId, clip?.notes]);
 
-  const isImage = clip?.clip_type === 'image';
   const imageMetadata = useMemo(() => parseImageMetadata(clip?.metadata), [clip?.metadata]);
   // Wait for the full payload rather than showing the row's thumbnail first.
   // Swapping the image under the viewer means fit and 1:1 are computed against
@@ -165,9 +189,12 @@ export function ClipPreview({
   // where it is the best thing left to show.
   const imageSrc = useMemo(() => {
     if (!isImage) return null;
-    if (details) return imageSrcFromContent(details.content);
+    // A reveal fetches the full payload, not the row's thumbnail, so showing it
+    // before this component's own fetch lands does not cause that zoom jump.
+    const full = details?.content ?? revealed?.content;
+    if (full) return imageSrcFromContent(full);
     return detailsError ? imageSrcFromContent(clip?.content) : null;
-  }, [isImage, details, detailsError, clip?.content]);
+  }, [isImage, details, revealed?.content, detailsError, clip?.content]);
 
   if (!clip) {
     return (
@@ -177,8 +204,37 @@ export function ClipPreview({
     );
   }
 
+  if (withheld) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 px-10 text-center">
+        <EyeOff size={22} className="text-muted-foreground" />
+        <div>
+          <p className="text-sm font-medium text-foreground/80">This clip is hidden</p>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            Its content stays out of the list and this pane. Copy and paste still work.
+          </p>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {onToggleReveal && (
+            <button type="button" className={actionClass} onClick={() => onToggleReveal(clip.id)}>
+              <Eye size={13} />
+              Reveal for this session
+            </button>
+          )}
+          <button type="button" className={actionClass} onClick={() => onToggleHidden(clip.id)}>
+            <Eye size={13} />
+            Unhide
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   const label = sourceLabel(clip.source_app, clip.clip_type);
-  const text = isImage ? '' : (details?.content ?? clip.content ?? clip.preview);
+  // The row itself carries no content while hidden, so a revealed clip has to
+  // read from the copy the reveal fetched or the pane renders empty.
+  const source = revealed ?? clip;
+  const text = isImage ? '' : (details?.content ?? source.content ?? clip.preview);
   const kind = isImage ? imageLabel(label) : contentKind(text, clip.clip_type);
   const captured = (() => {
     const parsed = new Date(clip.created_at);
@@ -190,8 +246,6 @@ export function ClipPreview({
       : null;
   const size = isImage ? formatBytes(imageMetadata.size_bytes) : `${text.length} characters`;
   const expired = details?.image_expired ?? clip.image_expired ?? false;
-  const actionClass =
-    'inline-flex items-center gap-1.5 rounded-md border border-white/[0.09] bg-white/[0.05] px-2.5 py-1.5 text-[11px] font-medium text-foreground transition-colors hover:bg-white/[0.1] disabled:opacity-40';
 
   return (
     <div data-el="clip-preview" className="flex h-full min-h-0 flex-col">
@@ -456,6 +510,19 @@ export function ClipPreview({
         <button type="button" className={actionClass} onClick={() => onTogglePin(clip.id)}>
           <Pin size={13} className={clsx(clip.is_pinned && 'fill-current text-primary')} />
           {clip.is_pinned ? 'Unpin' : 'Pin'}
+        </button>
+        <button
+          type="button"
+          className={actionClass}
+          onClick={() => onToggleHidden(clip.id)}
+          title={
+            clip.is_hidden
+              ? 'Show this clip’s content in the list again'
+              : 'Hide this clip’s content from the list; it still pastes normally'
+          }
+        >
+          {clip.is_hidden ? <Eye size={13} /> : <EyeOff size={13} />}
+          {clip.is_hidden ? 'Unhide' : 'Hide'}
         </button>
         <button
           type="button"

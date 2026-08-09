@@ -10,6 +10,41 @@ use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
 
 fn clip_to_list_item(clip: &Clip) -> ClipboardItem {
+    // A hidden clip ships no content and no preview — not even a thumbnail.
+    // Blanking it in the frontend instead would leave the secret sitting in the
+    // renderer's memory and in every IPC payload, which makes "hidden" a
+    // decoration rather than a property. Revealing for the session fetches the
+    // real payload on demand through get_clip_details.
+    if clip.is_hidden {
+        return ClipboardItem {
+            id: clip.uuid.clone(),
+            clip_type: clip.clip_type.clone(),
+            content: String::new(),
+            preview: String::new(),
+            folder_id: clip.folder_id.map(|id| id.to_string()),
+            is_pinned: clip.is_pinned,
+            created_at: clip.created_at.to_rfc3339(),
+            source_app: clip.source_app.clone(),
+            source_icon: clip.source_icon.clone(),
+            metadata: clip.metadata.clone(),
+            has_ocr_text: clip
+                .ocr_text
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty()),
+            // Search snippets and highlight boxes are made of the very text
+            // being hidden, so they have to go too.
+            ocr_match: None,
+            ocr_highlights: None,
+            image_expired: clip.full_image_expired,
+            // The note goes too. It is text the user wrote *about* this clip —
+            // "AWS root password" is a plausible note on exactly the kind of
+            // clip worth hiding — so shipping it would put the secret back on
+            // the row by another route. Revealing fetches it with the payload.
+            notes: None,
+            is_hidden: true,
+        };
+    }
+
     let content_str = if clip.clip_type == "image" {
         BASE64.encode(&clip.content)
     } else {
@@ -35,6 +70,7 @@ fn clip_to_list_item(clip: &Clip) -> ClipboardItem {
         ocr_highlights: None,
         image_expired: clip.full_image_expired,
         notes: clip.notes.clone(),
+        is_hidden: false,
     }
 }
 
@@ -1571,6 +1607,33 @@ async fn set_clip_notes_in_database(db: &Database, id: &str, notes: &str) -> Res
     Ok(())
 }
 
+/// Hide or unhide a clip's content in the list (SOU-586). Returns the new state.
+///
+/// Deliberately the lighter-weight sibling of a master-password lock: no new
+/// auth or key material, just a display flag. The content keeps its existing
+/// AES-256-GCM encryption at rest, stays searchable, and still pastes in full.
+#[tauri::command]
+pub async fn toggle_clip_hidden(
+    id: String,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<bool, String> {
+    toggle_clip_hidden_in_pool(&db.pool, &id).await
+}
+
+async fn toggle_clip_hidden_in_pool(pool: &SqlitePool, id: &str) -> Result<bool, String> {
+    // Flip and read back in one statement. Reading then writing would let two
+    // concurrent toggles both observe the old value and write the same new one,
+    // losing a toggle and returning the wrong state to one of the callers.
+    let next: Option<bool> = sqlx::query_scalar(
+        "UPDATE clips SET is_hidden = NOT is_hidden WHERE uuid = ? RETURNING is_hidden",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    next.ok_or_else(|| format!("Clip {id} not found"))
+}
+
 #[tauri::command]
 pub async fn move_to_folder(
     clip_id: String,
@@ -2572,6 +2635,62 @@ pub async fn pick_file(app: AppHandle) -> Result<String, String> {
     }
 }
 
+/// Where to save a new backup bundle. Separate from `pick_file` because this
+/// one is a save dialog, not an open dialog.
+#[tauri::command]
+pub async fn pick_backup_save_path(app: AppHandle) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let suggested = format!(
+        "cubby-backup-{}.cubbybak",
+        chrono::Local::now().format("%Y-%m-%d")
+    );
+    match app
+        .dialog()
+        .file()
+        .add_filter("Cubby backup", &["cubbybak"])
+        .set_file_name(&suggested)
+        .blocking_save_file()
+    {
+        Some(path) => Ok(path.to_string()),
+        None => Err("No location selected".to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn pick_backup_file(app: AppHandle) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    match app
+        .dialog()
+        .file()
+        .add_filter("Cubby backup", &["cubbybak"])
+        .blocking_pick_file()
+    {
+        Some(path) => Ok(path.to_string()),
+        None => Err("No file selected".to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn export_backup(
+    path: String,
+    passphrase: String,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<usize, String> {
+    crate::backup::export_backup(db.inner(), &path, &passphrase).await
+}
+
+#[tauri::command]
+pub async fn import_backup(
+    path: String,
+    passphrase: String,
+    dry_run: bool,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<crate::backup::BackupImportResult, String> {
+    crate::backup::import_backup(db.inner(), &path, &passphrase, dry_run).await
+}
+
 #[tauri::command]
 pub async fn pick_ditto_database(app: AppHandle) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
@@ -2643,8 +2762,8 @@ mod tests {
         get_clips_in_database, load_recognized_text, migrate_clip_format_model,
         migrate_encrypted_storage, ocr_text_layout, remove_clip_image_files, restore_hash_material,
         search_clips_in_database, set_clip_notes_in_database, set_clip_ocr_text_in_database,
-        toggle_clip_pin_in_pool, update_clip_text_in_database, ClipboardContent, NOTE_CHAR_LIMIT,
-        OCR_SNIPPET_CHAR_LIMIT,
+        toggle_clip_hidden_in_pool, toggle_clip_pin_in_pool, update_clip_text_in_database,
+        ClipboardContent, NOTE_CHAR_LIMIT, OCR_SNIPPET_CHAR_LIMIT,
     };
     use crate::clipboard::CapturedFormat;
     use crate::database::Database;
@@ -3149,6 +3268,77 @@ mod tests {
                 .is_ok(),
             "the limit counts characters, not bytes"
         );
+    }
+
+    #[tokio::test]
+    async fn hidden_clips_ship_no_content_but_stay_listed_and_pastable() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("secret", "swordfish token 8821", "2026-05-01 09:00:00")
+                .with_app("code.exe"),
+        )
+        .await;
+
+        assert_eq!(
+            listed_ids(&database, None, None, None).await,
+            vec!["secret"]
+        );
+
+        let hidden = toggle_clip_hidden_in_pool(&database.pool, "secret")
+            .await
+            .expect("toggle should apply");
+        assert!(hidden);
+
+        let items =
+            get_clips_in_database(None, 10, 0, Some(true), None, None, None, None, &database)
+                .await
+                .unwrap();
+        assert_eq!(items.len(), 1, "a hidden clip is still listed");
+        assert!(items[0].is_hidden);
+        // The point of the feature: the secret is not in the payload at all, so
+        // it cannot be read off the row or out of the renderer's memory.
+        assert!(items[0].content.is_empty());
+        assert!(items[0].preview.is_empty());
+
+        // Still searchable, and the match snippet does not leak it either.
+        let found = search_clips_in_database(
+            "swordfish".into(),
+            None,
+            10,
+            0,
+            None,
+            None,
+            None,
+            None,
+            &database,
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].is_hidden);
+        assert!(found[0].content.is_empty());
+        assert!(
+            found[0].ocr_match.is_none(),
+            "the match snippet is made of the hidden text"
+        );
+
+        // Revealing for the session still sees the real thing, which is also
+        // what paste reads.
+        let details = get_clip_details_in_database(&database, "secret")
+            .await
+            .unwrap();
+        assert_eq!(details.content, "swordfish token 8821");
+
+        assert!(!toggle_clip_hidden_in_pool(&database.pool, "secret")
+            .await
+            .unwrap());
+        let items =
+            get_clips_in_database(None, 10, 0, Some(true), None, None, None, None, &database)
+                .await
+                .unwrap();
+        assert_eq!(items[0].content, "swordfish token 8821");
+        assert!(!items[0].is_hidden);
     }
 
     #[tokio::test]
@@ -3705,6 +3895,7 @@ mod tests {
             ocr_words: None,
             full_image_expired: false,
             notes: None,
+            is_hidden: false,
             created_at: chrono::Utc::now(),
             last_accessed: chrono::Utc::now(),
         };

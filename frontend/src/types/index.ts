@@ -20,6 +20,9 @@ export interface ClipboardItem {
   // A note the user attached to this clip (SOU-588). Searchable, and shown on
   // the row so a clip with no memorable text can still be recognized.
   notes?: string | null;
+  // The user hid this clip's content (SOU-586). When set the row carries no
+  // content or preview at all; revealing it fetches the payload on demand.
+  is_hidden?: boolean;
 }
 
 export interface OcrMatch {
