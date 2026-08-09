@@ -201,6 +201,15 @@ impl Database {
         )
         .await?;
 
+        // Per-clip "hide from the list" flag (SOU-586). Purely a display state:
+        // the content stays encrypted at rest exactly as before and still pastes
+        // normally. 0 = shown.
+        add_column_if_missing(
+            &self.pool,
+            "ALTER TABLE clips ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+
         // Existing images without OCR become durable background work. A process
         // that exited while a job was running leaves it as `processing`; reset
         // those jobs so the next launch can recover them.

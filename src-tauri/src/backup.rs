@@ -60,6 +60,10 @@ struct BackupClip {
     content_b64: String,
     text_preview: String,
     is_pinned: bool,
+    /// Defaulted so a bundle written before this field existed still imports;
+    /// those clips were not hidden, which is what `false` says.
+    #[serde(default)]
+    is_hidden: bool,
     #[serde(default)]
     source_app: Option<String>,
     #[serde(default)]
@@ -89,6 +93,7 @@ type ExportRow = (
     Vec<u8>,                       // content (encrypted)
     String,                        // text_preview (encrypted)
     bool,                          // is_pinned
+    bool,                          // is_hidden
     Option<String>,                // source_app (encrypted)
     Option<String>,                // source_icon (encrypted)
     Option<String>,                // metadata (encrypted)
@@ -134,6 +139,7 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
                clips.content,
                clips.text_preview,
                clips.is_pinned,
+               clips.is_hidden,
                clips.source_app,
                clips.source_icon,
                clips.metadata,
@@ -156,6 +162,7 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
         content,
         text_preview,
         is_pinned,
+        is_hidden,
         source_app,
         source_icon,
         metadata,
@@ -187,6 +194,7 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
             content_b64: BASE64.encode(&content),
             text_preview,
             is_pinned,
+            is_hidden,
             source_app: decrypt_optional(source_app),
             source_icon: decrypt_optional(source_icon),
             metadata: decrypt_optional(metadata),
@@ -370,9 +378,10 @@ pub async fn import_backup(
             INSERT INTO clips (
                 uuid, clip_type, content, text_preview, content_hash, folder_id,
                 is_deleted, is_thumbnail, source_app, source_icon, metadata,
-                ocr_text, ocr_status, full_image_expired, created_at, last_accessed, is_pinned
+                ocr_text, ocr_status, full_image_expired, created_at, last_accessed, is_pinned,
+                is_hidden
             )
-            VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(Uuid::new_v4().to_string())
@@ -390,6 +399,10 @@ pub async fn import_backup(
         .bind(&clip.created_at)
         .bind(&clip.created_at)
         .bind(i64::from(clip.is_pinned))
+        // Restored hidden. A clip the user chose to hide must not come back
+        // visible: the column defaults to 0, so omitting this would silently
+        // undo the protection on every round trip.
+        .bind(i64::from(clip.is_hidden))
         .execute(&db.pool)
         .await;
 
@@ -471,6 +484,74 @@ mod tests {
         .execute(&db.pool)
         .await
         .unwrap();
+    }
+
+    /// Matched on `content_hash`, not on an encrypted column: encryption is
+    /// randomized, so re-encrypting the same text yields different bytes and a
+    /// comparison against `text_preview` would never match.
+    async fn set_hidden(db: &Database, text: &str) {
+        let material = crate::clipboard::build_clip_hash_material(
+            "text",
+            text.as_bytes(),
+            std::iter::empty::<(&str, &[u8])>(),
+        );
+        let affected = sqlx::query("UPDATE clips SET is_hidden = 1 WHERE content_hash = ?")
+            .bind(db.crypto.keyed_hash(&material))
+            .execute(&db.pool)
+            .await
+            .unwrap()
+            .rows_affected();
+        assert_eq!(affected, 1, "the clip to hide should exist");
+    }
+
+    async fn hidden_flags(db: &Database) -> Vec<(String, bool)> {
+        let rows: Vec<(Vec<u8>, bool)> =
+            sqlx::query_as("SELECT content, is_hidden FROM clips WHERE is_deleted = 0 ORDER BY id")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        rows.into_iter()
+            .map(|(content, hidden)| {
+                (
+                    String::from_utf8(db.crypto.decrypt(&content).unwrap()).unwrap(),
+                    hidden,
+                )
+            })
+            .collect()
+    }
+
+    /// A clip the user hid must come back hidden. The column defaults to 0, so
+    /// a bundle that does not carry the flag silently unhides everything it
+    /// restores — the protection would be undone by a backup round trip.
+    #[tokio::test]
+    async fn hidden_survives_a_round_trip() {
+        let source = test_database().await;
+        insert_clip(&source, "a recovery code", false, None).await;
+        insert_clip(&source, "an ordinary note", false, None).await;
+        set_hidden(&source, "a recovery code").await;
+
+        let path = temp_path("hidden");
+        let path_str = path.to_string_lossy().to_string();
+        export_backup(&source, &path_str, "correct horse")
+            .await
+            .unwrap();
+
+        let target = test_database().await;
+        import_backup(&target, &path_str, "correct horse", false)
+            .await
+            .unwrap();
+
+        let mut restored = hidden_flags(&target).await;
+        restored.sort();
+        assert_eq!(
+            restored,
+            vec![
+                ("a recovery code".to_string(), true),
+                ("an ordinary note".to_string(), false),
+            ],
+            "the hidden flag must survive export and import"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     async fn clip_texts(db: &Database) -> Vec<String> {

@@ -1,7 +1,16 @@
 import { ClipboardItem } from '../types';
 import { clsx } from 'clsx';
 import { memo, useMemo } from 'react';
-import { Clock, Copy, File, Image as ImageIcon, MoreHorizontal, Pin } from 'lucide-react';
+import {
+  Clock,
+  Copy,
+  Eye,
+  EyeOff,
+  File,
+  Image as ImageIcon,
+  MoreHorizontal,
+  Pin,
+} from 'lucide-react';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { PREVIEW_CHAR_LIMIT } from '../constants';
 import { useTimeTick } from '../hooks/useTimeTick';
@@ -27,6 +36,11 @@ interface ClipCardProps {
   onCopy: () => void;
   onTogglePin: () => void;
   onContextMenu?: (e: React.MouseEvent) => void;
+  /** Content revealed for this session despite the persisted hidden flag.
+   *  Undefined while hidden and not revealed. */
+  revealed?: ClipboardItem;
+  /** Reveal or re-hide for this session. Does not change the persisted flag. */
+  onToggleReveal?: () => void;
   /** 1-based position of this option within the full history. */
   posInSet: number;
   /** Total options in the history, or -1 when more pages remain unloaded. */
@@ -41,7 +55,9 @@ interface ClipCardProps {
 }
 
 export const ClipCard = memo(function ClipCard({
-  clip,
+  clip: row,
+  revealed,
+  onToggleReveal,
   density,
   isSelected,
   onHover,
@@ -55,6 +71,14 @@ export const ClipCard = memo(function ClipCard({
   isChecked = false,
   onToggleSelect,
 }: ClipCardProps) {
+  // A hidden row arrives carrying no content. Once revealed for the session the
+  // real payload is fetched separately, so render that in its place — but only
+  // the payload. The revealed copy is a snapshot taken when the fetch returned,
+  // so taking metadata from it too would freeze the pin state and the timestamp
+  // at that moment until the reveal was dropped.
+  const clip = revealed ? { ...row, content: revealed.content, preview: revealed.preview } : row;
+  const isHidden = (row.is_hidden ?? false) && !revealed;
+
   const imageSrc = useMemo(
     () => (clip.clip_type === 'image' ? imageSrcFromContent(clip.content) : null),
     [clip.clip_type, clip.content]
@@ -175,7 +199,30 @@ export const ClipCard = memo(function ClipCard({
       </div>
 
       <div className="min-w-0 flex-1">
-        {clip.clip_type === 'image' ? (
+        {isHidden ? (
+          <>
+            <p className="flex items-center gap-1.5 text-[13px] italic text-muted-foreground">
+              <EyeOff size={13} className="shrink-0" />
+              Hidden
+            </p>
+            <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+              {clip.is_pinned && (
+                <>
+                  <Pin size={10} className="shrink-0 fill-current text-primary" />
+                  <span className="shrink-0 text-foreground/65">Pinned</span>
+                  <span className="shrink-0 text-muted-foreground/35">•</span>
+                </>
+              )}
+              <span className="truncate">{label}</span>
+              {age && (
+                <>
+                  <span className="shrink-0 text-muted-foreground/35">•</span>
+                  <span className="shrink-0">{age}</span>
+                </>
+              )}
+            </div>
+          </>
+        ) : clip.clip_type === 'image' ? (
           <div className="flex min-w-0 items-center gap-3">
             <div
               className={clsx(
@@ -318,6 +365,21 @@ export const ClipCard = memo(function ClipCard({
         >
           <Pin size={13} className={clsx(clip.is_pinned && 'fill-current')} />
         </button>
+        {row.is_hidden && onToggleReveal && (
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleReveal();
+            }}
+            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+            title={revealed ? 'Hide again' : 'Reveal for this session'}
+            aria-label={revealed ? 'Hide again' : 'Reveal for this session'}
+            aria-pressed={Boolean(revealed)}
+          >
+            {revealed ? <EyeOff size={13} /> : <Eye size={13} />}
+          </button>
+        )}
         <button
           type="button"
           onClick={(event) => {
