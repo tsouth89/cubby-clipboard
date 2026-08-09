@@ -38,6 +38,13 @@ mod cf_html;
 mod clipboard;
 mod clipboard_policy;
 mod commands;
+// SBS-408 compatibility-matrix model. Compiled under `test` as well as
+// `dev-harness` on purpose: CI runs `cargo test --all-targets` without the
+// feature, so a dev-harness-only module would never have its unit tests run on
+// a pull request. Release builds compile neither arm, so none of this reaches
+// cubby.exe.
+#[cfg(any(test, feature = "dev-harness"))]
+pub mod compat_matrix_model;
 mod constants;
 mod crypto;
 mod database;
