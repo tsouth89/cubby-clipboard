@@ -81,7 +81,7 @@ export function HistoryWindow() {
   useSystemAccent();
   const density = settings?.density ?? 'comfortable';
 
-  const { revealed, toggleReveal, clearRevealed } = useRevealedClips();
+  const { revealed, toggleReveal, forgetRevealed } = useRevealedClips();
 
   const clipsRef = useRef<ClipboardItem[]>(clips);
   clipsRef.current = clips;
@@ -136,14 +136,18 @@ export function HistoryWindow() {
               sourceApp,
             });
 
-        if (loadId !== loadIdRef.current) return;
+        if (loadId !== loadIdRef.current) return true;
         setClips((previous) => (append ? [...previous, ...data] : data));
         setHasMore(data.length === PAGE_SIZE);
+        return true;
       } catch (error) {
-        if (loadId !== loadIdRef.current) return;
+        // Superseded: a newer load owns the view, so this one failing is not a
+        // failure to refresh — report success and let the newer load speak.
+        if (loadId !== loadIdRef.current) return true;
         console.error('Failed to load clips:', error);
         setLoadError(true);
         setHasMore(false);
+        return false;
       } finally {
         if (loadId === loadIdRef.current) setIsLoading(false);
       }
@@ -476,15 +480,20 @@ export function HistoryWindow() {
     async (clipId: string) => {
       try {
         const hidden = await invoke<boolean>('toggle_clip_hidden', { id: clipId });
-        clearRevealed();
-        await loadClips(false);
+        forgetRevealed(clipId);
+        // loadClips reports failure rather than throwing, so a stale list after
+        // a failed reload would otherwise be announced as success.
+        if (!(await loadClips(false))) {
+          toast.error('Visibility changed, but the list could not be reloaded');
+          return;
+        }
         toast.success(hidden ? 'Clip hidden' : 'Clip no longer hidden');
       } catch (error) {
         console.error('Failed to change clip visibility:', error);
         toast.error('Failed to change clip visibility');
       }
     },
-    [clearRevealed, loadClips]
+    [forgetRevealed, loadClips]
   );
 
   const handleTogglePin = useCallback(async (clipId: string) => {

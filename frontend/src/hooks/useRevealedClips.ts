@@ -55,11 +55,29 @@ export function useRevealedClips() {
     }
   }, []);
 
+  /**
+   * Forget one clip's reveal, including an in-flight one.
+   *
+   * Toggling the hidden flag invalidates that clip's reveal and nothing else,
+   * so it must not disturb the rest: clearing the whole map would drop a
+   * different clip's pending entry, and its fetch would then land to a closed
+   * door — the user clicked reveal and silently got nothing.
+   */
+  const forgetRevealed = useCallback((clipId: string) => {
+    pending.current.delete(clipId);
+    setRevealed((current) => {
+      if (!current.has(clipId)) return current;
+      const next = new Map(current);
+      next.delete(clipId);
+      return next;
+    });
+  }, []);
+
   /** Forget every reveal — used when the surface closes or the list reloads. */
   const clearRevealed = useCallback(() => {
     pending.current.clear();
     setRevealed(new Map());
   }, []);
 
-  return { revealed, toggleReveal, clearRevealed };
+  return { revealed, toggleReveal, forgetRevealed, clearRevealed };
 }

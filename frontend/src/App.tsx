@@ -102,7 +102,7 @@ function App() {
     ? 'rounded-[10px] shadow-[0_24px_80px_rgba(0,0,0,0.48),0_6px_24px_rgba(0,0,0,0.32)]'
     : 'rounded-none shadow-none';
 
-  const { revealed, toggleReveal, clearRevealed } = useRevealedClips();
+  const { revealed, toggleReveal, forgetRevealed, clearRevealed } = useRevealedClips();
 
   const appWindow = getCurrentWindow();
   const selectedFolderRef = useRef(selectedFolder);
@@ -378,7 +378,7 @@ function App() {
         // A newer load supersedes this one (e.g. the reset when the flyout
         // closes starts an unfiltered load while a filtered one is in flight).
         // Discard the stale result so it can't overwrite the current view.
-        if (perfId !== loadPerfIdRef.current) return;
+        if (perfId !== loadPerfIdRef.current) return true;
 
         if (append) {
           setClips((prev) => {
@@ -413,11 +413,15 @@ function App() {
             });
           });
         }
+        return true;
       } catch (error) {
-        if (perfId !== loadPerfIdRef.current) return;
+        // Superseded: a newer load owns the view, so this one failing is not a
+        // failure to refresh — report success and let the newer load speak.
+        if (perfId !== loadPerfIdRef.current) return true;
         console.error('Failed to load clips:', error);
         setLoadError(true);
         setHasMore(false);
+        return false;
       } finally {
         if (perfId === loadPerfIdRef.current) setIsLoading(false);
       }
@@ -439,9 +443,10 @@ function App() {
     }
   }, []);
 
-  const refreshCurrentFolder = useCallback(() => {
-    loadClips(selectedFolderRef.current, false, searchQuery, contentFilter);
-  }, [loadClips, searchQuery, contentFilter]);
+  const refreshCurrentFolder = useCallback(
+    () => loadClips(selectedFolderRef.current, false, searchQuery, contentFilter),
+    [loadClips, searchQuery, contentFilter]
+  );
 
   const handleSearch = useCallback((query: string) => {
     setSearchQuery(query);
@@ -635,7 +640,7 @@ function App() {
     async (clipId: string) => {
       try {
         const hidden = await invoke<boolean>('toggle_clip_hidden', { id: clipId });
-        clearRevealed();
+        forgetRevealed(clipId);
         if (hidden) {
           // Drop the payload from React state immediately. Clearing `content`
           // but leaving `preview` would keep the secret text in the renderer
@@ -650,14 +655,22 @@ function App() {
         // withheld by the backend, so only a reload can put it back. Marking it
         // visible early would just render an empty row, and leave it empty for
         // good if the reload failed.
-        refreshCurrentFolder();
+        // Awaited, and the result checked: unhiding only puts the payload back
+        // when the reload lands, so reporting success before then can leave a
+        // row blank under a toast saying it is visible again. loadClips reports
+        // failure rather than throwing, so the toast has to read its result.
+        const reloaded = await refreshCurrentFolder();
+        if (!reloaded) {
+          toast.error('Visibility changed, but the list could not be reloaded');
+          return;
+        }
         toast.success(hidden ? 'Clip hidden' : 'Clip no longer hidden');
       } catch (error) {
         console.error('Failed to change clip visibility:', error);
         toast.error('Failed to change clip visibility');
       }
     },
-    [clearRevealed, refreshCurrentFolder]
+    [forgetRevealed, refreshCurrentFolder]
   );
 
   const handleTogglePin = useCallback(
