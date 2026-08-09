@@ -92,6 +92,15 @@ pub fn run_app() {
         commands::migrate_clip_format_model(&db)
             .await
             .unwrap_or_else(|error| panic!("Cubby clipboard-format migration failed: {error}"));
+
+        // Last, because the two migrations above rewrite content_hash and can
+        // create the duplicates this collapses. Logged rather than fatal: a
+        // failure leaves the database exactly as it was on the previous
+        // version, which still works, and refusing to start over a hardening
+        // step would be a worse outcome than running unconstrained.
+        if let Err(error) = db.enforce_content_hash_uniqueness().await {
+            log::error!("STORAGE: Could not enforce unique clip hashes: {error}");
+        }
     });
 
     let db_arc = Arc::new(db);

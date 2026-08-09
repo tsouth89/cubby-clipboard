@@ -71,6 +71,142 @@ impl Database {
         })
     }
 
+    /// Collapse duplicate `content_hash` rows and make the constraint
+    /// structural.
+    ///
+    /// Deduplication used to rest entirely on the `SELECT uuid FROM clips WHERE
+    /// content_hash = ?` lookup succeeding, because the column carried a plain
+    /// index. That makes a failed lookup indistinguishable from a genuine miss,
+    /// so any caller that collapses the error arm into `None` silently doubles
+    /// the user's history. Fixing the call site fixed one caller; the schema
+    /// still allowed the bad state for the next one. This closes it.
+    ///
+    /// Deliberately **not** part of [`Self::migrate`]. The encrypted-storage
+    /// and clip-format migrations rewrite `content_hash` for existing rows, so
+    /// they can create duplicates that did not exist when the schema was set
+    /// up; creating the unique index before they run would fail the upgrade of
+    /// exactly the installs that need it. Call this after them.
+    ///
+    /// Returns the number of duplicate rows removed. On failure the whole
+    /// reconciliation rolls back and the old non-unique index is left in place:
+    /// an unconstrained database that works beats a half-migrated one.
+    pub async fn enforce_content_hash_uniqueness(&self) -> Result<u64, String> {
+        let duplicated: Vec<String> = sqlx::query_scalar(
+            "SELECT content_hash FROM clips GROUP BY content_hash HAVING COUNT(*) > 1",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("could not look for duplicate clips: {error}"))?;
+
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("could not start the deduplication: {error}"))?;
+
+        let mut orphaned_images: Vec<String> = Vec::new();
+        let mut removed = 0_u64;
+
+        for hash in &duplicated {
+            // Newest wins. `created_at` is what the history is ordered by, and
+            // the id breaks ties for clips captured inside the same second.
+            let rows: Vec<DuplicateRow> = sqlx::query_as::<_, (String, bool, Option<i64>)>(
+                r#"
+                SELECT uuid, is_pinned, folder_id
+                FROM clips
+                WHERE content_hash = ?
+                ORDER BY created_at DESC, id DESC
+                "#,
+            )
+            .bind(hash)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(|error| format!("could not read a duplicate clip group: {error}"))?
+            .into_iter()
+            .map(|(uuid, is_pinned, folder_id)| DuplicateRow {
+                uuid,
+                is_pinned,
+                folder_id,
+            })
+            .collect();
+
+            let Some((survivor, losers)) = rows.split_first() else {
+                continue;
+            };
+            if losers.is_empty() {
+                continue;
+            }
+
+            // Carry forward state the user set by hand. Losing a pin because a
+            // duplicate happened to be newer would be a silent data loss, and a
+            // pin is cheap to keep.
+            let pinned = rows.iter().any(|row| row.is_pinned);
+            let folder = survivor
+                .folder_id
+                .or_else(|| rows.iter().find_map(|row| row.folder_id));
+
+            sqlx::query("UPDATE clips SET is_pinned = ?, folder_id = ? WHERE uuid = ?")
+                .bind(pinned)
+                .bind(folder)
+                .bind(&survivor.uuid)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| format!("could not merge duplicate clip state: {error}"))?;
+
+            for loser in losers {
+                // Child rows cascade, but the image blobs on disk do not, so
+                // their paths are collected before the row disappears.
+                let paths: Vec<Option<String>> =
+                    sqlx::query_scalar("SELECT file_path FROM clip_images WHERE clip_uuid = ?")
+                        .bind(&loser.uuid)
+                        .fetch_all(&mut *transaction)
+                        .await
+                        .map_err(|error| {
+                            format!("could not read a duplicate clip's images: {error}")
+                        })?;
+                orphaned_images.extend(paths.into_iter().flatten());
+
+                sqlx::query("DELETE FROM clips WHERE uuid = ?")
+                    .bind(&loser.uuid)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| format!("could not remove a duplicate clip: {error}"))?;
+                removed += 1;
+            }
+        }
+
+        // Created before the old index is dropped, so a database that still
+        // holds duplicates fails here and rolls back with its index intact.
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_clips_hash_unique ON clips(content_hash)",
+        )
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            format!("could not make content_hash unique, so the old index was kept: {error}")
+        })?;
+        sqlx::query("DROP INDEX IF EXISTS idx_clips_hash")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| format!("could not drop the old content_hash index: {error}"))?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("could not commit the deduplication: {error}"))?;
+
+        // Only after the rows are durably gone: a rollback must not leave a
+        // surviving clip pointing at a file that has been deleted.
+        for path in orphaned_images {
+            crate::clipboard::remove_full_image_file(&path);
+        }
+
+        if removed > 0 {
+            log::info!("STORAGE: Removed {removed} duplicate clips before enforcing unique hashes");
+        }
+        Ok(removed)
+    }
+
     pub async fn migrate(&self) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
@@ -659,6 +795,13 @@ fn sanitize_storage_diagnostic(message: &str) -> String {
     }
 }
 
+/// One clip competing to survive deduplication.
+struct DuplicateRow {
+    uuid: String,
+    is_pinned: bool,
+    folder_id: Option<i64>,
+}
+
 async fn add_column_if_missing(pool: &SqlitePool, sql: &str) -> Result<(), sqlx::Error> {
     match sqlx::query(sql).execute(pool).await {
         Ok(_) => Ok(()),
@@ -689,6 +832,213 @@ mod tests {
             std::env::temp_dir().join(format!("cubby-db-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         directory
+    }
+
+    async fn migrated_database() -> Database {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory database should open");
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .expect("foreign keys should be enabled");
+        let database = Database {
+            pool,
+            crypto: Arc::new(CryptoManager::ephemeral()),
+            image_dir: std::env::temp_dir().join(format!("cubby-test-{}", uuid::Uuid::new_v4())),
+            search_index: Arc::new(crate::search_index::SearchIndex::default()),
+        };
+        database.migrate().await.expect("migration should succeed");
+        database
+    }
+
+    async fn insert_clip_with_hash(
+        database: &Database,
+        uuid: &str,
+        hash: &str,
+        pinned: bool,
+        folder: Option<i64>,
+        created_at: &str,
+    ) {
+        sqlx::query(
+            r#"INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash, folder_id, is_pinned, created_at, last_accessed)
+               VALUES (?, 'text', x'00', 'preview', ?, ?, ?, ?, ?)"#,
+        )
+        .bind(uuid)
+        .bind(hash)
+        .bind(folder)
+        .bind(pinned)
+        .bind(created_at)
+        .bind(created_at)
+        .execute(&database.pool)
+        .await
+        .expect("clip should insert");
+    }
+
+    async fn unique_hash_index_exists(database: &Database) -> bool {
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'index' AND name = 'idx_clips_hash_unique'
+            )
+            "#,
+        )
+        .fetch_one(&database.pool)
+        .await
+        .expect("index lookup should succeed")
+    }
+
+    #[tokio::test]
+    async fn a_fresh_database_gets_the_unique_hash_index() {
+        let database = migrated_database().await;
+        assert_eq!(
+            database
+                .enforce_content_hash_uniqueness()
+                .await
+                .expect("a fresh database has nothing to reconcile"),
+            0
+        );
+        assert!(unique_hash_index_exists(&database).await);
+
+        // The old non-unique index is gone, so nothing suggests the constraint
+        // is merely advisory.
+        let old_index: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_clips_hash')",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .expect("index lookup should succeed");
+        assert!(!old_index, "the old non-unique index should be replaced");
+    }
+
+    #[tokio::test]
+    async fn a_database_without_duplicates_upgrades_cleanly() {
+        let database = migrated_database().await;
+        for index in 0..5 {
+            insert_clip_with_hash(
+                &database,
+                &format!("uuid{index}"),
+                &format!("hash{index}"),
+                false,
+                None,
+                "2026-05-01 09:00:00",
+            )
+            .await;
+        }
+
+        assert_eq!(
+            database.enforce_content_hash_uniqueness().await.unwrap(),
+            0,
+            "nothing should be removed when there are no duplicates"
+        );
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM clips")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 5, "no clip may be lost");
+    }
+
+    #[tokio::test]
+    async fn duplicates_collapse_to_the_newest_row_and_keep_a_pin() {
+        let database = migrated_database().await;
+        let folder: i64 =
+            sqlx::query_scalar("INSERT INTO folders (name) VALUES ('Kept') RETURNING id")
+                .fetch_one(&database.pool)
+                .await
+                .expect("folder should insert");
+
+        // The pin and the folder are on the OLDEST row, which is the one that
+        // loses. Both have to survive on the winner or the user silently loses
+        // work they did by hand.
+        insert_clip_with_hash(
+            &database,
+            "old",
+            "same-hash",
+            true,
+            Some(folder),
+            "2026-05-01 09:00:00",
+        )
+        .await;
+        insert_clip_with_hash(
+            &database,
+            "new",
+            "same-hash",
+            false,
+            None,
+            "2026-05-02 09:00:00",
+        )
+        .await;
+
+        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
+
+        let survivors: Vec<(String, bool, Option<i64>)> =
+            sqlx::query_as("SELECT uuid, is_pinned, folder_id FROM clips")
+                .fetch_all(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(survivors.len(), 1, "one row should remain");
+        assert_eq!(survivors[0].0, "new", "the newest row should win");
+        assert!(survivors[0].1, "the pin should carry forward");
+        assert_eq!(
+            survivors[0].2,
+            Some(folder),
+            "folder membership should carry forward"
+        );
+        assert!(unique_hash_index_exists(&database).await);
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_hash_is_rejected_after_the_constraint_exists() {
+        let database = migrated_database().await;
+        insert_clip_with_hash(
+            &database,
+            "first",
+            "hash",
+            false,
+            None,
+            "2026-05-01 09:00:00",
+        )
+        .await;
+        database.enforce_content_hash_uniqueness().await.unwrap();
+
+        // The point of the whole change: the database refuses, so a caller that
+        // mistakes a failed lookup for a miss cannot duplicate history.
+        let result = sqlx::query(
+            r#"INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash)
+               VALUES ('second', 'text', x'00', 'preview', 'hash')"#,
+        )
+        .execute(&database.pool)
+        .await;
+
+        let error = result.expect_err("a duplicate content_hash must be rejected");
+        assert!(
+            error.to_string().to_lowercase().contains("unique"),
+            "expected a uniqueness violation, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_rows_of_a_removed_duplicate_go_with_it() {
+        let database = migrated_database().await;
+        insert_clip_with_hash(&database, "old", "dupe", false, None, "2026-05-01 09:00:00").await;
+        insert_clip_with_hash(&database, "new", "dupe", false, None, "2026-05-02 09:00:00").await;
+        sqlx::query(
+            "INSERT INTO clip_formats (clip_uuid, format, content) VALUES ('old', 'fixture', x'00')",
+        )
+        .execute(&database.pool)
+        .await
+        .expect("format row should insert");
+
+        database.enforce_content_hash_uniqueness().await.unwrap();
+
+        let orphans: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM clip_formats")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(orphans, 0, "child rows must not outlive their clip");
     }
 
     #[tokio::test]
