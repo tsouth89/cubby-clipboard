@@ -937,7 +937,18 @@ mod windows_matrix {
         // put the document name in the title bar do exist, but matching on it
         // costs more than it buys -- Word's window is titled before it is ready
         // to accept a paste.
-        let outcome = drive_uia_app(class, app, &path, &arg_refs, options.keep_apps, None, None);
+        let outcome = drive_uia_app(AppRun {
+            class,
+            app,
+            path: &path,
+            args: &arg_refs,
+            keep: options.keep_apps,
+            focus_marker: None,
+            title_marker: None,
+            // Editors hold the pasted text in an unsaved document, so asking
+            // the window to close raises a save prompt and leaves it on screen.
+            terminate_leftovers: true,
+        });
         if let Some(document) = document {
             let _ = std::fs::remove_file(document);
         }
@@ -965,15 +976,35 @@ mod windows_matrix {
         Failed(Vec<Failure>),
     }
 
-    fn drive_uia_app(
+    /// One application-driving run. Grouped into a struct because the knobs are
+    /// easy to transpose at a call site when they are eight positional
+    /// arguments, and getting `focus_marker` and `title_marker` the wrong way
+    /// round fails in a way that looks like an application bug.
+    struct AppRun<'a> {
         class: AppClass,
-        app: &str,
-        path: &Path,
-        args: &[&str],
+        app: &'a str,
+        path: &'a Path,
+        args: &'a [&'a str],
         keep: bool,
-        focus_marker: Option<&str>,
-        title_marker: Option<&str>,
-    ) -> DriveOutcome {
+        /// Accessible name of the control to focus before pasting.
+        focus_marker: Option<&'a str>,
+        /// Window title substring to locate, instead of the launched pid.
+        title_marker: Option<&'a str>,
+        /// Terminate processes of this executable that the run created.
+        terminate_leftovers: bool,
+    }
+
+    fn drive_uia_app(run: AppRun<'_>) -> DriveOutcome {
+        let AppRun {
+            class,
+            app,
+            path,
+            args,
+            keep,
+            focus_marker,
+            title_marker,
+            terminate_leftovers,
+        } = run;
         let mut failures = Vec::new();
         let mut checks = 0;
 
@@ -1014,6 +1045,12 @@ mod windows_matrix {
             return DriveOutcome::Failed(failures);
         }
 
+        let exe_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let pids_before = pids_for_exe(exe_name);
+
         let launched = match LaunchedApp::spawn(path, args, keep) {
             Ok(launched) => launched,
             Err(error) => {
@@ -1026,11 +1063,6 @@ mod windows_matrix {
                 )])
             }
         };
-
-        let exe_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
         let uia = match Uia::new() {
             Ok(uia) => uia,
             Err(error) => return DriveOutcome::NotAutomatable(error),
@@ -1147,12 +1179,21 @@ mod windows_matrix {
             }
         }
 
-        // Killing the child is not enough for apps whose launcher hands off to
-        // another process and exits -- a browser being the usual case -- so the
-        // window itself is asked to close. Without this every run leaves one
-        // more window on the desktop.
+        // Leaving windows behind was a real defect in the first version of this
+        // harness. Killing the spawned child is not enough: Windows 11 Notepad
+        // and every browser hand the launch off to another process and exit, so
+        // the child we hold is already gone. Closing the window is not enough
+        // either, because an application asked to close with text pasted into
+        // an unsaved document puts up a save prompt and stays on screen.
+        //
+        // So: ask the window to close, then terminate any process of this
+        // executable that did not exist before the row started.
         if !keep {
             close_window(hwnd);
+            if terminate_leftovers {
+                thread::sleep(Duration::from_millis(400));
+                kill_new_processes(exe_name, &pids_before);
+            }
         }
 
         if failures.is_empty() {
@@ -1166,6 +1207,56 @@ mod windows_matrix {
         use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
         unsafe {
             let _ = PostMessageW(Some(hwnd), WM_CLOSE, Default::default(), Default::default());
+        }
+    }
+
+    /// Process ids currently running `exe_name`.
+    ///
+    /// Snapshotted before a row launches its application so cleanup can tell
+    /// the processes this run created from ones the user already had open. A
+    /// harness that kills every `msedge.exe` would close the user's browser.
+    fn pids_for_exe(exe_name: &str) -> Vec<u32> {
+        use windows::Win32::System::ProcessStatus::EnumProcesses;
+
+        let mut pids = vec![0_u32; 2048];
+        let mut needed = 0_u32;
+        let ok = unsafe {
+            EnumProcesses(
+                pids.as_mut_ptr(),
+                (pids.len() * std::mem::size_of::<u32>()) as u32,
+                &mut needed,
+            )
+        }
+        .is_ok();
+        if !ok {
+            return Vec::new();
+        }
+        let count = needed as usize / std::mem::size_of::<u32>();
+        pids.truncate(count);
+        pids.retain(|pid| {
+            *pid != 0
+                && process_image_name(*pid).is_some_and(|name| name.eq_ignore_ascii_case(exe_name))
+        });
+        pids
+    }
+
+    /// Terminate processes running `exe_name` that were not present in
+    /// `before`. Closing the window is not enough for an application that shows
+    /// a save prompt for the text this suite just pasted, and it does nothing
+    /// at all for one whose launcher handed off to another process.
+    fn kill_new_processes(exe_name: &str, before: &[u32]) {
+        use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+        for pid in pids_for_exe(exe_name) {
+            if before.contains(&pid) {
+                continue;
+            }
+            unsafe {
+                if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+                    let _ = TerminateProcess(handle, 0);
+                    let _ = CloseHandle(handle);
+                }
+            }
         }
     }
 
@@ -1234,15 +1325,21 @@ mod windows_matrix {
         ];
 
         let formats = vec![Format::UnicodeText];
-        let outcome = drive_uia_app(
+        let outcome = drive_uia_app(AppRun {
             class,
             app,
-            &path,
-            &args,
-            options.keep_apps,
-            Some(BROWSER_TARGET_LABEL),
-            Some(&page_title),
-        );
+            path: &path,
+            args: &args,
+            keep: options.keep_apps,
+            focus_marker: Some(BROWSER_TARGET_LABEL),
+            title_marker: Some(&page_title),
+            // Deliberately not terminated by name. A browser runs a process per
+            // renderer and spawns them constantly, so killing every msedge.exe
+            // that appeared during the run would take the user's own tabs with
+            // it. A throwaway profile with one window exits cleanly on WM_CLOSE
+            // instead.
+            terminate_leftovers: false,
+        });
         let _ = std::fs::remove_file(&page);
         if !options.keep_apps {
             let _ = std::fs::remove_dir_all(&profile);
@@ -1368,6 +1465,10 @@ mod windows_matrix {
         let command =
             format!("Read-Host | Set-Content -LiteralPath $env:TEMP\\{file_name} -Encoding utf8");
 
+        // Recorded inside the closure so cleanup can still reach the window on
+        // the error paths. The shell exits on its own once it has read a line,
+        // but a row that failed before that leaves the window sitting open.
+        let terminal_window: std::cell::Cell<Option<isize>> = std::cell::Cell::new(None);
         let result = (|| -> Result<(), String> {
             let mut launched = LaunchedApp::spawn(
                 terminal_path,
@@ -1384,7 +1485,8 @@ mod windows_matrix {
                 false,
             )?;
             let hwnd = wait_for(DEFAULT_TIMEOUT, || Ok(window_with_title(&title)))
-                .map_err(|_| "the cmd.exe console window never appeared".to_string())?;
+                .map_err(|_| "the terminal window never appeared".to_string())?;
+            terminal_window.set(Some(hwnd.0 as isize));
             paste_into(hwnd, PasteStrategy::Standard)?;
             thread::sleep(Duration::from_millis(300));
             send_enter()?;
@@ -1410,6 +1512,12 @@ mod windows_matrix {
         })();
 
         let _ = std::fs::remove_file(&output);
+        // The window, not the process: `-w new` can open a window inside an
+        // already-running WindowsTerminal.exe, so terminating that process
+        // would close the user's other terminals with it.
+        if let Some(hwnd) = terminal_window.get() {
+            close_window(HWND(hwnd as *mut std::ffi::c_void));
+        }
         match result {
             Ok(()) => Ok(checks + 1),
             Err(error) => Err(vec![failure(
@@ -1556,6 +1664,11 @@ mod windows_matrix {
                 Ok(dest_dir.join(file_name).is_file().then_some(()))
             })
             .map_err(|_| "Explorer did not paste the file into the destination".to_string())?;
+
+            // Close the window, never the process: Explorer windows belong to
+            // the long-running shell, and terminating it would take the user's
+            // taskbar and desktop with it.
+            close_window(hwnd);
             Ok(())
         })();
 

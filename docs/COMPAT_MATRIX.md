@@ -96,6 +96,38 @@ These were all found the hard way; changing them will silently weaken the suite.
 - **Word's content is only readable through the Text pattern.** Its document
   also exposes a Value pattern, which always reads back empty.
 
+## Cleanup
+
+The suite leaves the desktop as it found it: window count is unchanged across
+repeated runs. Getting there takes more than killing the process it spawned,
+because the two obvious approaches each fail on half the rows.
+
+- **Closing the window is not enough.** An editor holding pasted text in an
+  unsaved document answers `WM_CLOSE` with a save prompt and stays on screen.
+- **Killing the spawned child is not enough.** Windows 11 Notepad and every
+  browser hand the launch off to another process and exit, so the child is
+  already gone.
+
+So each row closes its window and then terminates only processes of that
+executable that did not exist before the row started. Two rows deliberately opt
+out of the terminate half:
+
+- **Browsers.** A browser runs a process per renderer and spawns them
+  constantly, so killing every `msedge.exe` that appeared during the run would
+  take the user's own tabs with it. A throwaway profile with a single window
+  exits cleanly on `WM_CLOSE` instead.
+- **Explorer and Windows Terminal.** Their windows belong to long-running host
+  processes -- the shell, and a `WindowsTerminal.exe` that may own the user's
+  other terminals -- so these rows close the window and never the process.
+
+Residual case: if the target application was **already running** when the suite
+started, a row may open a document in that existing process rather than a new
+one. Nothing new is terminated, and that window can be left behind with a save
+prompt. Close the target apps before a full run if that matters.
+
+`-KeepApps` disables all of this, which is what makes it useful for inspecting
+a failure.
+
 ## Interpreting a failure
 
 `office / winword.exe / unicode_text / paste` means Word was found and driven,
