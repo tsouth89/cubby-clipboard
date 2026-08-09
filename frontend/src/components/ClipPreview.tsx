@@ -86,6 +86,10 @@ export function ClipPreview({
   const [saving, setSaving] = useState(false);
   // Local working copy of the note so typing stays responsive; saved on blur.
   const [noteDraft, setNoteDraft] = useState('');
+  // Set synchronously by Escape so the blur it triggers can tell a cancel from
+  // an ordinary focus loss. A ref, not state, because blur runs before a
+  // re-render would deliver the new value.
+  const noteCancelled = useRef(false);
   const [details, setDetails] = useState<ClipDetails | null>(null);
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const clipId = clip?.id ?? null;
@@ -147,6 +151,7 @@ export function ClipPreview({
   // Follow the selection rather than the keystrokes, so switching clips shows
   // the new clip's note instead of carrying the previous one across.
   useEffect(() => {
+    noteCancelled.current = false;
     setNoteDraft(clip?.notes ?? '');
   }, [clipId, clip?.notes]);
 
@@ -343,6 +348,14 @@ export function ClipPreview({
             value={noteDraft}
             onChange={(event) => setNoteDraft(event.target.value)}
             onBlur={() => {
+              // Escape blurs to commit the cancel, so the revert has to happen
+              // here: setNoteDraft has not been applied by the time this runs,
+              // and noteDraft still holds the text the user asked to discard.
+              if (noteCancelled.current) {
+                noteCancelled.current = false;
+                setNoteDraft(clip.notes ?? '');
+                return;
+              }
               const next = noteDraft.trim();
               if (next !== (clip.notes ?? '')) void onSaveNotes(clip.id, next);
             }}
@@ -350,7 +363,7 @@ export function ClipPreview({
               if (event.key === 'Enter') event.currentTarget.blur();
               if (event.key === 'Escape') {
                 event.stopPropagation();
-                setNoteDraft(clip.notes ?? '');
+                noteCancelled.current = true;
                 event.currentTarget.blur();
               }
             }}
