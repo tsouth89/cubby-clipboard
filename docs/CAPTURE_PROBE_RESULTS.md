@@ -30,9 +30,9 @@ cargo run --locked --bin clipboard_probe -- --burst 100 --interval-ms 10 --timeo
 ## Remaining proof
 
 - Run the interactive probe during RDP and NinjaOne sessions.
-- Add image and delayed-rendered virtual-file burst fixtures.
 - Verify content remains available after disconnecting or closing the source session.
-- Run the new controlled-contention scenario and record the retry margin.
+- Complete the representative Office/browser/Explorer/terminal/IDE/packaged-app/
+  elevated-target matrix tracked by SBS-408.
 
 ## Automated multi-format fixtures
 
@@ -49,8 +49,8 @@ external path references as durable history.
 scripts/test-clipboard-formats.ps1
 ```
 
-Latest live result on the Windows 11 development machine (2026-07-26): 10
-consecutive runs, 30 fixture payloads observed and verified, zero read failures.
+Latest live result on the Windows 11 development machine (2026-08-09): 10
+consecutive runs, 70 fixture payloads observed and verified, zero read failures.
 Each file-list payload used a new isolated temporary directory containing a
 whitespace-sensitive text file, a Unicode-named binary file, and a folder. All
 targets were validated before cleanup, and no fixture directories remained.
@@ -60,7 +60,13 @@ bounded retry principle
 used by production capture instead of treating the first contended read as data
 loss.
 
-Delayed-rendered virtual files are outside Cubby's stored-history contract.
+The expanded suite adds a real delayed-rendering owner window for Unicode text,
+CF_HTML, RTF, and a 2x2 bitmap. Every run verifies exact text/format bytes and
+exact decoded RGBA pixels. It also advertises `FileGroupDescriptorW` in both a
+virtual-file-only payload and a payload with a Unicode text fallback. Both are
+classified through Cubby's production file-payload policy as intentionally
+ignored: delayed-rendered virtual files are outside Cubby's stored-history
+contract, and their path-like fallback must not become a misleading clip.
 
 ## NinjaOne remote-session validation
 

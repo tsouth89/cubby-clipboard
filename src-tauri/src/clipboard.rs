@@ -483,7 +483,9 @@ fn capture_clipboard_update(
     // as an image rather than as an unreliable file reference.
     let has_file_payload = clipboard_has_file_payload_format();
     let has_image_payload = clipboard_has_image_format();
-    if has_file_payload && !has_image_payload {
+    if crate::clipboard_policy::classify_file_payload(has_file_payload, has_image_payload)
+        == crate::clipboard_policy::FilePayloadPolicy::IgnoreFilePayload
+    {
         note_clipboard_event(sequence);
         log::debug!(
             "CLIPBOARD: Sequence {} contained a file payload; intentionally ignoring it",
@@ -647,33 +649,47 @@ fn clipboard_has_file_payload_format() -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn registered_png_format() -> u32 {
+fn register_clipboard_format(name: &str) -> u32 {
     use windows::core::PCWSTR;
     use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe { RegisterClipboardFormatW(PCWSTR(wide.as_ptr())) }
+}
+
+#[cfg(target_os = "windows")]
+fn registered_png_format() -> u32 {
     static PNG_FORMAT: OnceLock<u32> = OnceLock::new();
-    *PNG_FORMAT.get_or_init(|| {
-        let name: Vec<u16> = "PNG".encode_utf16().chain(std::iter::once(0)).collect();
-        unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) }
-    })
+    *PNG_FORMAT.get_or_init(|| register_clipboard_format("PNG"))
 }
 
 #[cfg(target_os = "windows")]
 fn clipboard_has_image_format() -> bool {
     use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
 
-    const CF_BITMAP: u32 = 2;
-    const CF_DIBV5: u32 = 17;
-
-    if [CF_DIBV5, CF_DIB_FORMAT, CF_BITMAP]
+    if crate::clipboard_policy::PREDEFINED_IMAGE_FORMATS
         .into_iter()
-        .any(|format| unsafe { IsClipboardFormatAvailable(format) }.is_ok())
+        .any(|(_, format)| unsafe { IsClipboardFormatAvailable(format) }.is_ok())
     {
         return true;
     }
 
-    let png_format = registered_png_format();
-    png_format != 0 && unsafe { IsClipboardFormatAvailable(png_format) }.is_ok()
+    registered_image_formats()
+        .iter()
+        .any(|format| *format != 0 && unsafe { IsClipboardFormatAvailable(*format) }.is_ok())
+}
+
+/// Identifiers for [`crate::clipboard_policy::REGISTERED_IMAGE_FORMATS`],
+/// resolved once because this runs on the capture path.
+#[cfg(target_os = "windows")]
+fn registered_image_formats() -> &'static [u32] {
+    static FORMATS: OnceLock<Vec<u32>> = OnceLock::new();
+    FORMATS.get_or_init(|| {
+        crate::clipboard_policy::REGISTERED_IMAGE_FORMATS
+            .into_iter()
+            .map(register_clipboard_format)
+            .collect()
+    })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -2420,6 +2436,17 @@ mod tests {
         CAPTURE_STATE_STOPPED, CLIPBOARD_CLEAR_FORGET_WINDOW, IGNORE_HASH, IGNORE_HASH_TTL,
     };
     use std::time::{Duration, Instant};
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cf_dib_format_matches_the_shared_image_format_table() {
+        let table_dib = crate::clipboard_policy::PREDEFINED_IMAGE_FORMATS
+            .into_iter()
+            .find(|(name, _)| *name == "CF_DIB")
+            .expect("CF_DIB in the shared image format table")
+            .1;
+        assert_eq!(super::CF_DIB_FORMAT, table_dib);
+    }
 
     #[cfg(target_os = "windows")]
     mod deferral {

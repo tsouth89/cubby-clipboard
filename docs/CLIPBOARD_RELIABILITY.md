@@ -108,6 +108,11 @@ listener verifies both decoded values and exact bytes:
   whitespace-sensitive text file, a Unicode-named binary file, and a folder
 - Unicode text with an application-defined binary format containing embedded NUL
   and high bytes
+- Delayed-rendered Unicode text with simultaneous CF_HTML and RTF payloads,
+  materialized only when the listener requests each format
+- A delayed-rendered 2x2 bitmap with exact RGBA pixel assertions
+- Virtual-file-only and virtual-file-plus-text-fallback payloads, both classified
+  through the same production policy as intentionally ignored file history
 
 Fixture validation retries transient auxiliary-format read contention with
 bounded exponential backoff. The writer retains each payload long enough for the
@@ -115,11 +120,31 @@ complete retry window, so a retry cannot accidentally validate the next fixture.
 Physical targets stay on disk while the listener verifies their order, names,
 types, and exact bytes, then the writer removes the isolated temporary directory.
 
-This suite proves the local Windows clipboard can materialize those payloads
-without normalization or format loss. Application-specific compatibility still
-belongs in the manual matrix below; passing the fixtures does not claim that
-Office, browsers, remote clients, or elevated targets have been validated.
+The delayed writer owns a hidden Win32 window and responds to `WM_RENDERFORMAT`,
+so those fixtures exercise genuine on-demand rendering rather than a writer-side
+sleep. The virtual-file fixtures advertise `FileGroupDescriptorW`; their text
+fallback is deliberately not captured because it is normally a path or display
+name for content Cubby cannot retain durably.
+
+Known flake: the `virtual_only` fixture intermittently fails to publish with
+`OSError(1418): Thread does not have a clipboard open`, and the run then times
+out having observed six of seven fixtures. It reproduces at roughly one run in
+fifteen on a busy machine, both before and after the delayed-rendering fixtures
+were added, so a single red run is not by itself a capture regression. See #164
+for the suspected cause -- the delayed writer's
+`WM_RENDERALLFORMATS` handler opening the clipboard on the same thread as an
+in-flight `clipboard_rs` write. Re-run the suite before investigating, and treat
+a repeatable failure or any non-zero `read_failures` as a genuine defect.
+
+This suite proves the local Windows clipboard can materialize supported payloads
+without normalization or format loss and can reject unsupported file payloads
+without confusing them for stored history. Application-specific compatibility
+still belongs in the manual matrix below; passing the fixtures does not claim
+that Office, browsers, remote clients, or elevated targets have been validated.
 
 Production materialization uses the same bounded retry margin: ten attempts with
 exponential backoff capped at 64 ms, allowing up to 319 ms for a clipboard owner
-or synchronization client to release the clipboard.
+or synchronization client to release the clipboard. The fixture writer takes the
+clipboard on the same terms when it publishes a delayed payload, so probe
+failures reflect capture behavior rather than a writer that gave up sooner than
+production would have.
