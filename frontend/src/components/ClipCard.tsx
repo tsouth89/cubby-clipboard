@@ -76,9 +76,7 @@ export const ClipCard = memo(function ClipCard({
   // the payload. The revealed copy is a snapshot taken when the fetch returned,
   // so taking metadata from it too would freeze the pin state and the timestamp
   // at that moment until the reveal was dropped.
-  const clip = revealed
-    ? { ...row, content: revealed.content, preview: revealed.preview }
-    : row;
+  const clip = revealed ? { ...row, content: revealed.content, preview: revealed.preview } : row;
   const isHidden = (row.is_hidden ?? false) && !revealed;
 
   const imageSrc = useMemo(
