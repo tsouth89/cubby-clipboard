@@ -420,27 +420,16 @@ jobs:
             }
           }
 
-          # A draft release means nothing has shipped from these URLs yet, so a
-          # retry after a failed build is allowed to replace its own partial
-          # upload. Once the release is published the objects are immutable.
-          $isDraft = gh release view "$env:TAG" --json isDraft --jq .isDraft
-          if ($LASTEXITCODE -ne 0) {
-            throw "Could not determine whether ${env:TAG} is still a draft."
-          }
-          # A hashtable, not an array: array splatting passes positional
-          # arguments and silently fails to bind a switch.
-          $replaceArgs = @{}
-          if ($isDraft -eq "true") {
-            Write-Host "${env:TAG} is still a draft; a differing object may be replaced."
-            $replaceArgs["AllowReplaceUnpublished"] = $true
-          }
-
+          # The tag is passed, not a decision about it. Whether replacing an
+          # existing object is allowed is settled inside the script, at the
+          # moment of replacement, so the answer cannot go stale between here
+          # and there.
           ./scripts/publish-store-installer.ps1 `
             -Version "${{ needs.create-release.outputs.version }}" `
             -Architecture "${{ matrix.arch }}" `
             -InstallerPath "${{ steps.store-installer.outputs.path }}" `
             -BucketName $env:CLOUDFLARE_R2_BUCKET `
-            @replaceArgs
+            -ReleaseTag $env:TAG
 
       - name: Assemble the portable package
         if: matrix.arch == 'x64'
