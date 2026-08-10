@@ -42,16 +42,31 @@ tight enough that a real regression does.
 | `image_thumbnail_bytes` | 86.8 KiB | 192 KiB | enforced |
 | `search_index_bytes_per_clip` | 998 B | 2 KiB | reported |
 | `first_searchable_result` | 2–5 ms over 2,000 clips | 100 ms | reported |
-| `process_startup` | not yet measured | 2,000 ms | reported |
-| `shortcut_to_visible` | not yet measured | 150 ms | reported |
-| `paste_completion` | not yet measured | 800 ms | reported |
-| `idle_cpu` | not yet measured | 1% | reported |
-| `idle_memory` | not yet measured | 200 MiB | reported |
+| `process_startup` | 258–593 ms | 2,000 ms | reported |
+| `idle_cpu` | 0.00% | 1% | reported |
+| `idle_memory` | 191–193 MiB | 200 MiB | reported |
+| `shortcut_to_visible` | not measured | 150 ms | reported |
+| `paste_completion` | not measured | 800 ms | reported |
 
-The bottom five need a running app. `scripts/measure-perf-budgets.ps1 -AppPath`
-measures startup, idle CPU, and idle memory; `shortcut_to_visible` and
-`paste_completion` are not measured by this script and say so in its output
-rather than being quietly absent.
+The bottom two need a running app driven by a hotkey. The other three were
+measured against an installed v1.3.1 with a real 3,735-clip history;
+`shortcut_to_visible` and `paste_completion` are not measured by this script and
+say so in its output rather than being quietly absent.
+
+`idle_memory` at 191 MiB sits just under its 200 MiB limit, and roughly 4 MiB of
+that is the search index at its post-#169 cost. Before that rework the same
+history would have carried about 19 MiB of index, so the headroom here is
+recent.
+
+Two ways this measurement got the wrong answer first, both now fixed and worth
+not reintroducing:
+
+- **Scope the process tree by parent id, not by name.** Matching every
+  `*WebView*` process on the machine pulled in 48 unrelated ones from other
+  apps and reported 1,055 MiB against a 200 MiB budget.
+- **Let the app settle before sampling.** Sampling at launch measures the index
+  build over the whole history and reported 3.67% CPU where the settled figure
+  is 0.00%.
 
 Measuring against a locally built `cubby.exe` requires no other Cubby instance
 to be running: the single-instance plugin hands off to the existing process and

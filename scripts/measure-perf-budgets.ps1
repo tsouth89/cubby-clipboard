@@ -2,8 +2,11 @@ param(
     # Built cubby.exe to measure startup, idle CPU, and idle memory against.
     # Omit to measure only the in-process budgets.
     [string]$AppPath = "",
-    # Seconds to sample idle CPU over. Shorter samples are dominated by startup.
+    # Seconds to sample idle CPU over. Shorter samples are dominated by noise.
     [int]$IdleSeconds = 20,
+    # Seconds to wait after launch before sampling anything. The index build
+    # runs at startup and is not idle work.
+    [int]$SettleSeconds = 30,
     [switch]$SkipInProcess
 )
 
@@ -19,6 +22,16 @@ $notMeasuredHere = @{
 }
 
 $results = New-Object System.Collections.Generic.List[object]
+
+# A process and its direct children. Cubby is a WebView app, so the renderer
+# belongs in the total -- but only *its* renderer.
+function Get-ProcessTree([int]$RootId) {
+    $root = Get-Process -Id $RootId -ErrorAction SilentlyContinue
+    if (-not $root) { return @() }
+    $children = Get-CimInstance Win32_Process -Filter "ParentProcessId=$RootId" -ErrorAction SilentlyContinue |
+        ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }
+    return @($root) + @($children)
+}
 
 function Add-Result([string]$Id, [string]$Value, [string]$Status) {
     $results.Add([pscustomobject]@{ Budget = $Id; Measured = $Value; Status = $Status })
@@ -69,22 +82,36 @@ if ($AppPath) {
         Add-Result "process_startup" "no main window within 30 s" "not measured (starts to tray)"
     }
 
-    # idle_cpu: CPU time consumed over the sample window, as a share of one core.
     $process.Refresh()
     if (-not $process.HasExited) {
-        $cpuBefore = $process.TotalProcessorTime
+        # "Idle" has to mean idle. Sampling immediately after launch measures
+        # the search index being built over the whole history, which on a real
+        # 3,700-clip database reported 3.67% against a 1% budget when the
+        # settled figure is 0.00%.
+        Write-Host "  settling for $SettleSeconds s before sampling..."
+        Start-Sleep -Seconds $SettleSeconds
+
+        # Cubby's own process and its children. Scoped by parent id, not by
+        # name: the first version of this matched every *WebView* process on
+        # the machine, which on a desktop running Teams added 48 unrelated
+        # processes and reported 1,055 MiB against a 200 MiB budget when Cubby's
+        # actual tree was 193 MiB.
+        $tree = Get-ProcessTree -RootId $process.Id
+
+        # CPU across the tree, as a share of one core. Summed as seconds:
+        # Measure-Object cannot total TimeSpan values and silently yields zero.
+        $cpuBefore = 0.0
+        $tree | ForEach-Object { $cpuBefore += $_.TotalProcessorTime.TotalSeconds }
+        $sampleStart = Get-Date
         Start-Sleep -Seconds $IdleSeconds
-        $process.Refresh()
-        $cpuAfter = $process.TotalProcessorTime
-        $cpuPercent = (($cpuAfter - $cpuBefore).TotalSeconds / $IdleSeconds) * 100
+        $cpuAfter = 0.0
+        $tree | ForEach-Object { $_.Refresh(); $cpuAfter += $_.TotalProcessorTime.TotalSeconds }
+        $elapsed = ((Get-Date) - $sampleStart).TotalSeconds
+        $cpuPercent = (($cpuAfter - $cpuBefore) / $elapsed) * 100
         Add-Result "idle_cpu" ("{0:N2}%" -f $cpuPercent) "reported"
 
-        # idle_memory: working set of the whole process tree. Cubby is a WebView
-        # app, so the renderer's memory is part of what the user sees.
-        $tree = @($process) + @(Get-Process -ErrorAction SilentlyContinue |
-            Where-Object { $_.ProcessName -like "*WebView*" -or $_.ProcessName -eq "msedgewebview2" })
         $workingSet = ($tree | Measure-Object WorkingSet64 -Sum).Sum
-        Add-Result "idle_memory" ("{0:N1} MiB" -f ($workingSet / 1MB)) "reported (includes WebView processes)"
+        Add-Result "idle_memory" ("{0:N1} MiB" -f ($workingSet / 1MB)) "reported ($($tree.Count) process tree)"
 
         $process.CloseMainWindow() | Out-Null
         Start-Sleep -Seconds 2
