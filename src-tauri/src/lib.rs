@@ -81,16 +81,24 @@ pub fn run_app() {
         .block_on(async { Database::new(&db_path_str).await })
         .unwrap_or_else(|error| panic!("Cubby storage initialization failed: {error}"));
 
-    // Carried into `setup`: the migration below runs before the log plugin is
-    // installed, so its failure message has nowhere to go until then.
-    let mut dedup_error: Option<String> = None;
+    // Anything logged in this function is thrown away.
+    //
+    // `tauri_plugin_log` is not installed until the builder runs, far below, so
+    // a `log::info!` or `log::error!` up here goes nowhere -- which silently
+    // cost the record of a migration that modified a real user's history. These
+    // messages are collected instead and flushed in `setup`, once the logger
+    // exists. Add to this rather than logging directly.
+    let mut startup_log: Vec<(log::Level, String)> = Vec::new();
     rt.block_on(async {
         db.migrate().await.expect("Cubby database migration failed");
         let migrated = commands::migrate_encrypted_storage(&db)
             .await
             .unwrap_or_else(|error| panic!("Cubby encrypted storage migration failed: {error}"));
         if migrated > 0 {
-            log::info!("STORAGE: Encrypted {} existing clipboard items", migrated);
+            startup_log.push((
+                log::Level::Info,
+                format!("STORAGE: Encrypted {migrated} existing clipboard items"),
+            ));
         }
         commands::migrate_clip_format_model(&db)
             .await
@@ -102,12 +110,22 @@ pub fn run_app() {
         // version, which still works, and refusing to start over a hardening
         // step would be a worse outcome than running unconstrained.
         //
-        // The message is carried out to `setup` rather than logged here. This
-        // runs before the log plugin is installed, so a `log::error!` at this
-        // point goes nowhere -- which would have made "report the failure" a
-        // promise the code did not keep.
-        if let Err(error) = db.enforce_content_hash_uniqueness().await {
-            dedup_error = Some(error);
+        // Both outcomes are recorded. Removing duplicates edits history the
+        // user cannot get back, so a run that changed something has to say so;
+        // the first release of this migration merged five clips on a real
+        // machine and left nothing in the log to show for it.
+        match db.enforce_content_hash_uniqueness().await {
+            Ok(0) => {}
+            Ok(removed) => startup_log.push((
+                log::Level::Info,
+                format!(
+                    "STORAGE: Merged {removed} duplicate clips while making clip hashes unique"
+                ),
+            )),
+            Err(error) => startup_log.push((
+                log::Level::Error,
+                format!("STORAGE: Could not enforce unique clip hashes: {error}"),
+            )),
         }
     });
 
@@ -257,11 +275,9 @@ pub fn run_app() {
         .setup(move |app| {
             log::info!("Cubby starting...");
 
-            // Deferred from before the log plugin existed, so a failed
-            // uniqueness migration is actually visible rather than silently
-            // dropped on the floor.
-            if let Some(error) = dedup_error.take() {
-                log::error!("STORAGE: Could not enforce unique clip hashes: {error}");
+            // Everything that happened before the logger existed.
+            for (level, message) in startup_log.drain(..) {
+                log::log!(level, "{message}");
             }
 
             // Initialize Settings Manager

@@ -93,6 +93,10 @@ impl Database {
     /// has to collapse the group to exactly one row for the constraint to hold
     /// -- so the pin is moved rather than honoured in place.
     ///
+    /// Returns the number of duplicate rows removed so the caller can report
+    /// it. Deliberately does not log: this runs before the log plugin is
+    /// installed, so anything written here is discarded.
+    ///
     /// Returns the number of duplicate rows removed. On failure the whole
     /// reconciliation rolls back and the old non-unique index is left in place:
     /// an unconstrained database that works beats a half-migrated one.
@@ -247,7 +251,6 @@ impl Database {
             // for the same reason. At startup the index has not been built yet
             // and this is a no-op; it matters for any later caller.
             self.search_index.invalidate();
-            log::info!("STORAGE: Removed {removed} duplicate clips before enforcing unique hashes");
         }
         Ok(removed)
     }
