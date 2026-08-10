@@ -124,7 +124,11 @@ pub const BUDGETS: &[Budget] = &[
     },
     Budget {
         id: "process_startup",
-        what: "process start to a visible main window",
+        // Not "to a visible window". Cubby starts to the tray and creates its
+        // flyout hidden, so there is no visible window to wait for at launch --
+        // measuring one would report "never". Time from the hotkey to something
+        // on screen is a separate budget, `shortcut_to_visible`.
+        what: "process start to the main window existing (created hidden)",
         limit: 2000.0,
         unit: Unit::Millis,
         enforcement: Enforcement::Reported,

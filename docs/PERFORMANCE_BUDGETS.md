@@ -42,16 +42,43 @@ tight enough that a real regression does.
 | `image_thumbnail_bytes` | 86.8 KiB | 192 KiB | enforced |
 | `search_index_bytes_per_clip` | 998 B | 2 KiB | reported |
 | `first_searchable_result` | 2–5 ms over 2,000 clips | 100 ms | reported |
-| `process_startup` | not yet measured | 2,000 ms | reported |
-| `shortcut_to_visible` | not yet measured | 150 ms | reported |
-| `paste_completion` | not yet measured | 800 ms | reported |
-| `idle_cpu` | not yet measured | 1% | reported |
-| `idle_memory` | not yet measured | 200 MiB | reported |
+| `process_startup` | 254–593 ms | 2,000 ms | reported |
+| `idle_cpu` | 0.00–0.16% | 1% | reported |
+| `idle_memory` | **424–448 MiB — over** | 200 MiB | reported |
+| `shortcut_to_visible` | not measured | 150 ms | reported |
+| `paste_completion` | not measured | 800 ms | reported |
 
-The bottom five need a running app. `scripts/measure-perf-budgets.ps1 -AppPath`
-measures startup, idle CPU, and idle memory; `shortcut_to_visible` and
-`paste_completion` are not measured by this script and say so in its output
-rather than being quietly absent.
+The bottom two need a running app driven by a hotkey. The other three were
+measured against an installed v1.3.1 with a real 3,735-clip history;
+`shortcut_to_visible` and `paste_completion` are not measured by this script and
+say so in its output rather than being quietly absent.
+
+**`idle_memory` is over budget: 424–448 MiB against a 200 MiB limit.** Eight or
+nine processes, most of them `msedgewebview2` — the WebView2 runtime's renderer,
+GPU, utility and crashpad processes. The search index is about 4 MiB of that
+after #169, so it is a rounding error here rather than the deciding factor.
+
+An earlier version of this document said idle memory would be "met or missed by
+the search index rather than by the WebView". That was wrong, and it was written
+before anything had been measured. The WebView tree dominates by two orders of
+magnitude.
+
+The 200 MiB limit was set from aspiration, not observation. It has deliberately
+**not** been raised to match reality: re-baselining a budget to whatever the code
+currently does turns it into a description instead of a constraint. Either the
+number is wrong for a WebView2 application, or the application is heavier than
+intended — that is a decision to make explicitly, not to paper over. Being a
+`Reported` budget, it fails nothing in the meantime.
+
+Two ways this measurement got the wrong answer first, both now fixed and worth
+not reintroducing:
+
+- **Scope the process tree by parent id, not by name.** Matching every
+  `*WebView*` process on the machine pulled in 48 unrelated ones from other
+  apps and reported 1,055 MiB against a 200 MiB budget.
+- **Let the app settle before sampling.** Sampling at launch measures the index
+  build over the whole history and reported 3.67% CPU where the settled figure
+  is 0.00%.
 
 Measuring against a locally built `cubby.exe` requires no other Cubby instance
 to be running: the single-instance plugin hands off to the existing process and
