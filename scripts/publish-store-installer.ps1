@@ -15,11 +15,59 @@ param(
     [string]$DownloadOrigin = "https://downloads.cubbyclipboard.com",
     [string]$WranglerVersion = "4.113.0",
     [string]$ExpectedSigner = "CN=Brandon South",
-    [switch]$SkipPublicVerification
+    [switch]$SkipPublicVerification,
+
+    # Release tag, so this script can decide for itself whether replacing an
+    # existing object is safe.
+    #
+    # Release objects are immutable once a version has shipped -- a download URL
+    # must never change under a user. But the first run of a tag claims its
+    # object keys permanently, and code signing is not deterministic, so a
+    # release whose build failed part way could never be retried and recovery
+    # always cost a version number (v1.3.0 was burned exactly this way).
+    #
+    # Replacement is therefore allowed while the tag's GitHub release is still a
+    # draft. That check is made *here*, immediately before the replacement,
+    # rather than accepted as a caller's assertion: a boolean decided several
+    # steps earlier can be stale by the time it is used, and a script guarding
+    # user-facing immutability should not be talked out of it by its caller.
+    # Omit the tag and replacement is always refused.
+    [string]$ReleaseTag
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# Whether an existing release object may be replaced.
+#
+# Pure and side-effect free so the rule itself can be tested; everything that
+# touches the network lives in its callers. `scripts/test-publish-guard.ps1`
+# covers all three outcomes.
+function Resolve-ImmutableObjectAction {
+    param(
+        # The object already present has the same bytes we would upload.
+        [Parameter(Mandatory = $true)][bool]$BytesMatch,
+        # The GitHub release for this tag has not been published yet.
+        [Parameter(Mandatory = $true)][bool]$ReleaseIsDraft
+    )
+
+    if ($BytesMatch) { return "skip" }
+    if ($ReleaseIsDraft) { return "replace" }
+    return "refuse"
+}
+
+# True only when the tag has a GitHub release that is still a draft. Any doubt
+# -- no tag, a gh failure, an unparseable answer -- resolves to false, which
+# makes the caller refuse the replacement.
+function Test-ReleaseIsDraft {
+    param([string]$Tag)
+
+    if ([string]::IsNullOrWhiteSpace($Tag)) { return $false }
+
+    $isDraft = & gh release view $Tag --json isDraft --jq .isDraft 2>$null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    return ("$isDraft".Trim() -eq "true")
+}
 
 $resolvedInstallerPath = (Resolve-Path -LiteralPath $InstallerPath).Path
 $installerName = "Cubby.Clipboard_${Version}_${Architecture}-Store-setup.exe"
@@ -80,7 +128,18 @@ function Test-R2ObjectRequiresUpload {
                 return $false
             }
 
-            throw "Refusing to overwrite immutable release object with different bytes: $objectKey"
+            # Checked now rather than earlier: this is the last instant before
+            # the object is replaced, so it is the only check that cannot have
+            # gone stale in between.
+            $action = Resolve-ImmutableObjectAction `
+                -BytesMatch $false `
+                -ReleaseIsDraft (Test-ReleaseIsDraft -Tag $ReleaseTag)
+            if ($action -eq "replace") {
+                Write-Warning "Replacing ${objectKey}: the bytes differ, but $ReleaseTag is still a draft, so nothing has shipped from this URL yet."
+                return $true
+            }
+
+            throw "Refusing to overwrite immutable release object with different bytes: $objectKey. The release for this tag is published (or no tag was given), so this URL is live and must not change. Cut a new version instead."
         }
         if ($statusCode -ne "404") {
             throw "Unexpected HTTP $statusCode while checking $objectUrl."
