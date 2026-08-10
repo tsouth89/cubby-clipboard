@@ -42,9 +42,9 @@ tight enough that a real regression does.
 | `image_thumbnail_bytes` | 86.8 KiB | 192 KiB | enforced |
 | `search_index_bytes_per_clip` | 998 B | 2 KiB | reported |
 | `first_searchable_result` | 2–5 ms over 2,000 clips | 100 ms | reported |
-| `process_startup` | 258–593 ms | 2,000 ms | reported |
-| `idle_cpu` | 0.00% | 1% | reported |
-| `idle_memory` | 191–193 MiB | 200 MiB | reported |
+| `process_startup` | 254–593 ms | 2,000 ms | reported |
+| `idle_cpu` | 0.00–0.16% | 1% | reported |
+| `idle_memory` | **424 MiB — over** | 200 MiB | reported |
 | `shortcut_to_visible` | not measured | 150 ms | reported |
 | `paste_completion` | not measured | 800 ms | reported |
 
@@ -53,10 +53,22 @@ measured against an installed v1.3.1 with a real 3,735-clip history;
 `shortcut_to_visible` and `paste_completion` are not measured by this script and
 say so in its output rather than being quietly absent.
 
-`idle_memory` at 191 MiB sits just under its 200 MiB limit, and roughly 4 MiB of
-that is the search index at its post-#169 cost. Before that rework the same
-history would have carried about 19 MiB of index, so the headroom here is
-recent.
+**`idle_memory` is over budget: 424 MiB against a 200 MiB limit.** Eight
+processes, seven of them `msedgewebview2` — the WebView2 runtime's renderer,
+GPU, utility and crashpad processes. The search index is about 4 MiB of that
+after #169, so it is a rounding error here rather than the deciding factor.
+
+An earlier version of this document said idle memory would be "met or missed by
+the search index rather than by the WebView". That was wrong, and it was written
+before anything had been measured. The WebView tree dominates by two orders of
+magnitude.
+
+The 200 MiB limit was set from aspiration, not observation. It has deliberately
+**not** been raised to match reality: re-baselining a budget to whatever the code
+currently does turns it into a description instead of a constraint. Either the
+number is wrong for a WebView2 application, or the application is heavier than
+intended — that is a decision to make explicitly, not to paper over. Being a
+`Reported` budget, it fails nothing in the meantime.
 
 Two ways this measurement got the wrong answer first, both now fixed and worth
 not reintroducing:

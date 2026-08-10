@@ -23,14 +23,32 @@ $notMeasuredHere = @{
 
 $results = New-Object System.Collections.Generic.List[object]
 
-# A process and its direct children. Cubby is a WebView app, so the renderer
-# belongs in the total -- but only *its* renderer.
+# Every descendant process id, depth-first.
+#
+# Recursive on purpose. WebView2 puts its renderer, GPU, utility and crashpad
+# processes under the WebView host, which is itself a child of the app -- so a
+# direct-children-only walk misses six of Cubby's nine processes and under-reports
+# its memory by more than half.
+function Get-DescendantIds([int]$RootId) {
+    $ids = @()
+    $children = Get-CimInstance Win32_Process -Filter "ParentProcessId=$RootId" -ErrorAction SilentlyContinue
+    foreach ($child in $children) {
+        $ids += $child.ProcessId
+        $ids += Get-DescendantIds -RootId $child.ProcessId
+    }
+    return $ids
+}
+
+# A process and every descendant of it. Cubby is a WebView app, so the whole
+# tree is what the user sees in Task Manager -- but only *its* tree, resolved by
+# parentage rather than by process name.
 function Get-ProcessTree([int]$RootId) {
     $root = Get-Process -Id $RootId -ErrorAction SilentlyContinue
     if (-not $root) { return @() }
-    $children = Get-CimInstance Win32_Process -Filter "ParentProcessId=$RootId" -ErrorAction SilentlyContinue |
-        ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }
-    return @($root) + @($children)
+    $descendants = @(Get-DescendantIds -RootId $RootId) |
+        Sort-Object -Unique |
+        ForEach-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }
+    return @($root) + @($descendants)
 }
 
 function Add-Result([string]$Id, [string]$Value, [string]$Status) {
@@ -90,6 +108,16 @@ if ($AppPath) {
         # settled figure is 0.00%.
         Write-Host "  settling for $SettleSeconds s before sampling..."
         Start-Sleep -Seconds $SettleSeconds
+
+        # An app that died during settling would otherwise be measured as an
+        # empty tree and reported as 0.00% and 0.0 MiB -- two budgets passing
+        # perfectly because nothing was running.
+        $process.Refresh()
+        if ($process.HasExited) {
+            Add-Result "idle_cpu" "-" "not measured: the app exited during settling"
+            Add-Result "idle_memory" "-" "not measured: the app exited during settling"
+            return
+        }
 
         # Cubby's own process and its children. Scoped by parent id, not by
         # name: the first version of this matched every *WebView* process on
