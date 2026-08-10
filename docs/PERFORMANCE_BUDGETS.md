@@ -44,7 +44,7 @@ tight enough that a real regression does.
 | `first_searchable_result` | 2–5 ms over 2,000 clips | 100 ms | reported |
 | `process_startup` | 254–593 ms | 2,000 ms | reported |
 | `idle_cpu` | 0.00–0.16% | 1% | reported |
-| `idle_memory` | **424 MiB — over** | 200 MiB | reported |
+| `idle_memory` | **424–448 MiB — over** | 200 MiB | reported |
 | `shortcut_to_visible` | not measured | 150 ms | reported |
 | `paste_completion` | not measured | 800 ms | reported |
 
@@ -53,8 +53,8 @@ measured against an installed v1.3.1 with a real 3,735-clip history;
 `shortcut_to_visible` and `paste_completion` are not measured by this script and
 say so in its output rather than being quietly absent.
 
-**`idle_memory` is over budget: 424 MiB against a 200 MiB limit.** Eight
-processes, seven of them `msedgewebview2` — the WebView2 runtime's renderer,
+**`idle_memory` is over budget: 424–448 MiB against a 200 MiB limit.** Eight or
+nine processes, most of them `msedgewebview2` — the WebView2 runtime's renderer,
 GPU, utility and crashpad processes. The search index is about 4 MiB of that
 after #169, so it is a rounding error here rather than the deciding factor.
 

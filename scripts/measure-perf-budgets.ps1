@@ -51,6 +51,27 @@ function Get-ProcessTree([int]$RootId) {
     return @($root) + @($descendants)
 }
 
+# CPU seconds per process id and total working set for a tree, read once.
+#
+# Every read is guarded: a process can exit between being enumerated and being
+# measured, and reading TotalProcessorTime on an exited process throws rather
+# than returning what it used.
+function Get-TreeSample([int]$RootId) {
+    $cpu = @{}
+    $workingSet = 0
+    foreach ($process in Get-ProcessTree -RootId $RootId) {
+        if (-not $process) { continue }
+        try {
+            $cpu[$process.Id] = $process.TotalProcessorTime.TotalSeconds
+            $workingSet += $process.WorkingSet64
+        }
+        catch {
+            continue
+        }
+    }
+    return [pscustomobject]@{ Cpu = $cpu; WorkingSet = $workingSet; Count = $cpu.Count }
+}
+
 function Add-Result([string]$Id, [string]$Value, [string]$Status) {
     $results.Add([pscustomobject]@{ Budget = $Id; Measured = $Value; Status = $Status })
 }
@@ -119,27 +140,43 @@ if ($AppPath) {
             return
         }
 
-        # Cubby's own process and its children. Scoped by parent id, not by
-        # name: the first version of this matched every *WebView* process on
-        # the machine, which on a desktop running Teams added 48 unrelated
-        # processes and reported 1,055 MiB against a 200 MiB budget when Cubby's
-        # actual tree was 193 MiB.
-        $tree = Get-ProcessTree -RootId $process.Id
-
-        # CPU across the tree, as a share of one core. Summed as seconds:
-        # Measure-Object cannot total TimeSpan values and silently yields zero.
-        $cpuBefore = 0.0
-        $tree | ForEach-Object { $cpuBefore += $_.TotalProcessorTime.TotalSeconds }
+        # The tree is enumerated at both ends of the window rather than once.
+        # WebView2 starts and retires renderer and utility processes while the
+        # app sits there, so a snapshot taken before the sample misses whatever
+        # appears during it, and reading a process that has since exited throws.
+        $before = Get-TreeSample -RootId $process.Id
         $sampleStart = Get-Date
         Start-Sleep -Seconds $IdleSeconds
-        $cpuAfter = 0.0
-        $tree | ForEach-Object { $_.Refresh(); $cpuAfter += $_.TotalProcessorTime.TotalSeconds }
-        $elapsed = ((Get-Date) - $sampleStart).TotalSeconds
-        $cpuPercent = (($cpuAfter - $cpuBefore) / $elapsed) * 100
-        Add-Result "idle_cpu" ("{0:N2}%" -f $cpuPercent) "reported"
 
-        $workingSet = ($tree | Measure-Object WorkingSet64 -Sum).Sum
-        Add-Result "idle_memory" ("{0:N1} MiB" -f ($workingSet / 1MB)) "reported ($($tree.Count) process tree)"
+        $process.Refresh()
+        if ($process.HasExited) {
+            Add-Result "idle_cpu" "-" "not measured: the app exited while sampling"
+            Add-Result "idle_memory" "-" "not measured: the app exited while sampling"
+            return
+        }
+
+        $after = Get-TreeSample -RootId $process.Id
+        if ($after.Count -eq 0) {
+            Add-Result "idle_cpu" "-" "not measured: no live process to sample"
+            Add-Result "idle_memory" "-" "not measured: no live process to sample"
+            return
+        }
+
+        # Per process id, so one that appeared mid-window counts from zero
+        # rather than making the total negative. CPU spent by a process that
+        # exited during the window is lost; on an idle app that is a rounding
+        # error, and over-reporting would be worse than under-reporting here.
+        $cpuDelta = 0.0
+        foreach ($id in $after.Cpu.Keys) {
+            $prior = 0.0
+            if ($before.Cpu.ContainsKey($id)) { $prior = $before.Cpu[$id] }
+            $cpuDelta += ($after.Cpu[$id] - $prior)
+        }
+        $elapsed = ((Get-Date) - $sampleStart).TotalSeconds
+        Add-Result "idle_cpu" ("{0:N2}%" -f (($cpuDelta / $elapsed) * 100)) "reported"
+
+        # Measured at the end of the window, from the same enumeration.
+        Add-Result "idle_memory" ("{0:N1} MiB" -f ($after.WorkingSet / 1MB)) "reported ($($after.Count) process tree)"
 
         $process.CloseMainWindow() | Out-Null
         Start-Sleep -Seconds 2
