@@ -2,7 +2,7 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
-## v1.3.0
+## v1.3.1
 
 ### Added
 - A dedicated History window, separate from the Win+V flyout, with a larger image preview you can read and select text from
