@@ -273,12 +273,15 @@ pub fn run_app() {
             }
         })
         .setup(move |app| {
-            log::info!("Cubby starting...");
-
-            // Everything that happened before the logger existed.
+            // Flushed before anything else is logged: these describe work that
+            // finished before the logger existed, so they belong above the
+            // first line of this run rather than interleaved after it. Their
+            // timestamps are necessarily the flush time, not the event time.
             for (level, message) in startup_log.drain(..) {
                 log::log!(level, "{message}");
             }
+
+            log::info!("Cubby starting...");
 
             // Initialize Settings Manager
             let db_for_settings = db_arc.clone();
