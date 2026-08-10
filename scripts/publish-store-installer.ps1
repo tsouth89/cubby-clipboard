@@ -15,7 +15,22 @@ param(
     [string]$DownloadOrigin = "https://downloads.cubbyclipboard.com",
     [string]$WranglerVersion = "4.113.0",
     [string]$ExpectedSigner = "CN=Brandon South",
-    [switch]$SkipPublicVerification
+    [switch]$SkipPublicVerification,
+
+    # Allow replacing an object that already exists with different bytes.
+    #
+    # Release objects are immutable once a version has shipped, and that is
+    # worth keeping: a download URL must never change under a user. But the
+    # first run of a tag claims its object keys permanently, and code signing
+    # is not deterministic -- the same source signed twice produces different
+    # bytes. So a release whose build failed part way could never be retried,
+    # and recovering always cost a version number (v1.3.0 was burned exactly
+    # this way).
+    #
+    # The caller passes this only while the tag's GitHub release is still a
+    # draft, which is precisely the window in which nothing has shipped and
+    # no download URL is published yet.
+    [switch]$AllowReplaceUnpublished
 )
 
 Set-StrictMode -Version Latest
@@ -80,7 +95,12 @@ function Test-R2ObjectRequiresUpload {
                 return $false
             }
 
-            throw "Refusing to overwrite immutable release object with different bytes: $objectKey"
+            if ($AllowReplaceUnpublished) {
+                Write-Warning "Replacing ${objectKey}: the bytes differ, but this tag's release is still a draft so nothing has shipped from this URL yet."
+                return $true
+            }
+
+            throw "Refusing to overwrite immutable release object with different bytes: $objectKey. The release for this tag has already been published, so this URL is live and must not change. Cut a new version instead."
         }
         if ($statusCode -ne "404") {
             throw "Unexpected HTTP $statusCode while checking $objectUrl."

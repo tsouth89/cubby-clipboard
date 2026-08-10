@@ -17,6 +17,9 @@ jobs:
   validate:
     name: Validate release candidate
     runs-on: windows-latest
+    # Every job here is bounded. GitHub's default is six hours, so an
+    # unbounded job that wedges burns most of a day before anyone is told.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -65,6 +68,8 @@ jobs:
     # draft here, so it can be created in parallel with validation. publish-release
     # gates on validate, so an unvalidated build never becomes public.
     runs-on: ubuntu-latest
+    # Metadata only.
+    timeout-minutes: 15
     permissions:
       contents: write
     outputs:
@@ -168,6 +173,12 @@ jobs:
     name: Build ${{ matrix.arch }} installer
     needs: create-release
     runs-on: windows-latest
+    # A normal build is ~20 minutes; the arm64 compile alone is ~12. The
+    # v1.3.0 attempt hung for 52 minutes inside the build-time signing command
+    # with nothing on stdout, and would have run to the six-hour default had it
+    # not been cancelled by hand. 45 leaves better than 2x headroom over a cold
+    # cache while still failing a hang inside the hour.
+    timeout-minutes: 45
     environment: release
     permissions:
       contents: write
@@ -394,6 +405,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.create-release.outputs.tag }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
@@ -408,11 +420,27 @@ jobs:
             }
           }
 
+          # A draft release means nothing has shipped from these URLs yet, so a
+          # retry after a failed build is allowed to replace its own partial
+          # upload. Once the release is published the objects are immutable.
+          $isDraft = gh release view "$env:TAG" --json isDraft --jq .isDraft
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not determine whether ${env:TAG} is still a draft."
+          }
+          # A hashtable, not an array: array splatting passes positional
+          # arguments and silently fails to bind a switch.
+          $replaceArgs = @{}
+          if ($isDraft -eq "true") {
+            Write-Host "${env:TAG} is still a draft; a differing object may be replaced."
+            $replaceArgs["AllowReplaceUnpublished"] = $true
+          }
+
           ./scripts/publish-store-installer.ps1 `
             -Version "${{ needs.create-release.outputs.version }}" `
             -Architecture "${{ matrix.arch }}" `
             -InstallerPath "${{ steps.store-installer.outputs.path }}" `
-            -BucketName $env:CLOUDFLARE_R2_BUCKET
+            -BucketName $env:CLOUDFLARE_R2_BUCKET `
+            @replaceArgs
 
       - name: Assemble the portable package
         if: matrix.arch == 'x64'
@@ -469,6 +497,8 @@ jobs:
     name: Assemble updater manifest
     needs: [create-release, build-installers]
     runs-on: ubuntu-latest
+    # Manifest assembly only.
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -593,6 +623,8 @@ jobs:
     # Gate publishing on validate too, since create-release/build no longer do.
     needs: [validate, create-release, build-installers, updater-manifest, submit-store]
     runs-on: ubuntu-latest
+    # A single release edit.
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
