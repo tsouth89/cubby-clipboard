@@ -1193,13 +1193,25 @@ fn is_remote_client_process(exe_name: Option<&str>) -> bool {
     })
 }
 
+/// True when a remote client is the *attributed owner* of this clipboard write.
+///
+/// `is_explicit_owner` is load-bearing, not a nicety. When `GetClipboardOwner`
+/// fails, attribution falls back to the foreground window — so a local password
+/// manager that writes without claiming ownership, while a remote client
+/// happens to be focused, would otherwise be classified as remote. That would
+/// relay its secret into every remote session and bypass `skip_sensitive` on
+/// the way into history. An unattributed write is never treated as remote.
+fn is_remote_client_owner(exe_name: Option<&str>, is_explicit_owner: bool) -> bool {
+    is_explicit_owner && is_remote_client_process(exe_name)
+}
+
 /// Relay only captures owned by a remote-control viewer.
 ///
 /// Sensitive-tagged content is relayed too, because a remote client tags
 /// everything it syncs down (SBS-781). [`relay_remote_capture`] re-applies the
 /// marker so the rewrite does not weaken it for other monitors.
-fn should_relay_capture(relay_enabled: bool, exe_name: Option<&str>) -> bool {
-    relay_enabled && is_remote_client_process(exe_name)
+fn should_relay_capture(relay_enabled: bool, remote_client: bool) -> bool {
+    relay_enabled && remote_client
 }
 
 /// Whether a sensitive-tagged capture should be dropped instead of stored.
@@ -1227,6 +1239,15 @@ fn utf16_clipboard_bytes(text: &str) -> Vec<u8> {
     }
     bytes
 }
+
+/// Payload written under the sensitive marker format.
+///
+/// Deliberately not empty. `clipboard_win::raw::set_inner` returns `Ok(())`
+/// without ever calling `SetClipboardData` when the slice is zero-length, so an
+/// empty marker reports success while writing nothing at all. Monitors only
+/// test presence through `IsClipboardFormatAvailable`, so one byte is enough.
+#[cfg(target_os = "windows")]
+const SENSITIVE_MARKER_PAYLOAD: &[u8] = &[0];
 
 #[cfg(target_os = "windows")]
 fn registered_sensitive_format() -> u32 {
@@ -1299,10 +1320,9 @@ fn set_relayed_clipboard_payload(
         if marker == 0 {
             return Err("could not register the sensitive marker format".to_string());
         }
-        // The marker's presence is the entire signal; monitors read no payload.
         // Failing here is fatal to the write: publishing tagged content without
         // its tag is exactly what this function exists to prevent.
-        clipboard_win::raw::set_without_clear(marker, &[])
+        clipboard_win::raw::set_without_clear(marker, SENSITIVE_MARKER_PAYLOAD)
             .map_err(|error| format!("could not re-apply the sensitive marker: {error}"))?;
     }
     Ok(())
@@ -1518,14 +1538,14 @@ async fn process_clipboard_snapshot(
         *LAST_ACCEPTED_CAPTURE.lock() = None;
     };
 
-    let remote_client = is_remote_client_process(exe_name.as_deref());
+    let remote_client = is_remote_client_owner(exe_name.as_deref(), is_explicit_owner);
 
     // Re-announce a remote copy before any capture policy runs. Relaying is
     // clipboard transport; storing is history. Gating transport behind storage
     // rules is what let a privacy preference silently break copy-between-
     // sessions, and put the relay behind the whole encrypt-and-write path so a
     // viewer could sample a stale clipboard first (SBS-781).
-    if should_relay_capture(settings.remote_clipboard_relay, exe_name.as_deref()) {
+    if should_relay_capture(settings.remote_clipboard_relay, remote_client) {
         relay_remote_capture(
             clip_type,
             &clip_content,
@@ -2579,10 +2599,11 @@ mod tests {
     use super::{
         build_clip_hash_material, calculate_hash, capture_state_name, capture_text,
         clear_ignore_hash_if_matches, clipboard_retry_delay, ignore_marker_applies,
-        is_remote_client_process, next_listener_backoff, rgba_to_cf_dib, set_ignore_hash,
-        should_forget_recent_capture, should_relay_capture, should_skip_sensitive_capture,
-        CapturedContent, CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED,
-        CLIPBOARD_CLEAR_FORGET_WINDOW, IGNORE_HASH, IGNORE_HASH_TTL,
+        is_remote_client_owner, is_remote_client_process, next_listener_backoff, rgba_to_cf_dib,
+        set_ignore_hash, should_forget_recent_capture, should_relay_capture,
+        should_skip_sensitive_capture, CapturedContent, CAPTURE_STATE_LISTENING,
+        CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED, CLIPBOARD_CLEAR_FORGET_WINDOW,
+        IGNORE_HASH, IGNORE_HASH_TTL,
     };
     use std::time::{Duration, Instant};
 
@@ -2651,15 +2672,59 @@ mod tests {
 
     #[test]
     fn relays_only_remote_viewer_captures() {
-        assert!(should_relay_capture(true, Some("ncplayer.exe")));
-        assert!(should_relay_capture(true, Some("mstsc.exe")));
-        assert!(!should_relay_capture(true, Some("notepad.exe")));
-        assert!(!should_relay_capture(true, None));
+        assert!(should_relay_capture(
+            true,
+            is_remote_client_owner(Some("ncplayer.exe"), true)
+        ));
+        assert!(should_relay_capture(
+            true,
+            is_remote_client_owner(Some("mstsc.exe"), true)
+        ));
+        assert!(!should_relay_capture(
+            true,
+            is_remote_client_owner(Some("notepad.exe"), true)
+        ));
+        assert!(!should_relay_capture(
+            true,
+            is_remote_client_owner(None, true)
+        ));
     }
 
     #[test]
     fn relay_respects_setting() {
-        assert!(!should_relay_capture(false, Some("ncplayer.exe")));
+        assert!(!should_relay_capture(
+            false,
+            is_remote_client_owner(Some("ncplayer.exe"), true)
+        ));
+    }
+
+    #[test]
+    fn an_unattributed_owner_is_never_treated_as_remote() {
+        // Attribution falls back to the foreground window when
+        // GetClipboardOwner fails. A password manager writing without claiming
+        // ownership while a remote client is focused must not be relayed into
+        // remote sessions, nor bypass skip_sensitive on the way into history.
+        assert!(!is_remote_client_owner(Some("ncplayer.exe"), false));
+        assert!(!is_remote_client_owner(Some("mstsc.exe"), false));
+        assert!(!should_relay_capture(
+            true,
+            is_remote_client_owner(Some("ncplayer.exe"), false)
+        ));
+        assert!(should_skip_sensitive_capture(
+            true,
+            true,
+            is_remote_client_owner(Some("ncplayer.exe"), false)
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_sensitive_marker_payload_is_never_empty() {
+        // clipboard_win::raw::set_inner returns Ok without calling
+        // SetClipboardData for a zero-length payload, so an empty marker
+        // reports success while writing nothing and silently publishes tagged
+        // content untagged.
+        assert!(!super::SENSITIVE_MARKER_PAYLOAD.is_empty());
     }
 
     #[test]
