@@ -836,7 +836,14 @@ function App() {
   const handleCreateFolder = async (name: string) => {
     try {
       await invoke('create_folder', { name, icon: null, color: null });
-      await loadFolders(); return true; } catch (error) { console.error('Failed to create folder:', error); toast.error(`Failed to create folder: ${String(error)}`); return false; } };
+      await loadFolders();
+      return true;
+    } catch (error) {
+      console.error('Failed to create folder:', error);
+      toast.error(`Failed to create folder: ${String(error)}`);
+      return false;
+    }
+  };
 
   const handleMoveClip = async (clipId: string, folderId: string | null) => {
     try {
@@ -902,7 +909,13 @@ function App() {
 
   // Updated Create Folder to handle Rename
   const handleCreateOrRenameFolder = async (name: string) => {
-    if (folderModalMode === 'create') { const created = await handleCreateFolder(name); if (!created) return; toast.success(t('folders.folderCreated', { name })); setShowAddFolderModal(false); setNewFolderName(''); } else if (folderModalMode === 'rename' && editingFolderId) {
+    if (folderModalMode === 'create') {
+      const created = await handleCreateFolder(name);
+      if (!created) return;
+      toast.success(t('folders.folderCreated', { name }));
+      setShowAddFolderModal(false);
+      setNewFolderName('');
+    } else if (folderModalMode === 'rename' && editingFolderId) {
       try {
         await invoke('rename_folder', { id: editingFolderId, name });
         await loadFolders();
