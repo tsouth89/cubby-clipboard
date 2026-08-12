@@ -91,6 +91,7 @@
     "clipDeleteFailed": "Échec de la suppression de l'élément",
     "folderDeleteFailed": "Échec de la suppression du dossier",
     "folderRenameFailed": "Échec du renommage du dossier",
+    "folderCreateFailed": "Échec de la création du dossier",
     "copyFailed": "Échec de la copie"
   }
 }

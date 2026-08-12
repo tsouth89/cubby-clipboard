@@ -840,7 +840,7 @@ function App() {
       return true;
     } catch (error) {
       console.error('Failed to create folder:', error);
-      toast.error(`Failed to create folder: ${String(error)}`);
+      toast.error(t('notifications.folderCreateFailed'));
       return false;
     }
   };

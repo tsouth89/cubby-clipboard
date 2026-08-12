@@ -190,6 +190,7 @@
     "clipDeleteFailed": "Failed to delete clip",
     "folderDeleteFailed": "Failed to delete folder",
     "folderRenameFailed": "Failed to rename folder",
+    "folderCreateFailed": "Failed to create folder",
     "copyFailed": "Failed to copy",
     "clearUnpinnedSuccess_one": "Cleared {{count}} unpinned item",
     "clearUnpinnedSuccess_other": "Cleared {{count}} unpinned items",
