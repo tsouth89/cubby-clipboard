@@ -6,7 +6,11 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use clipboard_rs::common::RustImage;
 #[cfg(not(target_os = "windows"))]
 use clipboard_rs::common::RustImageData;
-use clipboard_rs::{Clipboard, ClipboardContent, ClipboardContext};
+// Windows relays through raw Win32 so content and its sensitive marker publish
+// under one clipboard handle, so the typed content enum is portable-path only.
+#[cfg(not(target_os = "windows"))]
+use clipboard_rs::ClipboardContent;
+use clipboard_rs::{Clipboard, ClipboardContext};
 #[cfg(target_os = "windows")]
 use clipboard_win::Monitor;
 use once_cell::sync::Lazy;
@@ -1130,33 +1134,13 @@ fn rgba_to_cf_dib(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, Strin
 pub(crate) fn set_clipboard_image_png(png_bytes: &[u8]) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let rgba = image::load_from_memory(png_bytes)
-            .map_err(|e| e.to_string())?
-            .into_rgba8();
-        let dib = rgba_to_cf_dib(rgba.width(), rgba.height(), rgba.as_raw())?;
-        let png_format = registered_png_format();
-        if png_format == 0 {
-            return Err("could not register the PNG clipboard format".to_string());
-        }
+        // Decode before opening: a failure here must leave the existing
+        // clipboard untouched rather than emptied.
+        let prepared = prepare_image_clipboard_formats(png_bytes)?;
         let _clipboard = clipboard_win::Clipboard::new_attempts(10)
             .map_err(|e| format!("could not open clipboard: {e}"))?;
         clipboard_win::raw::empty().map_err(|e| format!("could not clear clipboard: {e}"))?;
-
-        // Both formats are required: PNG preserves byte-stable image identity
-        // for self-write suppression, while CF_DIB supports traditional
-        // Windows paste targets. If the second write fails, clear the partial
-        // clipboard rather than reporting success with an inconsistent payload.
-        clipboard_win::raw::set_without_clear(png_format, png_bytes)
-            .map_err(|error| format!("could not set PNG: {error}"))?;
-        if let Err(dib_error) = clipboard_win::raw::set_without_clear(CF_DIB_FORMAT, &dib) {
-            return match clipboard_win::raw::empty() {
-                Ok(()) => Err(format!("could not set CF_DIB: {dib_error}")),
-                Err(cleanup_error) => Err(format!(
-                    "could not set CF_DIB ({dib_error}) or clear partial PNG ({cleanup_error})"
-                )),
-            };
-        }
-        Ok(())
+        write_image_clipboard_formats(&prepared)
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1168,16 +1152,279 @@ pub(crate) fn set_clipboard_image_png(png_bytes: &[u8]) -> Result<(), String> {
     }
 }
 
-/// Relay only captures owned by a remote-control viewer, and never
-/// sensitive-tagged content: a rewrite would strip the
-/// `ExcludeClipboardContentFromMonitorProcessing` flag other monitors rely on.
-fn should_relay_capture(relay_enabled: bool, sensitive: bool, exe_name: Option<&str>) -> bool {
-    relay_enabled
-        && !sensitive
-        && exe_name.is_some_and(|exe| {
-            crate::paste_engine::paste_strategy_for_process(exe)
-                != crate::paste_engine::PasteStrategy::Standard
+/// The PNG and CF_DIB renderings of one image, plus the registered PNG format,
+/// all resolved *before* the clipboard is opened.
+///
+/// Everything that can fail belongs in here. Decoding after the clipboard has
+/// been emptied means an undecodable PNG — or a `rgba_to_cf_dib` guard — leaves
+/// the user with an empty clipboard and nothing written, which also trips
+/// `forget_on_clipboard_clear`. Decoding a multi-megapixel screenshot also takes
+/// long enough that holding the global clipboard handle across it stalls every
+/// other application that wants to read or write.
+#[cfg(target_os = "windows")]
+struct PreparedImageFormats<'a> {
+    png_format: u32,
+    png: &'a [u8],
+    dib: Vec<u8>,
+}
+
+#[cfg(target_os = "windows")]
+fn prepare_image_clipboard_formats(png_bytes: &[u8]) -> Result<PreparedImageFormats<'_>, String> {
+    let rgba = image::load_from_memory(png_bytes)
+        .map_err(|e| e.to_string())?
+        .into_rgba8();
+    let dib = rgba_to_cf_dib(rgba.width(), rgba.height(), rgba.as_raw())?;
+    let png_format = registered_png_format();
+    if png_format == 0 {
+        return Err("could not register the PNG clipboard format".to_string());
+    }
+    Ok(PreparedImageFormats {
+        png_format,
+        png: png_bytes,
+        dib,
+    })
+}
+
+/// Write prepared image formats onto an already-open, already-emptied clipboard,
+/// so callers can publish additional formats under the same handle.
+///
+/// Both formats are required: PNG preserves byte-stable image identity for
+/// self-write suppression, while CF_DIB supports traditional Windows paste
+/// targets. If the second write fails, clear the partial clipboard rather than
+/// reporting success with an inconsistent payload.
+#[cfg(target_os = "windows")]
+fn write_image_clipboard_formats(prepared: &PreparedImageFormats<'_>) -> Result<(), String> {
+    clipboard_win::raw::set_without_clear(prepared.png_format, prepared.png)
+        .map_err(|error| format!("could not set PNG: {error}"))?;
+    if let Err(dib_error) = clipboard_win::raw::set_without_clear(CF_DIB_FORMAT, &prepared.dib) {
+        return match clipboard_win::raw::empty() {
+            Ok(()) => Err(format!("could not set CF_DIB: {dib_error}")),
+            Err(cleanup_error) => Err(format!(
+                "could not set CF_DIB ({dib_error}) or clear partial PNG ({cleanup_error})"
+            )),
+        };
+    }
+    Ok(())
+}
+
+/// True when the clipboard owner is a recognized remote-control client rather
+/// than an ordinary local application.
+///
+/// This distinction carries weight beyond paste strategy. A remote client
+/// writes whatever it received from the far end, so the metadata on that write
+/// describes the *viewer's* policy, not what the originating application meant.
+fn is_remote_client_process(exe_name: Option<&str>) -> bool {
+    exe_name.is_some_and(|exe| {
+        crate::paste_engine::paste_strategy_for_process(exe)
+            != crate::paste_engine::PasteStrategy::Standard
+    })
+}
+
+/// True when a remote client is the *attributed owner* of this clipboard write.
+///
+/// `is_explicit_owner` is load-bearing, not a nicety. When `GetClipboardOwner`
+/// fails, attribution falls back to the foreground window — so a local password
+/// manager that writes without claiming ownership, while a remote client
+/// happens to be focused, would otherwise be classified as remote. That would
+/// relay its secret into every remote session and bypass `skip_sensitive` on
+/// the way into history. An unattributed write is never treated as remote.
+fn is_remote_client_owner(exe_name: Option<&str>, is_explicit_owner: bool) -> bool {
+    is_explicit_owner && is_remote_client_process(exe_name)
+}
+
+/// Relay only captures owned by a remote-control viewer.
+///
+/// Sensitive-tagged content is relayed too, because a remote client tags
+/// everything it syncs down (SBS-781). [`relay_remote_capture`] re-applies the
+/// marker so the rewrite does not weaken it for other monitors.
+///
+/// An ignored application is excluded from transport as well as from history.
+/// Naming an app in `ignored_apps` means keep Cubby out of it, not merely keep
+/// it out of the list, and it is the only way to disable the relay for one
+/// viewer while keeping it for another. Storage *heuristics* deliberately do not
+/// gate relaying: a misfiring classifier there would strand a copy in one
+/// session with no visible reason.
+fn should_relay_capture(relay_enabled: bool, remote_client: bool, app_ignored: bool) -> bool {
+    relay_enabled && remote_client && !app_ignored
+}
+
+/// Whether a sensitive-tagged capture should be dropped instead of stored.
+///
+/// A remote client tags everything it forwards, because it cannot know what the
+/// far-end application meant. Honoring that dropped every remote-session copy
+/// and left a hole in history that reads as lost data (SBS-781), so a
+/// recognized remote client's marker does not suppress storage. A local
+/// application's marker still does: it is set deliberately, about content that
+/// application owns.
+fn should_skip_sensitive_capture(
+    skip_sensitive: bool,
+    sensitive: bool,
+    remote_client: bool,
+) -> bool {
+    skip_sensitive && sensitive && !remote_client
+}
+
+/// `CF_UNICODETEXT` payload bytes: UTF-16LE, NUL-terminated as Win32 requires.
+#[cfg(target_os = "windows")]
+fn utf16_clipboard_bytes(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity((text.len() + 1) * 2);
+    for unit in text.encode_utf16().chain(std::iter::once(0)) {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
+}
+
+/// Payload written under the sensitive marker format.
+///
+/// Deliberately not empty. `clipboard_win::raw::set_inner` returns `Ok(())`
+/// without ever calling `SetClipboardData` when the slice is zero-length, so an
+/// empty marker reports success while writing nothing at all. Monitors only
+/// test presence through `IsClipboardFormatAvailable`, so one byte is enough.
+#[cfg(target_os = "windows")]
+const SENSITIVE_MARKER_PAYLOAD: &[u8] = &[0];
+
+#[cfg(target_os = "windows")]
+fn registered_sensitive_format() -> u32 {
+    static SENSITIVE_FORMAT: OnceLock<u32> = OnceLock::new();
+    *SENSITIVE_FORMAT
+        .get_or_init(|| register_clipboard_format("ExcludeClipboardContentFromMonitorProcessing"))
+}
+
+/// Publish a relayed payload, and its sensitive marker, in one clipboard open.
+///
+/// Atomicity is the point. Publishing the content and then reopening to add
+/// `ExcludeClipboardContentFromMonitorProcessing` leaves a window where another
+/// monitor reads the content before the marker exists, and where a clipboard
+/// change between the two writes would tag *someone else's* content as
+/// sensitive. Both formats therefore go out under a single clipboard handle,
+/// before any other process can observe the update.
+#[cfg(target_os = "windows")]
+fn set_relayed_clipboard_payload(
+    clip_content: &[u8],
+    image_content: Option<&[u8]>,
+    captured_formats: &[CapturedFormat],
+    sensitive: bool,
+) -> Result<(), String> {
+    const CF_UNICODETEXT_FORMAT: u32 = 13;
+
+    // Everything that can fail happens before the clipboard is opened, so a
+    // failure leaves the user's existing clipboard intact instead of emptied,
+    // and the global handle is never held across an image decode.
+    let prepared_image = image_content
+        .map(prepare_image_clipboard_formats)
+        .transpose()?;
+    let sensitive_marker = if sensitive {
+        let marker = registered_sensitive_format();
+        if marker == 0 {
+            return Err("could not register the sensitive marker format".to_string());
+        }
+        Some(marker)
+    } else {
+        None
+    };
+
+    let _clipboard = clipboard_win::Clipboard::new_attempts(10)
+        .map_err(|error| format!("could not open clipboard: {error}"))?;
+    clipboard_win::raw::empty().map_err(|error| format!("could not clear clipboard: {error}"))?;
+
+    if let Some(prepared) = prepared_image.as_ref() {
+        write_image_clipboard_formats(prepared)?;
+    } else {
+        let text = String::from_utf8_lossy(clip_content);
+        clipboard_win::raw::set_without_clear(CF_UNICODETEXT_FORMAT, &utf16_clipboard_bytes(&text))
+            .map_err(|error| format!("could not set text: {error}"))?;
+
+        for (name, document) in relayed_auxiliary_formats(captured_formats) {
+            // Capture stores the StartHTML..EndHTML document with the header
+            // stripped, so the header has to be rebuilt here exactly as the
+            // restore path does. Writing the bare document produces an "HTML
+            // Format" entry Office-class apps reject.
+            let (clipboard_format, payload) = match name {
+                "html" => (
+                    register_clipboard_format("HTML Format"),
+                    crate::cf_html::to_cf_html(&String::from_utf8_lossy(&document)).into_bytes(),
+                ),
+                "rtf" => (register_clipboard_format("Rich Text Format"), document),
+                _ => continue,
+            };
+            if clipboard_format == 0 {
+                continue;
+            }
+            // An auxiliary format is a fidelity bonus, not the payload. Losing
+            // one must not cost the user the relay itself.
+            if let Err(error) = clipboard_win::raw::set_without_clear(clipboard_format, &payload) {
+                log::warn!("CLIPBOARD: Could not relay the {name} format: {error}");
+            }
+        }
+    }
+
+    if let Some(marker) = sensitive_marker {
+        // Failing here is fatal to the write, and returning early is not enough:
+        // the payload is already on the clipboard, so bailing out would publish
+        // tagged content without its tag — exactly what this function exists to
+        // prevent. Empty the clipboard so the secret is withdrawn with it.
+        if let Err(error) = clipboard_win::raw::set_without_clear(marker, SENSITIVE_MARKER_PAYLOAD)
+        {
+            return match clipboard_win::raw::empty() {
+                Ok(()) => Err(format!("could not re-apply the sensitive marker: {error}")),
+                Err(cleanup_error) => Err(format!(
+                    "could not re-apply the sensitive marker ({error}); \
+                     the untagged payload could not be withdrawn either ({cleanup_error})"
+                )),
+            };
+        }
+    }
+    Ok(())
+}
+
+/// The auxiliary formats a relay republishes, in the form a re-capture reads
+/// them back: `get_html` returns the StartHTML..EndHTML slice, so HTML is
+/// normalized here through [`crate::cf_html::document`] and the write side
+/// re-attaches the CF_HTML header on top of it.
+///
+/// One source of truth on purpose. The write publishes these payloads and
+/// [`relayed_clip_hash`] predicts the re-capture from them; a format added to
+/// only one of the two sites would silently stop the predicted hash matching,
+/// and Cubby would store its own relay as a duplicate.
+fn relayed_auxiliary_formats(captured_formats: &[CapturedFormat]) -> Vec<(&'static str, Vec<u8>)> {
+    captured_formats
+        .iter()
+        .filter_map(|format| match format.name {
+            "html" => Some((
+                "html",
+                crate::cf_html::document(&String::from_utf8_lossy(&format.content)).into_bytes(),
+            )),
+            "rtf" => Some(("rtf", format.content.clone())),
+            _ => None,
         })
+        .collect()
+}
+
+/// The hash a re-capture of our own relay write will produce.
+///
+/// The relay does not republish the capture byte-for-byte, so hashing the
+/// captured bytes arms the ignore marker with a hash that never arrives and
+/// Cubby stores its own relay as a duplicate clip attributed to itself. Two
+/// divergences: HTML goes out through [`crate::cf_html::to_cf_html`], so a
+/// re-capture reads back the normalized `document` slice rather than the
+/// original bytes; and formats other than html and rtf are not written at all.
+/// Images are unaffected — the same PNG bytes go back out, and format material
+/// is excluded from image hashes.
+fn relayed_clip_hash(
+    clip_type: &str,
+    clip_content: &[u8],
+    full_image_content: Option<&[u8]>,
+    captured_formats: &[CapturedFormat],
+) -> String {
+    let relayed_formats = relayed_auxiliary_formats(captured_formats);
+    let material = build_clip_hash_material(
+        clip_type,
+        full_image_content.unwrap_or(clip_content),
+        relayed_formats
+            .iter()
+            .map(|(name, content)| (*name, content.as_slice())),
+    );
+    calculate_hash(&material)
 }
 
 /// Rewrite a capture that originated in a remote-control viewer back to the
@@ -1195,6 +1442,7 @@ fn relay_remote_capture(
     full_image_content: Option<&[u8]>,
     captured_formats: &[CapturedFormat],
     clip_hash: &str,
+    sensitive: bool,
 ) {
     let image_content = if clip_type == "image" {
         let Some(png_bytes) = full_image_content else {
@@ -1204,25 +1452,6 @@ fn relay_remote_capture(
     } else {
         None
     };
-    let mut contents = if image_content.is_some() {
-        Vec::new()
-    } else {
-        vec![ClipboardContent::Text(
-            String::from_utf8_lossy(clip_content).to_string(),
-        )]
-    };
-    for format in captured_formats {
-        match format.name {
-            "html" => contents.push(ClipboardContent::Html(
-                String::from_utf8_lossy(&format.content).to_string(),
-            )),
-            "rtf" => contents.push(ClipboardContent::Rtf(
-                String::from_utf8_lossy(&format.content).to_string(),
-            )),
-            _ => {}
-        }
-    }
-
     {
         let mut last = LAST_RELAYED_HASH.lock();
         if last.as_deref() == Some(clip_hash) {
@@ -1230,18 +1459,59 @@ fn relay_remote_capture(
         }
         *last = Some(clip_hash.to_string());
     }
-    set_ignore_hash(clip_hash.to_string());
-    let set_result = if let Some(png_bytes) = image_content {
-        set_clipboard_image_png(png_bytes)
-    } else {
-        ClipboardContext::new()
-            .and_then(|context| context.set(contents))
-            .map_err(|error| error.to_string())
+    // The marker has to describe our *write*, not the capture that prompted it.
+    let relayed_hash = relayed_clip_hash(
+        clip_type,
+        clip_content,
+        full_image_content,
+        captured_formats,
+    );
+    set_ignore_hash(relayed_hash.clone());
+
+    #[cfg(target_os = "windows")]
+    let set_result =
+        set_relayed_clipboard_payload(clip_content, image_content, captured_formats, sensitive);
+
+    // Only Windows has the sensitive marker, and only Windows recognizes a
+    // remote client in the first place, so the portable path stays as it was.
+    #[cfg(not(target_os = "windows"))]
+    let set_result = {
+        let _ = sensitive;
+        if let Some(png_bytes) = image_content {
+            set_clipboard_image_png(png_bytes)
+        } else {
+            let mut contents = vec![ClipboardContent::Text(
+                String::from_utf8_lossy(clip_content).to_string(),
+            )];
+            for format in captured_formats {
+                match format.name {
+                    "html" => contents.push(ClipboardContent::Html(crate::cf_html::to_cf_html(
+                        &String::from_utf8_lossy(&format.content),
+                    ))),
+                    "rtf" => contents.push(ClipboardContent::Rtf(
+                        String::from_utf8_lossy(&format.content).to_string(),
+                    )),
+                    _ => {}
+                }
+            }
+            ClipboardContext::new()
+                .and_then(|context| context.set(contents))
+                .map_err(|error| error.to_string())
+        }
     };
+
     match set_result {
-        Ok(()) => log::info!("CLIPBOARD: Relayed remote-session capture under Cubby ownership"),
+        Ok(()) => {
+            if sensitive {
+                log::info!(
+                    "CLIPBOARD: Relayed remote-session capture under Cubby ownership, sensitive marker preserved"
+                );
+            } else {
+                log::info!("CLIPBOARD: Relayed remote-session capture under Cubby ownership");
+            }
+        }
         Err(error) => {
-            clear_ignore_hash_if_matches(clip_hash);
+            clear_ignore_hash_if_matches(&relayed_hash);
             let mut last = LAST_RELAYED_HASH.lock();
             if last.as_deref() == Some(clip_hash) {
                 last.take();
@@ -1374,7 +1644,49 @@ async fn process_clipboard_snapshot(
         *LAST_ACCEPTED_CAPTURE.lock() = None;
     };
 
-    if settings.skip_sensitive && sensitive {
+    let remote_client = is_remote_client_owner(exe_name.as_deref(), is_explicit_owner);
+
+    // Resolved before the relay because an ignored application is excluded from
+    // transport too, not just from history.
+    let is_ignored = |name: &str| {
+        let name_lower = name.to_lowercase();
+        settings
+            .ignored_apps
+            .iter()
+            .any(|app| app.to_lowercase() == name_lower)
+    };
+    let ignored_match = full_path
+        .as_deref()
+        .filter(|path| is_ignored(path))
+        .map(|_| "path")
+        .or_else(|| {
+            exe_name
+                .as_deref()
+                .filter(|exe| is_ignored(exe))
+                .map(|_| "executable")
+        });
+
+    // Re-announce a remote copy before the rest of capture policy runs. Relaying
+    // is clipboard transport; storing is history. Gating transport behind
+    // storage rules is what let a privacy preference silently break copy-
+    // between-sessions, and put the relay behind the whole encrypt-and-write
+    // path so a viewer could sample a stale clipboard first (SBS-781).
+    if should_relay_capture(
+        settings.remote_clipboard_relay,
+        remote_client,
+        ignored_match.is_some(),
+    ) {
+        relay_remote_capture(
+            clip_type,
+            &clip_content,
+            full_image_content.as_deref(),
+            &captured_formats,
+            &clip_hash,
+            sensitive,
+        );
+    }
+
+    if should_skip_sensitive_capture(settings.skip_sensitive, sensitive, remote_client) {
         log::info!("CLIPBOARD: Skipping content the source app marked as sensitive");
         discard_clear_target();
         return;
@@ -1397,31 +1709,10 @@ async fn process_clipboard_snapshot(
         return;
     }
 
-    // Check if the app is in the ignore list (Case Insensitive)
-    let is_ignored = |name: &str| {
-        let name_lower = name.to_lowercase();
-        settings
-            .ignored_apps
-            .iter()
-            .any(|app| app.to_lowercase() == name_lower)
-    };
-
-    if let Some(ref path) = full_path {
-        if is_ignored(path) {
-            log::info!("CLIPBOARD: Ignoring content from configured application (path match)");
-            discard_clear_target();
-            return;
-        }
-    }
-
-    if let Some(ref exe) = exe_name {
-        if is_ignored(exe) {
-            log::info!(
-                "CLIPBOARD: Ignoring content from configured application (executable match)"
-            );
-            discard_clear_target();
-            return;
-        }
+    if let Some(matched_on) = ignored_match {
+        log::info!("CLIPBOARD: Ignoring content from configured application ({matched_on} match)");
+        discard_clear_target();
+        return;
     }
 
     // Only accepted content participates in consecutive duplicate suppression.
@@ -1768,22 +2059,6 @@ async fn process_clipboard_snapshot(
         captured_at: Instant::now(),
         credential_like,
     });
-
-    // Re-announce remote-viewer captures so a second remote session can paste
-    // them directly.
-    if should_relay_capture(
-        settings.remote_clipboard_relay,
-        sensitive,
-        exe_name.as_deref(),
-    ) {
-        relay_remote_capture(
-            clip_type,
-            &clip_content,
-            full_image_content.as_deref(),
-            &captured_formats,
-            &clip_hash,
-        );
-    }
 
     let emit_started = Instant::now();
     let _ = app.emit(
@@ -2433,9 +2708,11 @@ mod tests {
     use super::{
         build_clip_hash_material, calculate_hash, capture_state_name, capture_text,
         clear_ignore_hash_if_matches, clipboard_retry_delay, ignore_marker_applies,
-        next_listener_backoff, rgba_to_cf_dib, set_ignore_hash, should_forget_recent_capture,
-        should_relay_capture, CapturedContent, CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING,
-        CAPTURE_STATE_STOPPED, CLIPBOARD_CLEAR_FORGET_WINDOW, IGNORE_HASH, IGNORE_HASH_TTL,
+        is_remote_client_owner, is_remote_client_process, next_listener_backoff, relayed_clip_hash,
+        rgba_to_cf_dib, set_ignore_hash, should_forget_recent_capture, should_relay_capture,
+        should_skip_sensitive_capture, CapturedContent, CapturedFormat, CAPTURE_STATE_LISTENING,
+        CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED, CLIPBOARD_CLEAR_FORGET_WINDOW,
+        IGNORE_HASH, IGNORE_HASH_TTL,
     };
     use std::time::{Duration, Instant};
 
@@ -2504,16 +2781,172 @@ mod tests {
 
     #[test]
     fn relays_only_remote_viewer_captures() {
-        assert!(should_relay_capture(true, false, Some("ncplayer.exe")));
-        assert!(should_relay_capture(true, false, Some("mstsc.exe")));
-        assert!(!should_relay_capture(true, false, Some("notepad.exe")));
-        assert!(!should_relay_capture(true, false, None));
+        assert!(should_relay_capture(
+            true,
+            is_remote_client_owner(Some("ncplayer.exe"), true),
+            false
+        ));
+        assert!(should_relay_capture(
+            true,
+            is_remote_client_owner(Some("mstsc.exe"), true),
+            false
+        ));
+        assert!(!should_relay_capture(
+            true,
+            is_remote_client_owner(Some("notepad.exe"), true),
+            false
+        ));
+        assert!(!should_relay_capture(
+            true,
+            is_remote_client_owner(None, true),
+            false
+        ));
     }
 
     #[test]
-    fn relay_respects_setting_and_sensitive_flag() {
-        assert!(!should_relay_capture(false, false, Some("ncplayer.exe")));
-        assert!(!should_relay_capture(true, true, Some("ncplayer.exe")));
+    fn relay_respects_setting() {
+        assert!(!should_relay_capture(
+            false,
+            is_remote_client_owner(Some("ncplayer.exe"), true),
+            false
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_undecodable_image_fails_before_the_clipboard_is_touched() {
+        // Preparation has to reject bad bytes on its own, because
+        // set_clipboard_image_png empties the clipboard only once this returns
+        // Ok. Moving the decode back inside the open handle would leave the
+        // user with an empty clipboard and nothing written, and would keep
+        // every other test in this module green.
+        assert!(super::prepare_image_clipboard_formats(b"\x89PNG\r\n\x1a\nfake").is_err());
+    }
+
+    #[test]
+    fn the_relay_ignore_hash_describes_the_write_not_the_capture() {
+        let fragment_html = b"<b>hi</b>".to_vec();
+        let files = b"C:\\secret.txt".to_vec();
+        let captured = calculate_hash(&build_clip_hash_material(
+            "text",
+            b"hi",
+            [
+                ("html", fragment_html.as_slice()),
+                ("files", files.as_slice()),
+            ],
+        ));
+        let relayed = relayed_clip_hash(
+            "text",
+            b"hi",
+            None,
+            &[
+                CapturedFormat {
+                    name: "html",
+                    content: fragment_html.clone(),
+                },
+                CapturedFormat {
+                    name: "files",
+                    content: files.clone(),
+                },
+            ],
+        );
+
+        // A bare fragment is wrapped by cf_html::document on the way out, and
+        // "files" is never written, so a re-capture reads back neither.
+        assert_ne!(captured, relayed);
+
+        let normalized =
+            crate::cf_html::document(&String::from_utf8_lossy(&fragment_html)).into_bytes();
+        assert_eq!(
+            relayed,
+            calculate_hash(&build_clip_hash_material(
+                "text",
+                b"hi",
+                [("html", normalized.as_slice())]
+            ))
+        );
+    }
+
+    #[test]
+    fn an_image_relay_hash_is_unchanged_by_normalization() {
+        // Images republish the same PNG bytes and exclude format material, so
+        // the predicted hash must still match the captured one.
+        let png = b"\x89PNG\r\n\x1a\nfake".to_vec();
+        let captured = calculate_hash(&build_clip_hash_material("image", &png, std::iter::empty()));
+        assert_eq!(captured, relayed_clip_hash("image", b"", Some(&png), &[]));
+    }
+
+    #[test]
+    fn an_ignored_viewer_is_not_relayed_either() {
+        // Naming an app in ignored_apps keeps Cubby out of it entirely, and is
+        // the only way to disable the relay for one viewer but not another.
+        assert!(!should_relay_capture(
+            true,
+            is_remote_client_owner(Some("ncplayer.exe"), true),
+            true
+        ));
+    }
+
+    #[test]
+    fn an_unattributed_owner_is_never_treated_as_remote() {
+        // Attribution falls back to the foreground window when
+        // GetClipboardOwner fails. A password manager writing without claiming
+        // ownership while a remote client is focused must not be relayed into
+        // remote sessions, nor bypass skip_sensitive on the way into history.
+        assert!(!is_remote_client_owner(Some("ncplayer.exe"), false));
+        assert!(!is_remote_client_owner(Some("mstsc.exe"), false));
+        assert!(!should_relay_capture(
+            true,
+            is_remote_client_owner(Some("ncplayer.exe"), false),
+            false
+        ));
+        assert!(should_skip_sensitive_capture(
+            true,
+            true,
+            is_remote_client_owner(Some("ncplayer.exe"), false)
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_sensitive_marker_payload_is_never_empty() {
+        // clipboard_win::raw::set_inner returns Ok without calling
+        // SetClipboardData for a zero-length payload, so an empty marker
+        // reports success while writing nothing and silently publishes tagged
+        // content untagged.
+        assert!(!super::SENSITIVE_MARKER_PAYLOAD.is_empty());
+    }
+
+    #[test]
+    fn a_remote_clients_sensitive_marker_does_not_suppress_storage() {
+        // The viewer tags everything it forwards, so honoring it here dropped
+        // every remote-session copy and left a hole in history (SBS-781).
+        assert!(!should_skip_sensitive_capture(true, true, true));
+    }
+
+    #[test]
+    fn a_local_apps_sensitive_marker_still_suppresses_storage() {
+        // The whole point of scoping the bypass: a password manager sets this
+        // deliberately, about content it owns, and must keep being honored.
+        assert!(should_skip_sensitive_capture(true, true, false));
+    }
+
+    #[test]
+    fn untagged_content_and_the_disabled_setting_never_skip() {
+        assert!(!should_skip_sensitive_capture(true, false, false));
+        assert!(!should_skip_sensitive_capture(false, true, false));
+        assert!(!should_skip_sensitive_capture(false, true, true));
+    }
+
+    #[test]
+    fn only_remote_clients_bypass_the_sensitive_marker() {
+        // The bypass must never reach a local application: a password manager
+        // sets this marker deliberately and about content it actually owns.
+        assert!(is_remote_client_process(Some("ncplayer.exe")));
+        assert!(is_remote_client_process(Some("mstsc.exe")));
+        assert!(!is_remote_client_process(Some("1Password.exe")));
+        assert!(!is_remote_client_process(Some("notepad.exe")));
+        assert!(!is_remote_client_process(None));
     }
 
     #[test]
