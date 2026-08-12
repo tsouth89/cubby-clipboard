@@ -43,7 +43,7 @@ Cubby must be exercised with:
 
 - Windows Remote Desktop Connection
 - Windows App / modern RDP client
-- NinjaOne remote access used in normal support workflows
+- Remote support software used in normal support workflows
 - At least one additional remote-control product with clipboard synchronization
 
 For each client, test:
@@ -79,7 +79,7 @@ cargo run --bin clipboard_probe -- --burst 100 --interval-ms 25
 # Force the reader through clipboard-lock contention after every update.
 cargo run --bin clipboard_probe -- --burst 100 --interval-ms 10 --contention-ms 40
 
-# Interactive mode for RDP, NinjaOne, and other application testing.
+# Interactive mode for RDP, remote support software, and other application testing.
 cargo run --bin clipboard_probe -- --timeout-seconds 300
 
 # Require 20 distinct readable text copies while ignoring remote sync churn.

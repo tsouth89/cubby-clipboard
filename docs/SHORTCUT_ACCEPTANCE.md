@@ -11,7 +11,7 @@ Cubby's shortcut behavior is not complete until this matrix passes on Windows 11
 - `Alt+V` remains available to application menus.
 - `Win+V`, `Win+Period`, `Win+E`, `Win+R`, and a plain Windows-key tap retain their normal Windows behavior.
 - A conflicting configured shortcut produces a visible error and keeps the previous working shortcut.
-- Restart, sleep/resume, lock/unlock, Ninja Remote, and RDP do not disable the shortcut.
+- Restart, sleep/resume, lock/unlock, remote support sessions, and RDP do not disable the shortcut.
 
 ## Win+V replacement
 

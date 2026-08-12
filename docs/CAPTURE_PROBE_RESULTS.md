@@ -29,7 +29,7 @@ cargo run --locked --bin clipboard_probe -- --burst 100 --interval-ms 10 --timeo
 
 ## Remaining proof
 
-- Run the interactive probe during RDP and NinjaOne sessions.
+- Run the interactive probe during RDP and remote support software sessions.
 - Verify content remains available after disconnecting or closing the source session.
 - Complete the representative Office/browser/Explorer/terminal/IDE/packaged-app/
   elevated-target matrix tracked by SBS-408.
@@ -68,11 +68,11 @@ classified through Cubby's production file-payload policy as intentionally
 ignored: delayed-rendered virtual files are outside Cubby's stored-history
 contract, and their path-like fallback must not become a misleading clip.
 
-## NinjaOne remote-session validation
+## Remote support software session validation
 
 Test date: 2026-07-16
 
-An interactive mixed-content run copied text and screenshots from a NinjaOne remote-control session:
+An interactive mixed-content run copied text and screenshots from a remote support software session:
 
 | Requested items | Clipboard events | Distinct text | Distinct images | Read failures | Result |
 | ---: | ---: | ---: | ---: | ---: | --- |

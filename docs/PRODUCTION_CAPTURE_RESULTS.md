@@ -29,7 +29,7 @@ Test rows were selected by their dedicated `CUBBY-PROBE-` prefix and removed aft
 
 - Native probe: 100/100 text copies at 25 ms.
 - Native probe: 100/100 text copies at 10 ms.
-- NinjaOne: 20/20 mixed remote items, consisting of 16 text values and 4 screenshots, with zero read failures.
+- Remote support software: 20/20 mixed remote items, consisting of 16 text values and 4 screenshots, with zero read failures.
 
 ## Current boundary
 

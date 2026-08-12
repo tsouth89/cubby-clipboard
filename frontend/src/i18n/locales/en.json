@@ -27,8 +27,8 @@
     "retry": "Try again"
   },
   "pasteContext": {
-    "ninjaCopy": "Ninja Remote · Select, then press Ctrl+V",
-    "ninjaKeystrokes": "Ninja Remote · Paste as keystrokes",
+    "ninjaCopy": "Remote support session · Select, then press Ctrl+V",
+    "ninjaKeystrokes": "Remote support session · Paste as keystrokes",
     "remote": "Remote session · Clipboard sync enabled",
     "copyAction": "Copy"
   },
@@ -97,7 +97,7 @@
     "remotePasteCopy": "Copy, then Ctrl+V",
     "remotePasteCopyDesc": "Recommended for large logs and everyday use. Cubby restores the remote app, then you press Ctrl+V.",
     "remotePasteKeystrokes": "Paste as keystrokes",
-    "remotePasteKeystrokesDesc": "Automatically types short text through Ninja Remote. Slow for large content.",
+    "remotePasteKeystrokesDesc": "Automatically types short text through the remote support client. Slow for large content.",
     "remoteHotkeyHint": "Your hotkey opens Cubby inside remote sessions when the remote client's keyboard forwarding is off. With forwarding on, open Cubby from the tray icon.",
     "remoteClipboardRelay": "Sync clipboard between remote sessions",
     "remoteClipboardRelayDesc": "Re-announce anything copied inside a remote session so your other remote sessions pick it up. Copy in one session, Ctrl+V in another.",
