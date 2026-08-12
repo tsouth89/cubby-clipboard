@@ -1384,6 +1384,43 @@ fn set_relayed_clipboard_payload(
     Ok(())
 }
 
+/// The hash a re-capture of our own relay write will produce.
+///
+/// The relay does not republish the capture byte-for-byte, so hashing the
+/// captured bytes arms the ignore marker with a hash that never arrives and
+/// Cubby stores its own relay as a duplicate clip attributed to itself. Two
+/// divergences: HTML goes out through [`crate::cf_html::to_cf_html`], so a
+/// re-capture reads back the normalized `document` slice rather than the
+/// original bytes; and formats other than html and rtf are not written at all.
+/// Images are unaffected — the same PNG bytes go back out, and format material
+/// is excluded from image hashes.
+fn relayed_clip_hash(
+    clip_type: &str,
+    clip_content: &[u8],
+    full_image_content: Option<&[u8]>,
+    captured_formats: &[CapturedFormat],
+) -> String {
+    let relayed_formats: Vec<(&str, Vec<u8>)> = captured_formats
+        .iter()
+        .filter_map(|format| match format.name {
+            "html" => Some((
+                "html",
+                crate::cf_html::document(&String::from_utf8_lossy(&format.content)).into_bytes(),
+            )),
+            "rtf" => Some(("rtf", format.content.clone())),
+            _ => None,
+        })
+        .collect();
+    let material = build_clip_hash_material(
+        clip_type,
+        full_image_content.unwrap_or(clip_content),
+        relayed_formats
+            .iter()
+            .map(|(name, content)| (*name, content.as_slice())),
+    );
+    calculate_hash(&material)
+}
+
 /// Rewrite a capture that originated in a remote-control viewer back to the
 /// clipboard under Cubby's ownership.
 ///
@@ -1416,7 +1453,14 @@ fn relay_remote_capture(
         }
         *last = Some(clip_hash.to_string());
     }
-    set_ignore_hash(clip_hash.to_string());
+    // The marker has to describe our *write*, not the capture that prompted it.
+    let relayed_hash = relayed_clip_hash(
+        clip_type,
+        clip_content,
+        full_image_content,
+        captured_formats,
+    );
+    set_ignore_hash(relayed_hash.clone());
 
     #[cfg(target_os = "windows")]
     let set_result =
@@ -1461,7 +1505,7 @@ fn relay_remote_capture(
             }
         }
         Err(error) => {
-            clear_ignore_hash_if_matches(clip_hash);
+            clear_ignore_hash_if_matches(&relayed_hash);
             let mut last = LAST_RELAYED_HASH.lock();
             if last.as_deref() == Some(clip_hash) {
                 last.take();
@@ -2658,9 +2702,9 @@ mod tests {
     use super::{
         build_clip_hash_material, calculate_hash, capture_state_name, capture_text,
         clear_ignore_hash_if_matches, clipboard_retry_delay, ignore_marker_applies,
-        is_remote_client_owner, is_remote_client_process, next_listener_backoff, rgba_to_cf_dib,
-        set_ignore_hash, should_forget_recent_capture, should_relay_capture,
-        should_skip_sensitive_capture, CapturedContent, CAPTURE_STATE_LISTENING,
+        is_remote_client_owner, is_remote_client_process, next_listener_backoff, relayed_clip_hash,
+        rgba_to_cf_dib, set_ignore_hash, should_forget_recent_capture, should_relay_capture,
+        should_skip_sensitive_capture, CapturedContent, CapturedFormat, CAPTURE_STATE_LISTENING,
         CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED, CLIPBOARD_CLEAR_FORGET_WINDOW,
         IGNORE_HASH, IGNORE_HASH_TTL,
     };
@@ -2760,6 +2804,59 @@ mod tests {
             is_remote_client_owner(Some("ncplayer.exe"), true),
             false
         ));
+    }
+
+    #[test]
+    fn the_relay_ignore_hash_describes_the_write_not_the_capture() {
+        let fragment_html = b"<b>hi</b>".to_vec();
+        let files = b"C:\\secret.txt".to_vec();
+        let captured = calculate_hash(&build_clip_hash_material(
+            "text",
+            b"hi",
+            [
+                ("html", fragment_html.as_slice()),
+                ("files", files.as_slice()),
+            ],
+        ));
+        let relayed = relayed_clip_hash(
+            "text",
+            b"hi",
+            None,
+            &[
+                CapturedFormat {
+                    name: "html",
+                    content: fragment_html.clone(),
+                },
+                CapturedFormat {
+                    name: "files",
+                    content: files.clone(),
+                },
+            ],
+        );
+
+        // A bare fragment is wrapped by cf_html::document on the way out, and
+        // "files" is never written, so a re-capture reads back neither.
+        assert_ne!(captured, relayed);
+
+        let normalized =
+            crate::cf_html::document(&String::from_utf8_lossy(&fragment_html)).into_bytes();
+        assert_eq!(
+            relayed,
+            calculate_hash(&build_clip_hash_material(
+                "text",
+                b"hi",
+                [("html", normalized.as_slice())]
+            ))
+        );
+    }
+
+    #[test]
+    fn an_image_relay_hash_is_unchanged_by_normalization() {
+        // Images republish the same PNG bytes and exclude format material, so
+        // the predicted hash must still match the captured one.
+        let png = b"\x89PNG\r\n\x1a\nfake".to_vec();
+        let captured = calculate_hash(&build_clip_hash_material("image", &png, std::iter::empty()));
+        assert_eq!(captured, relayed_clip_hash("image", b"", Some(&png), &[]));
     }
 
     #[test]
