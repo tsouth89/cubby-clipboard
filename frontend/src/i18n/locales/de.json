@@ -91,6 +91,7 @@
     "clipDeleteFailed": "Eintrag konnte nicht gelöscht werden",
     "folderDeleteFailed": "Ordner konnte nicht gelöscht werden",
     "folderRenameFailed": "Ordner konnte nicht umbenannt werden",
+    "folderCreateFailed": "Ordner konnte nicht erstellt werden",
     "copyFailed": "Kopieren fehlgeschlagen"
   }
 }

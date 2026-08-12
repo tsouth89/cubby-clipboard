@@ -91,6 +91,7 @@
     "clipDeleteFailed": "クリップの削除に失敗しました",
     "folderDeleteFailed": "フォルダーの削除に失敗しました",
     "folderRenameFailed": "フォルダー名の変更に失敗しました",
+    "folderCreateFailed": "フォルダーの作成に失敗しました",
     "copyFailed": "コピーに失敗しました"
   }
 }
