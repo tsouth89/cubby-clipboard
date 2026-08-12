@@ -2499,10 +2499,10 @@ mod tests {
     use super::{
         build_clip_hash_material, calculate_hash, capture_state_name, capture_text,
         clear_ignore_hash_if_matches, clipboard_retry_delay, ignore_marker_applies,
-        next_listener_backoff, rgba_to_cf_dib, set_ignore_hash, should_forget_recent_capture,
-        is_remote_client_process, should_relay_capture, CapturedContent, CAPTURE_STATE_LISTENING,
-        CAPTURE_STATE_RESTARTING,
-        CAPTURE_STATE_STOPPED, CLIPBOARD_CLEAR_FORGET_WINDOW, IGNORE_HASH, IGNORE_HASH_TTL,
+        is_remote_client_process, next_listener_backoff, rgba_to_cf_dib, set_ignore_hash,
+        should_forget_recent_capture, should_relay_capture, CapturedContent,
+        CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED,
+        CLIPBOARD_CLEAR_FORGET_WINDOW, IGNORE_HASH, IGNORE_HASH_TTL,
     };
     use std::time::{Duration, Instant};
 
