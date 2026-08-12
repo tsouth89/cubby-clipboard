@@ -1168,17 +1168,70 @@ pub(crate) fn set_clipboard_image_png(png_bytes: &[u8]) -> Result<(), String> {
     }
 }
 
-/// Relay only captures owned by a remote-control viewer, and never
-/// sensitive-tagged content: a rewrite would strip the
-/// `ExcludeClipboardContentFromMonitorProcessing` flag other monitors rely on.
-fn should_relay_capture(relay_enabled: bool, sensitive: bool, exe_name: Option<&str>) -> bool {
-    relay_enabled
-        && !sensitive
-        && exe_name.is_some_and(|exe| {
-            crate::paste_engine::paste_strategy_for_process(exe)
-                != crate::paste_engine::PasteStrategy::Standard
-        })
+/// True when the clipboard owner is a recognized remote-control client rather
+/// than an ordinary local application.
+///
+/// This distinction carries weight beyond paste strategy. A remote client
+/// writes whatever it received from the far end, so the metadata on that write
+/// describes the *viewer's* policy, not what the originating application meant.
+fn is_remote_client_process(exe_name: Option<&str>) -> bool {
+    exe_name.is_some_and(|exe| {
+        crate::paste_engine::paste_strategy_for_process(exe)
+            != crate::paste_engine::PasteStrategy::Standard
+    })
 }
+
+/// Relay only captures owned by a remote-control viewer.
+///
+/// Sensitive-tagged content is relayed too, because a remote client tags
+/// everything it syncs down (SBS-781). [`relay_remote_capture`] re-applies the
+/// marker so the rewrite does not weaken it for other monitors.
+fn should_relay_capture(relay_enabled: bool, exe_name: Option<&str>) -> bool {
+    relay_enabled && is_remote_client_process(exe_name)
+}
+
+/// Re-apply `ExcludeClipboardContentFromMonitorProcessing` to clipboard content
+/// Cubby just rewrote, so relaying a tagged copy does not strip the marker that
+/// other clipboard monitors honor.
+///
+/// Best effort by design: the content write already succeeded by the time this
+/// runs, and losing the marker is strictly better than losing the relay the
+/// user asked for. Failures are logged, not propagated.
+#[cfg(target_os = "windows")]
+fn restore_sensitive_marker() {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+
+    let name: Vec<u16> = "ExcludeClipboardContentFromMonitorProcessing"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let format = unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) };
+    if format == 0 {
+        log::warn!("CLIPBOARD: Could not register the sensitive marker format for a relay");
+        return;
+    }
+
+    let _clipboard = match clipboard_win::Clipboard::new_attempts(10) {
+        Ok(handle) => handle,
+        Err(error) => {
+            log::warn!("CLIPBOARD: Could not reopen the clipboard to re-mark a relay: {error}");
+            return;
+        }
+    };
+    // set_without_clear: the relayed content is already on the clipboard and
+    // must survive. The marker's presence is the whole signal, so an empty
+    // payload is what other monitors expect.
+    match clipboard_win::raw::set_without_clear(format, &[]) {
+        Ok(()) => log::info!("CLIPBOARD: Re-applied the sensitive marker to a relayed capture"),
+        Err(error) => {
+            log::warn!("CLIPBOARD: Could not re-mark a relayed capture as sensitive: {error}")
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn restore_sensitive_marker() {}
 
 /// Rewrite a capture that originated in a remote-control viewer back to the
 /// clipboard under Cubby's ownership.
@@ -1195,6 +1248,7 @@ fn relay_remote_capture(
     full_image_content: Option<&[u8]>,
     captured_formats: &[CapturedFormat],
     clip_hash: &str,
+    sensitive: bool,
 ) {
     let image_content = if clip_type == "image" {
         let Some(png_bytes) = full_image_content else {
@@ -1239,7 +1293,12 @@ fn relay_remote_capture(
             .map_err(|error| error.to_string())
     };
     match set_result {
-        Ok(()) => log::info!("CLIPBOARD: Relayed remote-session capture under Cubby ownership"),
+        Ok(()) => {
+            log::info!("CLIPBOARD: Relayed remote-session capture under Cubby ownership");
+            if sensitive {
+                restore_sensitive_marker();
+            }
+        }
         Err(error) => {
             clear_ignore_hash_if_matches(clip_hash);
             let mut last = LAST_RELAYED_HASH.lock();
@@ -1374,7 +1433,30 @@ async fn process_clipboard_snapshot(
         *LAST_ACCEPTED_CAPTURE.lock() = None;
     };
 
-    if settings.skip_sensitive && sensitive {
+    let remote_client = is_remote_client_process(exe_name.as_deref());
+
+    // Re-announce a remote copy before any capture policy runs. Relaying is
+    // clipboard transport; storing is history. Gating transport behind storage
+    // rules is what let a privacy preference silently break copy-between-
+    // sessions, and put the relay behind the whole encrypt-and-write path so a
+    // viewer could sample a stale clipboard first (SBS-781).
+    if should_relay_capture(settings.remote_clipboard_relay, exe_name.as_deref()) {
+        relay_remote_capture(
+            clip_type,
+            &clip_content,
+            full_image_content.as_deref(),
+            &captured_formats,
+            &clip_hash,
+            sensitive,
+        );
+    }
+
+    // A remote client tags everything it forwards with the sensitive marker
+    // because it cannot know what the far-end application meant. Honoring that
+    // dropped every remote-session copy, leaving a hole in history that reads
+    // as lost data (SBS-781). The marker still fully protects local
+    // applications, which set it deliberately.
+    if settings.skip_sensitive && sensitive && !remote_client {
         log::info!("CLIPBOARD: Skipping content the source app marked as sensitive");
         discard_clear_target();
         return;
@@ -1768,22 +1850,6 @@ async fn process_clipboard_snapshot(
         captured_at: Instant::now(),
         credential_like,
     });
-
-    // Re-announce remote-viewer captures so a second remote session can paste
-    // them directly.
-    if should_relay_capture(
-        settings.remote_clipboard_relay,
-        sensitive,
-        exe_name.as_deref(),
-    ) {
-        relay_remote_capture(
-            clip_type,
-            &clip_content,
-            full_image_content.as_deref(),
-            &captured_formats,
-            &clip_hash,
-        );
-    }
 
     let emit_started = Instant::now();
     let _ = app.emit(
@@ -2434,7 +2500,8 @@ mod tests {
         build_clip_hash_material, calculate_hash, capture_state_name, capture_text,
         clear_ignore_hash_if_matches, clipboard_retry_delay, ignore_marker_applies,
         next_listener_backoff, rgba_to_cf_dib, set_ignore_hash, should_forget_recent_capture,
-        should_relay_capture, CapturedContent, CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING,
+        is_remote_client_process, should_relay_capture, CapturedContent, CAPTURE_STATE_LISTENING,
+        CAPTURE_STATE_RESTARTING,
         CAPTURE_STATE_STOPPED, CLIPBOARD_CLEAR_FORGET_WINDOW, IGNORE_HASH, IGNORE_HASH_TTL,
     };
     use std::time::{Duration, Instant};
@@ -2504,16 +2571,34 @@ mod tests {
 
     #[test]
     fn relays_only_remote_viewer_captures() {
-        assert!(should_relay_capture(true, false, Some("ncplayer.exe")));
-        assert!(should_relay_capture(true, false, Some("mstsc.exe")));
-        assert!(!should_relay_capture(true, false, Some("notepad.exe")));
-        assert!(!should_relay_capture(true, false, None));
+        assert!(should_relay_capture(true, Some("ncplayer.exe")));
+        assert!(should_relay_capture(true, Some("mstsc.exe")));
+        assert!(!should_relay_capture(true, Some("notepad.exe")));
+        assert!(!should_relay_capture(true, None));
     }
 
     #[test]
-    fn relay_respects_setting_and_sensitive_flag() {
-        assert!(!should_relay_capture(false, false, Some("ncplayer.exe")));
-        assert!(!should_relay_capture(true, true, Some("ncplayer.exe")));
+    fn relay_respects_setting() {
+        assert!(!should_relay_capture(false, Some("ncplayer.exe")));
+    }
+
+    #[test]
+    fn sensitive_tagged_remote_captures_still_relay() {
+        // A remote client tags everything it forwards, so refusing to relay
+        // tagged content refused to relay anything at all (SBS-781). The
+        // marker is re-applied after the rewrite instead.
+        assert!(should_relay_capture(true, Some("ncplayer.exe")));
+    }
+
+    #[test]
+    fn only_remote_clients_bypass_the_sensitive_marker() {
+        // The bypass must never reach a local application: a password manager
+        // sets this marker deliberately and about content it actually owns.
+        assert!(is_remote_client_process(Some("ncplayer.exe")));
+        assert!(is_remote_client_process(Some("mstsc.exe")));
+        assert!(!is_remote_client_process(Some("1Password.exe")));
+        assert!(!is_remote_client_process(Some("notepad.exe")));
+        assert!(!is_remote_client_process(None));
     }
 
     #[test]
