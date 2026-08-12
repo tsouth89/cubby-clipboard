@@ -837,8 +837,11 @@ function App() {
     try {
       await invoke('create_folder', { name, icon: null, color: null });
       await loadFolders();
+      return true;
     } catch (error) {
       console.error('Failed to create folder:', error);
+      toast.error(t('notifications.folderCreateFailed'));
+      return false;
     }
   };
 
@@ -907,7 +910,8 @@ function App() {
   // Updated Create Folder to handle Rename
   const handleCreateOrRenameFolder = async (name: string) => {
     if (folderModalMode === 'create') {
-      await handleCreateFolder(name);
+      const created = await handleCreateFolder(name);
+      if (!created) return;
       toast.success(t('folders.folderCreated', { name }));
       setShowAddFolderModal(false);
       setNewFolderName('');
