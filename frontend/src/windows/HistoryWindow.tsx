@@ -189,7 +189,7 @@ export function HistoryWindow() {
   const [listResetToken, setListResetToken] = useState(0);
   useEffect(() => {
     setListResetToken((token) => token + 1);
-  }, [contentFilter, searchQuery, selectedFolder]);
+  }, [contentFilter, searchQuery, selectedFolder, sourceApp, dateFrom, dateTo]);
 
   useEffect(() => {
     loadFolders();
