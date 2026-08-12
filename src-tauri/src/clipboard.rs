@@ -1334,21 +1334,17 @@ fn set_relayed_clipboard_payload(
         clipboard_win::raw::set_without_clear(CF_UNICODETEXT_FORMAT, &utf16_clipboard_bytes(&text))
             .map_err(|error| format!("could not set text: {error}"))?;
 
-        for format in captured_formats {
+        for (name, document) in relayed_auxiliary_formats(captured_formats) {
             // Capture stores the StartHTML..EndHTML document with the header
             // stripped, so the header has to be rebuilt here exactly as the
             // restore path does. Writing the bare document produces an "HTML
             // Format" entry Office-class apps reject.
-            let (clipboard_format, payload) = match format.name {
+            let (clipboard_format, payload) = match name {
                 "html" => (
                     register_clipboard_format("HTML Format"),
-                    crate::cf_html::to_cf_html(&String::from_utf8_lossy(&format.content))
-                        .into_bytes(),
+                    crate::cf_html::to_cf_html(&String::from_utf8_lossy(&document)).into_bytes(),
                 ),
-                "rtf" => (
-                    register_clipboard_format("Rich Text Format"),
-                    format.content.clone(),
-                ),
+                "rtf" => (register_clipboard_format("Rich Text Format"), document),
                 _ => continue,
             };
             if clipboard_format == 0 {
@@ -1357,10 +1353,7 @@ fn set_relayed_clipboard_payload(
             // An auxiliary format is a fidelity bonus, not the payload. Losing
             // one must not cost the user the relay itself.
             if let Err(error) = clipboard_win::raw::set_without_clear(clipboard_format, &payload) {
-                log::warn!(
-                    "CLIPBOARD: Could not relay the {} format: {error}",
-                    format.name
-                );
+                log::warn!("CLIPBOARD: Could not relay the {name} format: {error}");
             }
         }
     }
@@ -1384,6 +1377,29 @@ fn set_relayed_clipboard_payload(
     Ok(())
 }
 
+/// The auxiliary formats a relay republishes, in the form a re-capture reads
+/// them back: `get_html` returns the StartHTML..EndHTML slice, so HTML is
+/// normalized here through [`crate::cf_html::document`] and the write side
+/// re-attaches the CF_HTML header on top of it.
+///
+/// One source of truth on purpose. The write publishes these payloads and
+/// [`relayed_clip_hash`] predicts the re-capture from them; a format added to
+/// only one of the two sites would silently stop the predicted hash matching,
+/// and Cubby would store its own relay as a duplicate.
+fn relayed_auxiliary_formats(captured_formats: &[CapturedFormat]) -> Vec<(&'static str, Vec<u8>)> {
+    captured_formats
+        .iter()
+        .filter_map(|format| match format.name {
+            "html" => Some((
+                "html",
+                crate::cf_html::document(&String::from_utf8_lossy(&format.content)).into_bytes(),
+            )),
+            "rtf" => Some(("rtf", format.content.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The hash a re-capture of our own relay write will produce.
 ///
 /// The relay does not republish the capture byte-for-byte, so hashing the
@@ -1400,17 +1416,7 @@ fn relayed_clip_hash(
     full_image_content: Option<&[u8]>,
     captured_formats: &[CapturedFormat],
 ) -> String {
-    let relayed_formats: Vec<(&str, Vec<u8>)> = captured_formats
-        .iter()
-        .filter_map(|format| match format.name {
-            "html" => Some((
-                "html",
-                crate::cf_html::document(&String::from_utf8_lossy(&format.content)).into_bytes(),
-            )),
-            "rtf" => Some(("rtf", format.content.clone())),
-            _ => None,
-        })
-        .collect();
+    let relayed_formats = relayed_auxiliary_formats(captured_formats);
     let material = build_clip_hash_material(
         clip_type,
         full_image_content.unwrap_or(clip_content),
@@ -2804,6 +2810,17 @@ mod tests {
             is_remote_client_owner(Some("ncplayer.exe"), true),
             false
         ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_undecodable_image_fails_before_the_clipboard_is_touched() {
+        // Preparation has to reject bad bytes on its own, because
+        // set_clipboard_image_png empties the clipboard only once this returns
+        // Ok. Moving the decode back inside the open handle would leave the
+        // user with an empty clipboard and nothing written, and would keep
+        // every other test in this module green.
+        assert!(super::prepare_image_clipboard_formats(b"\x89PNG\r\n\x1a\nfake").is_err());
     }
 
     #[test]
