@@ -17,6 +17,7 @@ import { useSystemAccent } from './hooks/useSystemAccent';
 import { useUpdater } from './hooks/useUpdater';
 import { useRevealedClips } from './hooks/useRevealedClips';
 import { isImeKey, shouldCaptureTypeToSearch } from './utils/flyoutSearch';
+import { folderSelectionAfterReload } from './utils/folderSelection';
 import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
 import { generateDemoClips } from './debug/demoData';
@@ -444,6 +445,11 @@ function App() {
       const data = await invoke<FolderItem[]>('get_folders');
 
       setFolders(data);
+      const next = folderSelectionAfterReload(selectedFolderRef.current, data);
+      if (next !== selectedFolderRef.current) {
+        selectedFolderRef.current = next;
+        setSelectedFolder(next);
+      }
     } catch (error) {
       console.error('Failed to load folders:', error);
     }
@@ -524,9 +530,16 @@ function App() {
 
   useEffect(() => {
     const unlistenClipboard = listen('clipboard-change', () => {
-      refreshCurrentFolder();
-      loadFolders(); // Refresh folders to get updated counts
-      refreshTotalCount(); // Refresh total count
+      void (async () => {
+        const previous = selectedFolderRef.current;
+        await loadFolders();
+        // A deleted folder is reset to All inside loadFolders. That change
+        // reloads the unfiltered list; do not refetch the gone folder first.
+        if (selectedFolderRef.current === previous) {
+          refreshCurrentFolder();
+        }
+        refreshTotalCount();
+      })();
     });
 
     // When a screenshot finishes OCR in the background, surface its "paste text"
