@@ -16,6 +16,7 @@ import { useLanguage } from './hooks/useLanguage';
 import { useSystemAccent } from './hooks/useSystemAccent';
 import { useUpdater } from './hooks/useUpdater';
 import { useRevealedClips } from './hooks/useRevealedClips';
+import { isImeKey, shouldCaptureTypeToSearch } from './utils/flyoutSearch';
 import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
 import { generateDemoClips } from './debug/demoData';
@@ -85,9 +86,11 @@ function App() {
       : settings?.mica_effect === 'mica_alt' || settings?.mica_effect === 'auto'
         ? 'acrylic'
         : settings?.mica_effect || 'solid';
+  // Solid follows the theme token the same way Settings and History do.
+  // A hardcoded dark fill made light-theme text (near-black) unreadable.
   const windowSurface =
     windowEffect === 'solid'
-      ? 'bg-[#171719]'
+      ? 'bg-background'
       : windowEffect === 'acrylic'
         ? 'bg-background/[0.58]'
         : 'bg-background/[0.08]';
@@ -96,7 +99,7 @@ function App() {
       ? 'border-white/[0.14]'
       : windowEffect === 'mica'
         ? 'border-white/[0.10]'
-        : 'border-white/[0.09]';
+        : 'border-border';
   const windowGeometry = hasRoundedCorners ? 'p-2' : 'p-0';
   const windowShape = hasRoundedCorners
     ? 'rounded-[10px] shadow-[0_24px_80px_rgba(0,0,0,0.48),0_6px_24px_rgba(0,0,0,0.32)]'
@@ -317,14 +320,17 @@ function App() {
         setLoadError(false);
 
         const currentOffset = append ? clips.length : 0;
+        // The index lowercases but does not trim, so a leading space matches
+        // nothing. History already sends the trimmed form.
+        const query = searchQuery.trim();
 
         let data: AppClipboardItem[];
 
         if (assetCaptureEnabled) {
-          const query = searchQuery.trim().toLocaleLowerCase();
+          const demoQuery = query.toLocaleLowerCase();
           data = generateDemoClips()
             .filter((clip) => {
-              if (!query) return true;
+              if (!demoQuery) return true;
               const searchable = [
                 clip.content,
                 clip.preview,
@@ -335,16 +341,16 @@ function App() {
                 .filter(Boolean)
                 .join(' ')
                 .toLocaleLowerCase();
-              return searchable.includes(query);
+              return searchable.includes(demoQuery);
             })
-            .map((clip) => ({ ...clip, ocr_match: query ? clip.ocr_match : null }))
+            .map((clip) => ({ ...clip, ocr_match: demoQuery ? clip.ocr_match : null }))
             .filter((clip) => matchesContentFilter(clip, filter));
           invokeStart = performance.now();
           invokeEnd = invokeStart;
-        } else if (searchQuery.trim()) {
+        } else if (query) {
           if (perfLogEnabled) invokeStart = performance.now();
           data = await invoke<AppClipboardItem[]>('search_clips', {
-            query: searchQuery,
+            query,
             filterId: folderId,
             limit: 20,
             offset: currentOffset,
@@ -747,12 +753,20 @@ function App() {
       const target = event.target as HTMLElement | null;
       const isEditing =
         target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
-      if (isEditing || event.ctrlKey || event.altKey || event.metaKey || event.key.length !== 1) {
-        return;
-      }
+      if (isEditing) return;
 
       const input = document.querySelector<HTMLInputElement>('[data-el="search-input"]');
       if (!input) return;
+
+      // IME: focus the box and let composition start there. preventDefault plus
+      // appending event.key as Latin stops WebView2 composition (ja/zh).
+      if (isImeKey(event)) {
+        input.focus();
+        return;
+      }
+
+      if (!shouldCaptureTypeToSearch(event)) return;
+
       event.preventDefault();
       input.focus();
       setSearchQuery((query) => `${query}${event.key}`);
