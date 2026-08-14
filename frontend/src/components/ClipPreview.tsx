@@ -19,7 +19,6 @@ import {
 import { ClipboardItem } from '../types';
 import { NOTE_CHAR_LIMIT } from '../constants';
 import { ImageTextViewer } from './ImageTextViewer';
-import { OcrLayout } from '../utils/ocrSelection';
 import {
   contentKind,
   formatBytes,
@@ -28,14 +27,15 @@ import {
   parseImageMetadata,
   sourceLabel,
 } from '../utils/clipDisplay';
+import {
+  ClipDetails,
+  fullTextForEdit,
+  isEditReady,
+  withSavedOcrText,
+  withSavedText,
+} from '../utils/clipPreviewState';
 
-/** Payload of the `get_clip_details` command. */
-export interface ClipDetails {
-  content: string;
-  ocr_text: string | null;
-  image_expired: boolean;
-  ocr_layout: OcrLayout | null;
-}
+export type { ClipDetails };
 
 const actionClass =
   'inline-flex items-center gap-1.5 rounded-md border border-white/[0.09] bg-white/[0.05] px-2.5 py-1.5 text-[11px] font-medium text-foreground transition-colors hover:bg-white/[0.1] disabled:opacity-40';
@@ -175,11 +175,12 @@ export function ClipPreview({
     setScanDraft(null);
   }, [clipId]);
   // Follow the selection rather than the keystrokes, so switching clips shows
-  // the new clip's note instead of carrying the previous one across.
+  // the new clip's note instead of carrying the previous one across. Hidden
+  // rows withhold notes; a reveal puts them back on the session copy.
   useEffect(() => {
     noteCancelled.current = false;
-    setNoteDraft(clip?.notes ?? '');
-  }, [clipId, clip?.notes]);
+    setNoteDraft(revealed?.notes ?? clip?.notes ?? '');
+  }, [clipId, clip?.notes, revealed?.notes]);
 
   const imageMetadata = useMemo(() => parseImageMetadata(clip?.metadata), [clip?.metadata]);
   // Wait for the full payload rather than showing the row's thumbnail first.
@@ -314,6 +315,7 @@ export function ClipPreview({
                     setScanBusy(true);
                     try {
                       await onSaveOcrText(clip.id, scanDraft);
+                      setDetails((current) => withSavedOcrText(current, scanDraft));
                       setScanDraft(null);
                     } finally {
                       setScanBusy(false);
@@ -408,11 +410,11 @@ export function ClipPreview({
               // and noteDraft still holds the text the user asked to discard.
               if (noteCancelled.current) {
                 noteCancelled.current = false;
-                setNoteDraft(clip.notes ?? '');
+                setNoteDraft(revealed?.notes ?? clip.notes ?? '');
                 return;
               }
               const next = noteDraft.trim();
-              if (next !== (clip.notes ?? '')) void onSaveNotes(clip.id, next);
+              if (next !== (revealed?.notes ?? clip.notes ?? '')) void onSaveNotes(clip.id, next);
             }}
             onKeyDown={(event) => {
               // While an IME is composing, Enter and Escape belong to the
@@ -454,6 +456,9 @@ export function ClipPreview({
                 setSaving(true);
                 try {
                   await onSaveText(clip.id, draft);
+                  setDetails((current) =>
+                    withSavedText(current, draft, revealed?.notes ?? clip.notes ?? null)
+                  );
                   setDraft(null);
                 } finally {
                   setSaving(false);
@@ -478,10 +483,15 @@ export function ClipPreview({
               type="button"
               className={actionClass}
               // The full text, not the row's truncated preview — editing from a
-              // preview would silently chop the clip on save.
-              onClick={() => setDraft(details?.content ?? clip.content ?? '')}
-              disabled={!details && !detailsError}
-              title={!details && !detailsError ? 'Loading the full text…' : undefined}
+              // preview would silently chop the clip on save. A reveal already
+              // fetched that payload; waiting on details would disable Edit forever.
+              onClick={() => setDraft(fullTextForEdit(details, revealed?.content, clip.content))}
+              disabled={!isEditReady(details, detailsError, revealed?.content)}
+              title={
+                !isEditReady(details, detailsError, revealed?.content)
+                  ? 'Loading the full text…'
+                  : undefined
+              }
             >
               <Pencil size={13} />
               Edit

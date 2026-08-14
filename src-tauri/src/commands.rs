@@ -2502,6 +2502,9 @@ pub struct ClipDetails {
     /// clips, and for images captured before word layouts were recorded — those
     /// still offer the whole recognized block via `ocr_text`.
     pub ocr_layout: Option<crate::models::OcrTextLayout>,
+    /// The clip's note. Hidden list rows withhold this (a note can name the
+    /// secret); reveal and the preview pane read it here with the payload.
+    pub notes: Option<String>,
 }
 
 #[tauri::command]
@@ -2545,6 +2548,7 @@ async fn get_clip_details_in_database(db: &Database, id: &str) -> Result<ClipDet
         ocr_text: clip.ocr_text.filter(|text| !text.trim().is_empty()),
         image_expired,
         ocr_layout,
+        notes: clip.notes.filter(|text| !text.trim().is_empty()),
     })
 }
 
@@ -3279,6 +3283,9 @@ mod tests {
                 .with_app("code.exe"),
         )
         .await;
+        set_clip_notes_in_database(&database, "secret", "AWS root password")
+            .await
+            .unwrap();
 
         assert_eq!(
             listed_ids(&database, None, None, None).await,
@@ -3300,6 +3307,10 @@ mod tests {
         // it cannot be read off the row or out of the renderer's memory.
         assert!(items[0].content.is_empty());
         assert!(items[0].preview.is_empty());
+        assert!(
+            items[0].notes.is_none(),
+            "a note naming the secret must not ship on the hidden row"
+        );
 
         // Still searchable, and the match snippet does not leak it either.
         let found = search_clips_in_database(
@@ -3329,6 +3340,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(details.content, "swordfish token 8821");
+        assert_eq!(details.notes.as_deref(), Some("AWS root password"));
 
         assert!(!toggle_clip_hidden_in_pool(&database.pool, "secret")
             .await

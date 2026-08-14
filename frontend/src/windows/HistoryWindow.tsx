@@ -81,7 +81,7 @@ export function HistoryWindow() {
   useSystemAccent();
   const density = settings?.density ?? 'comfortable';
 
-  const { revealed, toggleReveal, forgetRevealed } = useRevealedClips();
+  const { revealed, toggleReveal, forgetRevealed, updateRevealed } = useRevealedClips();
 
   const clipsRef = useRef<ClipboardItem[]>(clips);
   clipsRef.current = clips;
@@ -429,6 +429,9 @@ export function HistoryWindow() {
     async (clipId: string, text: string) => {
       try {
         await invoke('update_clip_text', { id: clipId, text });
+        // Hidden rows still ship empty content after reload; keep the session
+        // reveal in sync so leaving this clip and coming back does not revert.
+        updateRevealed(clipId, { content: text, preview: text });
         // The row still holds the pre-edit preview, and the edit may have
         // changed which clips a filter or search matches.
         await loadClips(false);
@@ -436,23 +439,29 @@ export function HistoryWindow() {
       } catch (error) {
         console.error('Failed to update the clip:', error);
         toast.error('Failed to update the clip');
+        throw error;
       }
     },
-    [loadClips]
+    [loadClips, updateRevealed]
   );
-  const handleSaveNotes = useCallback(async (clipId: string, notes: string) => {
-    try {
-      await invoke('set_clip_notes', { id: clipId, notes });
-      // Cheap local update so the row's note appears immediately; a note also
-      // changes what search matches, but not the current result set.
-      setClips((current) =>
-        current.map((clip) => (clip.id === clipId ? { ...clip, notes: notes || null } : clip))
-      );
-    } catch (error) {
-      console.error('Failed to save the note:', error);
-      toast.error('Failed to save the note');
-    }
-  }, []);
+  const handleSaveNotes = useCallback(
+    async (clipId: string, notes: string) => {
+      try {
+        await invoke('set_clip_notes', { id: clipId, notes });
+        // Cheap local update so the row's note appears immediately; a note also
+        // changes what search matches, but not the current result set.
+        setClips((current) =>
+          current.map((clip) => (clip.id === clipId ? { ...clip, notes: notes || null } : clip))
+        );
+        // Hidden rows withhold notes; the reveal copy is what the pane reads.
+        updateRevealed(clipId, { notes: notes || null });
+      } catch (error) {
+        console.error('Failed to save the note:', error);
+        toast.error('Failed to save the note');
+      }
+    },
+    [updateRevealed]
+  );
 
   const handleSaveOcrText = useCallback(async (clipId: string, text: string) => {
     try {
@@ -468,6 +477,7 @@ export function HistoryWindow() {
     } catch (error) {
       console.error('Failed to save the recognized text:', error);
       toast.error('Failed to save the recognized text');
+      throw error;
     }
   }, []);
 
