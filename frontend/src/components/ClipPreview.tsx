@@ -19,7 +19,6 @@ import {
 import { ClipboardItem } from '../types';
 import { NOTE_CHAR_LIMIT } from '../constants';
 import { ImageTextViewer } from './ImageTextViewer';
-import { OcrLayout } from '../utils/ocrSelection';
 import {
   contentKind,
   formatBytes,
@@ -28,14 +27,15 @@ import {
   parseImageMetadata,
   sourceLabel,
 } from '../utils/clipDisplay';
+import {
+  ClipDetails,
+  fullTextForEdit,
+  isEditReady,
+  withSavedOcrText,
+  withSavedText,
+} from '../utils/clipPreviewState';
 
-/** Payload of the `get_clip_details` command. */
-export interface ClipDetails {
-  content: string;
-  ocr_text: string | null;
-  image_expired: boolean;
-  ocr_layout: OcrLayout | null;
-}
+export type { ClipDetails };
 
 const actionClass =
   'inline-flex items-center gap-1.5 rounded-md border border-white/[0.09] bg-white/[0.05] px-2.5 py-1.5 text-[11px] font-medium text-foreground transition-colors hover:bg-white/[0.1] disabled:opacity-40';
@@ -133,6 +133,16 @@ export function ClipPreview({
   // "Loading…" and re-transfer the whole blob for no visual gain.
   const previousClipId = useRef<string | null>(null);
 
+  // The save handlers are async, so a save that resolves after the selection
+  // moved must not apply its result to the new clip. This mirrors the live id
+  // for the handlers to compare against their captured target.
+  const activeClipIdRef = useRef(clipId);
+  activeClipIdRef.current = clipId;
+
+  // A fetch started before a save can land after it and undo the saved text, so
+  // every successful save bumps this generation and stale responses are dropped.
+  const saveGenerationRef = useRef(0);
+
   useEffect(() => {
     if (previousClipId.current !== clipId) {
       previousClipId.current = clipId;
@@ -141,10 +151,11 @@ export function ClipPreview({
     }
     if (!clipId || !shouldFetch) return;
 
+    const generation = saveGenerationRef.current;
     let active = true;
     invoke<ClipDetails>('get_clip_details', { id: clipId })
       .then((loaded) => {
-        if (!active) return;
+        if (!active || saveGenerationRef.current !== generation) return;
         setDetails(loaded);
         // Each attempt owns the outcome. A refetch that succeeds after a failed
         // first load must retire the error, or the pane shows the loaded image
@@ -153,7 +164,7 @@ export function ClipPreview({
       })
       .catch((error) => {
         console.error('Failed to load clip details:', error);
-        if (active) setDetailsError(String(error));
+        if (active && saveGenerationRef.current === generation) setDetailsError(String(error));
       });
 
     return () => {
@@ -175,11 +186,12 @@ export function ClipPreview({
     setScanDraft(null);
   }, [clipId]);
   // Follow the selection rather than the keystrokes, so switching clips shows
-  // the new clip's note instead of carrying the previous one across.
+  // the new clip's note instead of carrying the previous one across. Hidden
+  // rows withhold notes; a reveal puts them back on the session copy.
   useEffect(() => {
     noteCancelled.current = false;
-    setNoteDraft(clip?.notes ?? '');
-  }, [clipId, clip?.notes]);
+    setNoteDraft(revealed?.notes ?? clip?.notes ?? '');
+  }, [clipId, clip?.notes, revealed?.notes]);
 
   const imageMetadata = useMemo(() => parseImageMetadata(clip?.metadata), [clip?.metadata]);
   // Wait for the full payload rather than showing the row's thumbnail first.
@@ -311,9 +323,13 @@ export function ClipPreview({
                   className={actionClass}
                   disabled={scanBusy || scanDraft === (details?.ocr_text ?? '')}
                   onClick={async () => {
+                    const targetId = clip.id;
                     setScanBusy(true);
                     try {
-                      await onSaveOcrText(clip.id, scanDraft);
+                      await onSaveOcrText(targetId, scanDraft);
+                      if (activeClipIdRef.current !== targetId) return;
+                      saveGenerationRef.current += 1;
+                      setDetails((current) => withSavedOcrText(current, scanDraft));
                       setScanDraft(null);
                     } finally {
                       setScanBusy(false);
@@ -408,11 +424,11 @@ export function ClipPreview({
               // and noteDraft still holds the text the user asked to discard.
               if (noteCancelled.current) {
                 noteCancelled.current = false;
-                setNoteDraft(clip.notes ?? '');
+                setNoteDraft(revealed?.notes ?? clip.notes ?? '');
                 return;
               }
               const next = noteDraft.trim();
-              if (next !== (clip.notes ?? '')) void onSaveNotes(clip.id, next);
+              if (next !== (revealed?.notes ?? clip.notes ?? '')) void onSaveNotes(clip.id, next);
             }}
             onKeyDown={(event) => {
               // While an IME is composing, Enter and Escape belong to the
@@ -451,9 +467,15 @@ export function ClipPreview({
               className={actionClass}
               disabled={saving}
               onClick={async () => {
+                const targetId = clip.id;
                 setSaving(true);
                 try {
-                  await onSaveText(clip.id, draft);
+                  await onSaveText(targetId, draft);
+                  if (activeClipIdRef.current !== targetId) return;
+                  saveGenerationRef.current += 1;
+                  setDetails((current) =>
+                    withSavedText(current, draft, revealed?.notes ?? clip.notes ?? null)
+                  );
                   setDraft(null);
                 } finally {
                   setSaving(false);
@@ -478,10 +500,13 @@ export function ClipPreview({
               type="button"
               className={actionClass}
               // The full text, not the row's truncated preview — editing from a
-              // preview would silently chop the clip on save.
-              onClick={() => setDraft(details?.content ?? clip.content ?? '')}
-              disabled={!details && !detailsError}
-              title={!details && !detailsError ? 'Loading the full text…' : undefined}
+              // preview would silently chop the clip on save. A reveal already
+              // fetched that payload; waiting on details would disable Edit forever.
+              onClick={() => setDraft(fullTextForEdit(details, revealed?.content, clip.content))}
+              disabled={!isEditReady(details, revealed?.content)}
+              title={
+                !isEditReady(details, revealed?.content) ? 'Loading the full text…' : undefined
+              }
             >
               <Pencil size={13} />
               Edit

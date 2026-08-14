@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { ClipboardItem } from '../types';
+import { ClipDetails } from '../utils/clipPreviewState';
 
 /**
  * Session-scoped reveal for hidden clips (SOU-586).
@@ -41,13 +42,20 @@ export function useRevealedClips() {
 
     pending.current.add(clip.id);
     try {
-      const details = await invoke<{ content: string }>('get_clip_details', { id: clip.id });
+      const details = await invoke<ClipDetails>('get_clip_details', { id: clip.id });
       // Cancelled while the fetch was out.
       if (!pending.current.has(clip.id)) return;
       setRevealed((current) => {
         const next = new Map(current);
-        // Keep the row's own metadata; only the payload was withheld.
-        next.set(clip.id, { ...clip, content: details.content, preview: details.content });
+        // Keep the row's own metadata; only the payload was withheld. Notes
+        // were blanked with the content (a note like "AWS root password" would
+        // otherwise put the secret back on the row), so they come back here.
+        next.set(clip.id, {
+          ...clip,
+          content: details.content,
+          preview: details.content,
+          notes: details.notes,
+        });
         return next;
       });
     } catch (error) {
@@ -78,11 +86,25 @@ export function useRevealedClips() {
     });
   }, []);
 
+  /**
+   * Patch one already-revealed copy. Used after an edit or note save so leaving
+   * the clip and coming back does not show the pre-save payload from this map.
+   */
+  const updateRevealed = useCallback((clipId: string, patch: Partial<ClipboardItem>) => {
+    setRevealed((current) => {
+      const existing = current.get(clipId);
+      if (!existing) return current;
+      const next = new Map(current);
+      next.set(clipId, { ...existing, ...patch });
+      return next;
+    });
+  }, []);
+
   /** Forget every reveal — used when the surface closes or the list reloads. */
   const clearRevealed = useCallback(() => {
     pending.current.clear();
     setRevealed(new Map());
   }, []);
 
-  return { revealed, toggleReveal, forgetRevealed, clearRevealed };
+  return { revealed, toggleReveal, forgetRevealed, updateRevealed, clearRevealed };
 }
