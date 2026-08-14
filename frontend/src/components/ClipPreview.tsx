@@ -139,6 +139,10 @@ export function ClipPreview({
   const activeClipIdRef = useRef(clipId);
   activeClipIdRef.current = clipId;
 
+  // A fetch started before a save can land after it and undo the saved text, so
+  // every successful save bumps this generation and stale responses are dropped.
+  const saveGenerationRef = useRef(0);
+
   useEffect(() => {
     if (previousClipId.current !== clipId) {
       previousClipId.current = clipId;
@@ -147,10 +151,11 @@ export function ClipPreview({
     }
     if (!clipId || !shouldFetch) return;
 
+    const generation = saveGenerationRef.current;
     let active = true;
     invoke<ClipDetails>('get_clip_details', { id: clipId })
       .then((loaded) => {
-        if (!active) return;
+        if (!active || saveGenerationRef.current !== generation) return;
         setDetails(loaded);
         // Each attempt owns the outcome. A refetch that succeeds after a failed
         // first load must retire the error, or the pane shows the loaded image
@@ -159,7 +164,7 @@ export function ClipPreview({
       })
       .catch((error) => {
         console.error('Failed to load clip details:', error);
-        if (active) setDetailsError(String(error));
+        if (active && saveGenerationRef.current === generation) setDetailsError(String(error));
       });
 
     return () => {
@@ -323,6 +328,7 @@ export function ClipPreview({
                     try {
                       await onSaveOcrText(targetId, scanDraft);
                       if (activeClipIdRef.current !== targetId) return;
+                      saveGenerationRef.current += 1;
                       setDetails((current) => withSavedOcrText(current, scanDraft));
                       setScanDraft(null);
                     } finally {
@@ -466,6 +472,7 @@ export function ClipPreview({
                 try {
                   await onSaveText(targetId, draft);
                   if (activeClipIdRef.current !== targetId) return;
+                  saveGenerationRef.current += 1;
                   setDetails((current) =>
                     withSavedText(current, draft, revealed?.notes ?? clip.notes ?? null)
                   );
