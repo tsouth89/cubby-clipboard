@@ -21,14 +21,15 @@ export function fullTextForEdit(
 /**
  * Edit needs the full payload. A reveal already fetched it, so waiting on
  * `details` would leave the button disabled forever — that fetch is skipped
- * for revealed text so the pane does not go blank.
+ * for revealed text so the pane does not go blank. A failed details load is
+ * explicitly *not* ready: the only fallback left is the list row's truncated
+ * preview, and editing from it would silently chop the clip on save.
  */
 export function isEditReady(
   details: ClipDetails | null,
-  detailsError: string | null,
   revealedContent: string | undefined
 ): boolean {
-  return details !== null || detailsError !== null || Boolean(revealedContent);
+  return details !== null || revealedContent !== undefined;
 }
 
 /** Keep the pane in sync after Save without waiting for a clipId change. */
@@ -51,5 +52,6 @@ export function withSavedText(
 /** Keep Scan text in sync after Save correction; `has_ocr_text` often does not change. */
 export function withSavedOcrText(details: ClipDetails | null, text: string): ClipDetails | null {
   if (!details) return null;
-  return { ...details, ocr_text: text.trim().length > 0 ? text : null };
+  const normalized = text.trim();
+  return { ...details, ocr_text: normalized || null };
 }

@@ -31,16 +31,19 @@ describe('fullTextForEdit', () => {
 
 describe('isEditReady', () => {
   it('stays disabled until the full text is in hand', () => {
-    expect(isEditReady(null, null, undefined)).toBe(false);
+    expect(isEditReady(null, undefined)).toBe(false);
   });
 
   it('enables Edit from a reveal even when details were skipped', () => {
-    expect(isEditReady(null, null, 'swordfish')).toBe(true);
+    expect(isEditReady(null, 'swordfish')).toBe(true);
   });
 
-  it('enables Edit after details load or fail', () => {
-    expect(isEditReady(details, null, undefined)).toBe(true);
-    expect(isEditReady(null, 'failed', undefined)).toBe(true);
+  it('enables Edit after details load', () => {
+    expect(isEditReady(details, undefined)).toBe(true);
+  });
+
+  it('keeps Edit disabled when details fail without a reveal', () => {
+    expect(isEditReady(null, undefined)).toBe(false);
   });
 });
 
@@ -64,6 +67,10 @@ describe('withSavedText', () => {
 describe('withSavedOcrText', () => {
   it('replaces ocr_text so Scan text does not reopen the pre-correction reading', () => {
     expect(withSavedOcrText(details, 'fixed scan')?.ocr_text).toBe('fixed scan');
+  });
+
+  it('trims whitespace so Scan does not reopen an unsaved padded reading', () => {
+    expect(withSavedOcrText(details, '  fixed scan  ')?.ocr_text).toBe('fixed scan');
   });
 
   it('clears recognized text when the correction is empty', () => {

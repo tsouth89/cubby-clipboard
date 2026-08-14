@@ -133,6 +133,12 @@ export function ClipPreview({
   // "Loading…" and re-transfer the whole blob for no visual gain.
   const previousClipId = useRef<string | null>(null);
 
+  // The save handlers are async, so a save that resolves after the selection
+  // moved must not apply its result to the new clip. This mirrors the live id
+  // for the handlers to compare against their captured target.
+  const activeClipIdRef = useRef(clipId);
+  activeClipIdRef.current = clipId;
+
   useEffect(() => {
     if (previousClipId.current !== clipId) {
       previousClipId.current = clipId;
@@ -312,9 +318,11 @@ export function ClipPreview({
                   className={actionClass}
                   disabled={scanBusy || scanDraft === (details?.ocr_text ?? '')}
                   onClick={async () => {
+                    const targetId = clip.id;
                     setScanBusy(true);
                     try {
-                      await onSaveOcrText(clip.id, scanDraft);
+                      await onSaveOcrText(targetId, scanDraft);
+                      if (activeClipIdRef.current !== targetId) return;
                       setDetails((current) => withSavedOcrText(current, scanDraft));
                       setScanDraft(null);
                     } finally {
@@ -453,9 +461,11 @@ export function ClipPreview({
               className={actionClass}
               disabled={saving}
               onClick={async () => {
+                const targetId = clip.id;
                 setSaving(true);
                 try {
-                  await onSaveText(clip.id, draft);
+                  await onSaveText(targetId, draft);
+                  if (activeClipIdRef.current !== targetId) return;
                   setDetails((current) =>
                     withSavedText(current, draft, revealed?.notes ?? clip.notes ?? null)
                   );
@@ -486,11 +496,9 @@ export function ClipPreview({
               // preview would silently chop the clip on save. A reveal already
               // fetched that payload; waiting on details would disable Edit forever.
               onClick={() => setDraft(fullTextForEdit(details, revealed?.content, clip.content))}
-              disabled={!isEditReady(details, detailsError, revealed?.content)}
+              disabled={!isEditReady(details, revealed?.content)}
               title={
-                !isEditReady(details, detailsError, revealed?.content)
-                  ? 'Loading the full text…'
-                  : undefined
+                !isEditReady(details, revealed?.content) ? 'Loading the full text…' : undefined
               }
             >
               <Pencil size={13} />
