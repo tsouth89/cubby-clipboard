@@ -62,11 +62,7 @@ fn parser_hotkey(hotkey: &str) -> String {
 pub fn toggle_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         if window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false) {
-            // Empty callback selects the wait-for-lock hide path. A bare None
-            // hide is skipped while the show/hide lock is held, so a second
-            // hotkey during the animation used to no-op and leave the flyout
-            // in the opposite state from the toggle.
-            crate::animate_window_hide(&window, Some(Box::new(|| {})));
+            crate::animate_window_hide_when_idle(&window);
         } else {
             crate::position_window_near_cursor(&window);
         }

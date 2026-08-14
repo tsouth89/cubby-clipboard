@@ -607,18 +607,52 @@ pub fn position_window_from_taskbar(window: &tauri::WebviewWindow) {
     animate_window_show(window, ShowAnchor::Bottom);
 }
 
-pub fn animate_window_show(window: &tauri::WebviewWindow, anchor: ShowAnchor) {
-    let Some(animation_guard) =
-        AnimationGuard::acquire().or_else(|| AnimationGuard::acquire_within(ANIMATION_LOCK_WAIT))
-    else {
-        log::warn!("WINDOW: Show dropped, animation lock still held after 1s");
-        return;
-    };
+/// Wait for the show/hide lock on a worker. Never sleep on the caller: tray
+/// clicks and hotkeys run on Tauri's event loop, and the show worker needs
+/// that loop to answer monitor/hwnd queries.
+fn with_animation_guard_nonblocking(
+    on_ready: impl FnOnce(Option<AnimationGuard>) + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        let guard = AnimationGuard::acquire()
+            .or_else(|| AnimationGuard::acquire_within(ANIMATION_LOCK_WAIT));
+        on_ready(guard);
+    });
+}
 
+pub fn animate_window_show(window: &tauri::WebviewWindow, anchor: ShowAnchor) {
+    let window = window.clone();
+    with_animation_guard_nonblocking(move |guard| {
+        let Some(animation_guard) = guard else {
+            log::warn!("WINDOW: Show dropped, animation lock still held after 1s");
+            return;
+        };
+        run_window_show(window, anchor, animation_guard);
+    });
+}
+
+/// Hide once the show/hide lock is free. Drops the request if the lock is
+/// still held after the wait — unlike a paste callback, a toggle must not
+/// hide without mutual exclusion.
+pub fn animate_window_hide_when_idle(window: &tauri::WebviewWindow) {
+    let window = window.clone();
+    with_animation_guard_nonblocking(move |guard| {
+        let Some(_animation_guard) = guard else {
+            log::warn!("WINDOW: Toggle hide dropped, animation lock still held after 1s");
+            return;
+        };
+        let _ = window.hide();
+    });
+}
+
+fn run_window_show(
+    window: tauri::WebviewWindow,
+    anchor: ShowAnchor,
+    animation_guard: AnimationGuard,
+) {
     LAST_SHOW_TIME.store(chrono::Local::now().timestamp_millis(), Ordering::SeqCst);
     let show_generation = SHOW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
-    let window = window.clone();
     let float_above_taskbar = {
         let manager = window.state::<Arc<crate::settings_manager::SettingsManager>>();
         manager.get().float_above_taskbar
@@ -626,90 +660,87 @@ pub fn animate_window_show(window: &tauri::WebviewWindow, anchor: ShowAnchor) {
 
     remember_foreground_window(&window);
 
-    std::thread::spawn(move || {
-        let _animation_guard = animation_guard;
-        if let Some(monitor) = get_monitor_at_cursor(&window) {
-            let scale_factor = monitor.scale_factor();
-            let work_area = monitor.work_area();
-            let window_width_px = (constants::WINDOW_WIDTH * scale_factor) as u32;
-            let desired_height_px = (constants::WINDOW_HEIGHT * scale_factor) as u32;
-            let minimum_height_px = (constants::MIN_WINDOW_HEIGHT * scale_factor) as u32;
-            let margin_px = (constants::WINDOW_MARGIN * scale_factor) as i32;
-            let cursor_offset_px = (constants::CURSOR_OFFSET * scale_factor) as i32;
-            let cursor = cursor_position().unwrap_or(windows::Win32::Foundation::POINT {
-                x: work_area.position.x + work_area.size.width as i32 / 2,
-                y: work_area.position.y + work_area.size.height as i32 / 2,
-            });
+    let _animation_guard = animation_guard;
+    if let Some(monitor) = get_monitor_at_cursor(&window) {
+        let scale_factor = monitor.scale_factor();
+        let work_area = monitor.work_area();
+        let window_width_px = (constants::WINDOW_WIDTH * scale_factor) as u32;
+        let desired_height_px = (constants::WINDOW_HEIGHT * scale_factor) as u32;
+        let minimum_height_px = (constants::MIN_WINDOW_HEIGHT * scale_factor) as u32;
+        let margin_px = (constants::WINDOW_MARGIN * scale_factor) as i32;
+        let cursor_offset_px = (constants::CURSOR_OFFSET * scale_factor) as i32;
+        let cursor = cursor_position().unwrap_or(windows::Win32::Foundation::POINT {
+            x: work_area.position.x + work_area.size.width as i32 / 2,
+            y: work_area.position.y + work_area.size.height as i32 / 2,
+        });
 
-            let work_left = work_area.position.x + margin_px;
-            let work_top = work_area.position.y + margin_px;
-            let work_right = work_area.position.x + work_area.size.width as i32 - margin_px;
-            let work_bottom = work_area.position.y + work_area.size.height as i32 - margin_px;
-            let window_width_px = fit_window_width(window_width_px, work_left, work_right);
-            let target_x =
-                calculate_horizontal_placement(cursor.x, work_left, work_right, window_width_px);
+        let work_left = work_area.position.x + margin_px;
+        let work_top = work_area.position.y + margin_px;
+        let work_right = work_area.position.x + work_area.size.width as i32 - margin_px;
+        let work_bottom = work_area.position.y + work_area.size.height as i32 - margin_px;
+        let window_width_px = fit_window_width(window_width_px, work_left, work_right);
+        let target_x =
+            calculate_horizontal_placement(cursor.x, work_left, work_right, window_width_px);
 
-            let (target_y, window_height_px) = match anchor {
-                ShowAnchor::Cursor => calculate_vertical_placement(
-                    cursor.y,
-                    work_top,
-                    work_bottom,
-                    desired_height_px,
-                    cursor_offset_px,
-                ),
-                ShowAnchor::Bottom => {
-                    // Full-height window anchored to the bottom of the work area.
-                    let height = desired_height_px
-                        .min((work_bottom - work_top).max(minimum_height_px as i32) as u32);
-                    ((work_bottom - height as i32).max(work_top), height)
-                }
-            };
-
-            let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize {
-                width: window_width_px,
-                height: window_height_px,
-            }));
-            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                x: target_x,
-                y: target_y,
-            }));
-            let _ = window.show();
-            let _ = window.set_focus();
-
-            suppress_native_window_frame(&window);
-
-            if let Ok(handle) = window.hwnd() {
-                use windows::Win32::Foundation::HWND;
-                use windows::Win32::UI::WindowsAndMessaging::{
-                    SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
-                    SWP_NOSIZE,
-                };
-                let hwnd = HWND(handle.0 as _);
-                // Hide does not clear WS_EX_TOPMOST. Always set the requested
-                // z-order so turning the setting off actually unsticks the flyout.
-                let insert_after = if float_above_taskbar {
-                    HWND_TOPMOST
-                } else {
-                    HWND_NOTOPMOST
-                };
-                unsafe {
-                    let _ = SetWindowPos(
-                        hwnd,
-                        Some(insert_after),
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                    );
-                }
+        let (target_y, window_height_px) = match anchor {
+            ShowAnchor::Cursor => calculate_vertical_placement(
+                cursor.y,
+                work_top,
+                work_bottom,
+                desired_height_px,
+                cursor_offset_px,
+            ),
+            ShowAnchor::Bottom => {
+                // Full-height window anchored to the bottom of the work area.
+                let height = desired_height_px
+                    .min((work_bottom - work_top).max(minimum_height_px as i32) as u32);
+                ((work_bottom - height as i32).max(work_top), height)
             }
+        };
 
-            if !asset_capture_enabled() {
-                watch_for_outside_click(window.clone(), show_generation);
+        let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize {
+            width: window_width_px,
+            height: window_height_px,
+        }));
+        let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+            x: target_x,
+            y: target_y,
+        }));
+        let _ = window.show();
+        let _ = window.set_focus();
+
+        suppress_native_window_frame(&window);
+
+        if let Ok(handle) = window.hwnd() {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            };
+            let hwnd = HWND(handle.0 as _);
+            // Hide does not clear WS_EX_TOPMOST. Always set the requested
+            // z-order so turning the setting off actually unsticks the flyout.
+            let insert_after = if float_above_taskbar {
+                HWND_TOPMOST
+            } else {
+                HWND_NOTOPMOST
+            };
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    Some(insert_after),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
             }
         }
-    });
+
+        if !asset_capture_enabled() {
+            watch_for_outside_click(window.clone(), show_generation);
+        }
+    }
 }
 
 fn remember_foreground_window(window: &tauri::WebviewWindow) {
@@ -920,14 +951,11 @@ fn point_is_inside_rect(
     point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
 }
 
-fn point_is_inside_any_rect(
-    point: windows::Win32::Foundation::POINT,
-    rects: &[windows::Win32::Foundation::RECT],
-) -> bool {
-    rects
-        .iter()
-        .copied()
-        .any(|rect| point_is_inside_rect(point, rect))
+/// True when the top-level window under the cursor is one of our visible
+/// owned HWNDs. Rect overlap is not enough: History/image can sit behind
+/// another app and still cover most of the monitor.
+fn click_hits_owned_hwnd(top_hwnd: isize, top_visible: bool, owned_visible: &[isize]) -> bool {
+    top_visible && owned_visible.contains(&top_hwnd)
 }
 
 fn any_mouse_button_down() -> bool {
@@ -941,16 +969,7 @@ fn any_mouse_button_down() -> bool {
     }
 }
 
-fn window_screen_rect(window: &tauri::WebviewWindow) -> Option<windows::Win32::Foundation::RECT> {
-    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
-    let raw_handle = window.hwnd().ok()?;
-    let hwnd = windows::Win32::Foundation::HWND(raw_handle.0 as _);
-    let mut rect = windows::Win32::Foundation::RECT::default();
-    unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
-    Some(rect)
-}
-
-/// Labels whose rectangles count as "inside Cubby" for the outside-click hide.
+/// Labels whose windows count as "inside Cubby" for the outside-click hide.
 /// Blur already keeps the flyout up while Settings exists; History and the
 /// image viewer are the same class of owned window.
 const OWNED_WINDOW_LABELS: &[&str] = &[
@@ -960,18 +979,49 @@ const OWNED_WINDOW_LABELS: &[&str] = &[
     commands::IMAGE_WINDOW_LABEL,
 ];
 
+fn hwnd_raw(hwnd: windows::Win32::Foundation::HWND) -> isize {
+    hwnd.0 as isize
+}
+
+fn top_window_at(
+    point: windows::Win32::Foundation::POINT,
+) -> Option<windows::Win32::Foundation::HWND> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetAncestor, IsWindowVisible, WindowFromPoint, GA_ROOT,
+    };
+    let hwnd = unsafe { WindowFromPoint(point) };
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+    let top = if root.0.is_null() { hwnd } else { root };
+    if !unsafe { IsWindowVisible(top).as_bool() } {
+        return None;
+    }
+    Some(top)
+}
+
+fn visible_owned_hwnds(app: &tauri::AppHandle) -> Vec<isize> {
+    OWNED_WINDOW_LABELS
+        .iter()
+        .filter_map(|label| {
+            let owned = app.get_webview_window(label)?;
+            if !owned.is_visible().unwrap_or(false) {
+                return None;
+            }
+            owned.hwnd().ok().map(|handle| handle.0 as isize)
+        })
+        .collect()
+}
+
 fn click_is_on_owned_window(
     app: &tauri::AppHandle,
     cursor: windows::Win32::Foundation::POINT,
 ) -> bool {
-    let rects: Vec<windows::Win32::Foundation::RECT> = OWNED_WINDOW_LABELS
-        .iter()
-        .filter_map(|label| {
-            app.get_webview_window(label)
-                .and_then(|owned| window_screen_rect(&owned))
-        })
-        .collect();
-    point_is_inside_any_rect(cursor, &rects)
+    let Some(top) = top_window_at(cursor) else {
+        return false;
+    };
+    click_hits_owned_hwnd(hwnd_raw(top), true, &visible_owned_hwnds(app))
 }
 
 fn watch_for_outside_click(window: tauri::WebviewWindow, generation: u64) {
@@ -1193,8 +1243,8 @@ pub fn update_tray_icon(tray: &TrayIcon, theme: &tauri::Theme) {
 #[cfg(test)]
 mod flyout_tests {
     use super::{
-        calculate_horizontal_placement, calculate_vertical_placement, fit_window_width,
-        point_is_inside_any_rect, point_is_inside_rect,
+        calculate_horizontal_placement, calculate_vertical_placement, click_hits_owned_hwnd,
+        fit_window_width, point_is_inside_rect, with_animation_guard_nonblocking, AnimationGuard,
     };
     use windows::Win32::Foundation::{POINT, RECT};
 
@@ -1279,22 +1329,40 @@ mod flyout_tests {
     }
 
     #[test]
-    fn treats_a_click_in_settings_or_history_as_inside() {
-        let flyout = RECT {
-            left: 100,
-            top: 200,
-            right: 620,
-            bottom: 820,
-        };
-        let settings = RECT {
-            left: 700,
-            top: 150,
-            right: 1180,
-            bottom: 780,
-        };
-        let owned = [flyout, settings];
+    fn hides_when_the_top_window_is_not_an_owned_hwnd() {
+        let owned = [10_isize, 20];
+        assert!(click_hits_owned_hwnd(10, true, &owned));
+        assert!(
+            !click_hits_owned_hwnd(99, true, &owned),
+            "a click on another app must hide even if it sits over an owned rect"
+        );
+    }
 
-        assert!(point_is_inside_any_rect(POINT { x: 800, y: 400 }, &owned));
-        assert!(!point_is_inside_any_rect(POINT { x: 650, y: 400 }, &owned));
+    #[test]
+    fn ignores_hidden_owned_windows() {
+        assert!(
+            !click_hits_owned_hwnd(10, true, &[]),
+            "a hidden Settings/History/image window must not block hide"
+        );
+        assert!(!click_hits_owned_hwnd(10, false, &[10]));
+    }
+
+    #[test]
+    fn waiting_for_the_show_lock_does_not_block_the_caller() {
+        let _held = AnimationGuard::acquire().expect("lock should be free");
+        let started = std::time::Instant::now();
+        let (tx, rx) = std::sync::mpsc::channel();
+        with_animation_guard_nonblocking(move |guard| {
+            let _ = tx.send(guard.is_some());
+        });
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(50),
+            "the caller must return before the 1s lock wait"
+        );
+        assert_eq!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty),
+            "the worker must still be waiting on the held lock"
+        );
     }
 }
