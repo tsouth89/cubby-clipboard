@@ -3,9 +3,9 @@ import { folderSelectionAfterReload } from './folderSelection';
 
 describe('folderSelectionAfterReload', () => {
   it('keeps the selected folder when it is still in the list', () => {
-    expect(
-      folderSelectionAfterReload('receipts', [{ id: 'receipts' }, { id: 'work' }])
-    ).toBe('receipts');
+    expect(folderSelectionAfterReload('receipts', [{ id: 'receipts' }, { id: 'work' }])).toBe(
+      'receipts'
+    );
   });
 
   it('resets to All when the selected folder was deleted', () => {
