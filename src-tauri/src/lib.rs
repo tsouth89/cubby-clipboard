@@ -13,6 +13,7 @@ use tauri_plugin_autostart::MacosLauncher;
 static IS_ANIMATING: AtomicBool = AtomicBool::new(false);
 static LAST_SHOW_TIME: AtomicI64 = AtomicI64::new(0);
 static SHOW_GENERATION: AtomicU64 = AtomicU64::new(0);
+const ANIMATION_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(1_000);
 
 /// Releases the show/hide lock even if a worker unwinds. A detached window
 /// thread panic must not leave Cubby permanently unable to open again.
@@ -24,6 +25,21 @@ impl AnimationGuard {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .ok()
             .map(|_| Self)
+    }
+
+    /// Wait briefly for an in-flight show/hide instead of dropping the request.
+    /// A missed toggle leaves the flyout in the opposite state from the keypress.
+    fn acquire_within(timeout: std::time::Duration) -> Option<Self> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(guard) = Self::acquire() {
+                return Some(guard);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }
 
@@ -592,7 +608,10 @@ pub fn position_window_from_taskbar(window: &tauri::WebviewWindow) {
 }
 
 pub fn animate_window_show(window: &tauri::WebviewWindow, anchor: ShowAnchor) {
-    let Some(animation_guard) = AnimationGuard::acquire() else {
+    let Some(animation_guard) =
+        AnimationGuard::acquire().or_else(|| AnimationGuard::acquire_within(ANIMATION_LOCK_WAIT))
+    else {
+        log::warn!("WINDOW: Show dropped, animation lock still held after 1s");
         return;
     };
 
@@ -662,23 +681,27 @@ pub fn animate_window_show(window: &tauri::WebviewWindow, anchor: ShowAnchor) {
             if let Ok(handle) = window.hwnd() {
                 use windows::Win32::Foundation::HWND;
                 use windows::Win32::UI::WindowsAndMessaging::{
-                    SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                    SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+                    SWP_NOSIZE,
                 };
                 let hwnd = HWND(handle.0 as _);
-
-                if float_above_taskbar {
-                    let hwnd_topmost = HWND(-1 as _); // HWND_TOPMOST
-                    unsafe {
-                        let _ = SetWindowPos(
-                            hwnd,
-                            Some(hwnd_topmost),
-                            0,
-                            0,
-                            0,
-                            0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                        );
-                    }
+                // Hide does not clear WS_EX_TOPMOST. Always set the requested
+                // z-order so turning the setting off actually unsticks the flyout.
+                let insert_after = if float_above_taskbar {
+                    HWND_TOPMOST
+                } else {
+                    HWND_NOTOPMOST
+                };
+                unsafe {
+                    let _ = SetWindowPos(
+                        hwnd,
+                        Some(insert_after),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
                 }
             }
 
@@ -741,16 +764,7 @@ pub fn animate_window_hide(
         };
         let window = window.clone();
         std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
-            let animation_guard = loop {
-                if let Some(guard) = AnimationGuard::acquire() {
-                    break Some(guard);
-                }
-                if std::time::Instant::now() >= deadline {
-                    break None;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            };
+            let animation_guard = AnimationGuard::acquire_within(ANIMATION_LOCK_WAIT);
             if animation_guard.is_none() {
                 log::warn!(
                     "WINDOW: Hide callback proceeding without animation lock (still held after 1s)"
@@ -906,18 +920,65 @@ fn point_is_inside_rect(
     point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
 }
 
+fn point_is_inside_any_rect(
+    point: windows::Win32::Foundation::POINT,
+    rects: &[windows::Win32::Foundation::RECT],
+) -> bool {
+    rects
+        .iter()
+        .copied()
+        .any(|rect| point_is_inside_rect(point, rect))
+}
+
+fn any_mouse_button_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
+    };
+    unsafe {
+        GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0
+            || GetAsyncKeyState(VK_RBUTTON.0 as i32) < 0
+            || GetAsyncKeyState(VK_MBUTTON.0 as i32) < 0
+    }
+}
+
+fn window_screen_rect(window: &tauri::WebviewWindow) -> Option<windows::Win32::Foundation::RECT> {
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    let raw_handle = window.hwnd().ok()?;
+    let hwnd = windows::Win32::Foundation::HWND(raw_handle.0 as _);
+    let mut rect = windows::Win32::Foundation::RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
+    Some(rect)
+}
+
+/// Labels whose rectangles count as "inside Cubby" for the outside-click hide.
+/// Blur already keeps the flyout up while Settings exists; History and the
+/// image viewer are the same class of owned window.
+const OWNED_WINDOW_LABELS: &[&str] = &[
+    "main",
+    "settings",
+    commands::HISTORY_WINDOW_LABEL,
+    commands::IMAGE_WINDOW_LABEL,
+];
+
+fn click_is_on_owned_window(
+    app: &tauri::AppHandle,
+    cursor: windows::Win32::Foundation::POINT,
+) -> bool {
+    let rects: Vec<windows::Win32::Foundation::RECT> = OWNED_WINDOW_LABELS
+        .iter()
+        .filter_map(|label| {
+            app.get_webview_window(label)
+                .and_then(|owned| window_screen_rect(&owned))
+        })
+        .collect();
+    point_is_inside_any_rect(cursor, &rects)
+}
+
 fn watch_for_outside_click(window: tauri::WebviewWindow, generation: u64) {
     std::thread::spawn(move || {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{
-            GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
-        };
-        use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
-
-        let Ok(raw_handle) = window.hwnd() else {
-            return;
-        };
-        let hwnd = windows::Win32::Foundation::HWND(raw_handle.0 as _);
-        let mut buttons_were_down = false;
+        // Seed from the current buttons so a drag that opened the flyout is
+        // not treated as a rising edge on the first poll.
+        let mut buttons_were_down = any_mouse_button_down();
 
         loop {
             if SHOW_GENERATION.load(Ordering::SeqCst) != generation
@@ -926,19 +987,11 @@ fn watch_for_outside_click(window: tauri::WebviewWindow, generation: u64) {
                 break;
             }
 
-            let buttons_down = unsafe {
-                GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0
-                    || GetAsyncKeyState(VK_RBUTTON.0 as i32) < 0
-                    || GetAsyncKeyState(VK_MBUTTON.0 as i32) < 0
-            };
+            let buttons_down = any_mouse_button_down();
 
             if buttons_down && !buttons_were_down {
                 if let Some(cursor) = cursor_position() {
-                    let mut rect = windows::Win32::Foundation::RECT::default();
-                    let has_rect = unsafe { GetWindowRect(hwnd, &mut rect).is_ok() };
-                    let is_inside = has_rect && point_is_inside_rect(cursor, rect);
-
-                    if !is_inside {
+                    if !click_is_on_owned_window(window.app_handle(), cursor) {
                         animate_window_hide(&window, None);
                         break;
                     }
@@ -1141,7 +1194,7 @@ pub fn update_tray_icon(tray: &TrayIcon, theme: &tauri::Theme) {
 mod flyout_tests {
     use super::{
         calculate_horizontal_placement, calculate_vertical_placement, fit_window_width,
-        point_is_inside_rect,
+        point_is_inside_any_rect, point_is_inside_rect,
     };
     use windows::Win32::Foundation::{POINT, RECT};
 
@@ -1223,5 +1276,25 @@ mod flyout_tests {
         assert!(!point_is_inside_rect(POINT { x: 99, y: 400 }, rect));
         assert!(!point_is_inside_rect(POINT { x: 620, y: 400 }, rect));
         assert!(!point_is_inside_rect(POINT { x: 300, y: 820 }, rect));
+    }
+
+    #[test]
+    fn treats_a_click_in_settings_or_history_as_inside() {
+        let flyout = RECT {
+            left: 100,
+            top: 200,
+            right: 620,
+            bottom: 820,
+        };
+        let settings = RECT {
+            left: 700,
+            top: 150,
+            right: 1180,
+            bottom: 780,
+        };
+        let owned = [flyout, settings];
+
+        assert!(point_is_inside_any_rect(POINT { x: 800, y: 400 }, &owned));
+        assert!(!point_is_inside_any_rect(POINT { x: 650, y: 400 }, &owned));
     }
 }
