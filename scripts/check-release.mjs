@@ -2,6 +2,8 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { checkPrivilegedActionPins } from '../.github/scripts/check-privileged-action-pins.mjs';
+
 const root = new URL('../', import.meta.url);
 const rootDir = fileURLToPath(root);
 const read = (relativePath) => readFile(new URL(relativePath, root), 'utf8');
@@ -238,6 +240,14 @@ for (const inheritedIdentity of ['PastePaw', 'XueshiQiao.PastePaw', 'XueshiQiao.
   if (releaseWorkflow.includes(inheritedIdentity)) {
     throw new Error(`Release workflow still contains inherited identity: ${inheritedIdentity}`);
   }
+}
+
+const pinCheck = await checkPrivilegedActionPins(rootDir);
+if (pinCheck.violations.length > 0) {
+  const details = pinCheck.violations
+    .map((item) => `${item.file}:${item.line}: ${item.reason} (${item.spec})`)
+    .join('; ');
+  throw new Error(`Privileged workflows have mutable third-party actions: ${details}`);
 }
 
 console.log(`Cubby Clipboard v${version} release metadata is consistent.`);

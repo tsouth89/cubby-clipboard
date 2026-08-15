@@ -52,8 +52,9 @@ jobs:
       - run: pnpm run release:check
       - run: pnpm run build
       - run: node .github/scripts/check-site.mjs
+      - run: node .github/scripts/check-privileged-action-pins.mjs
       - run: pnpm run test
-      - run: node --test product_pages/worker.test.mjs product_pages/analytics.test.mjs
+      - run: node --test product_pages/worker.test.mjs product_pages/analytics.test.mjs .github/scripts/check-privileged-action-pins.test.mjs
       - run: pnpm audit --prod
       # The rule that decides whether a live download URL may be overwritten.
       - name: Publish-guard rules
