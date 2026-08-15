@@ -1,4 +1,3 @@
-use sqlx::error::DatabaseError;
 use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -656,6 +655,7 @@ async fn assess_database_file_once(db_path: &Path) -> DatabaseHealth {
 }
 
 /// Kept for tests that only need "usable or not".
+#[cfg(test)]
 async fn verify_database_quick_check(db_path: &Path) -> Result<(), String> {
     match assess_database_file(db_path).await {
         DatabaseHealth::Healthy => Ok(()),
@@ -666,7 +666,7 @@ async fn verify_database_quick_check(db_path: &Path) -> Result<(), String> {
 fn classify_health_check_error(error: &sqlx::Error, stage: &str) -> DatabaseHealth {
     match error {
         sqlx::Error::Database(database_error) => classify_sqlite_health_failure(
-            database_error.code().as_deref(),
+            sqlx::error::DatabaseError::code(database_error.as_ref()).as_deref(),
             &format!("{stage} failed: {database_error}"),
         ),
         sqlx::Error::Io(io_error) => DatabaseHealth::Unassessable {

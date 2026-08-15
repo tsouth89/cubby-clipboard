@@ -3,7 +3,6 @@ use crate::models::{Clip, ClipboardItem, Folder, FolderItem, OcrHighlights, OcrM
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use clipboard_rs::common::RustImage;
 use clipboard_rs::{Clipboard, ClipboardContent, ClipboardContext, RustImageData};
-use sqlx::error::DatabaseError;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1591,9 +1590,8 @@ async fn update_clip_text_in_database(db: &Database, id: &str, text: &str) -> Re
 fn is_unique_constraint_error(error: &sqlx::Error) -> bool {
     match error {
         sqlx::Error::Database(database_error) => {
-            database_error.is_unique_violation()
-                || database_error
-                    .message()
+            sqlx::error::DatabaseError::is_unique_violation(database_error.as_ref())
+                || sqlx::error::DatabaseError::message(database_error.as_ref())
                     .to_ascii_lowercase()
                     .contains("unique")
         }

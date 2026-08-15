@@ -788,7 +788,7 @@ fn capture_one_bound_sequence(
     Ok(CaptureAttempt::Handled)
 }
 
-/// True when the clipboard advertises a format `materialize_clipboard_content`
+/// True when the clipboard advertises a format `materialize_clipboard_content_once`
 /// can read (text or an image). Used to tell "unsupported payload"
 /// (mark handled) apart from "supported but contended" (defer and retry).
 #[cfg(target_os = "windows")]
@@ -1128,19 +1128,6 @@ fn run_native_listener(event_tx: tokio::sync::mpsc::UnboundedSender<ClipboardLis
 fn run_native_listener(_event_tx: tokio::sync::mpsc::UnboundedSender<ClipboardListenerEvent>) {
     set_capture_state(CAPTURE_STATE_STOPPED);
     record_capture_error("clipboard capture requires Windows");
-}
-
-fn materialize_clipboard_content() -> Option<(CapturedContent, Vec<CapturedFormat>)> {
-    const ATTEMPTS: u32 = 10;
-    for attempt in 0..ATTEMPTS {
-        if let Some(content) = materialize_clipboard_content_once(attempt) {
-            return Some(content);
-        }
-        if attempt + 1 < ATTEMPTS {
-            std::thread::sleep(clipboard_retry_delay(attempt));
-        }
-    }
-    None
 }
 
 /// One materialize attempt. `attempt` is 0-based so the last try can do a
