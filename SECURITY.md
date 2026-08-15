@@ -17,6 +17,11 @@ Cubby release candidates must pass the JavaScript production dependency audit, t
 - Reviewed: 2026-07-19
 - Next review: 2026-10-19 (or immediately if SQLx or the lockfile graph changes)
 
+
+## Privileged GitHub Actions pins
+
+Third-party actions in privileged release, Store, and signing workflows must be pinned to a 40-character commit SHA with a version comment. See docs/RELEASE_CHECKLIST.md for reviewing Dependabot action pin updates.
+
 ## Sensitive clipboard handling
 
 In addition to AES-256-GCM at rest, Cubby skips:

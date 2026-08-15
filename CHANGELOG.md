@@ -26,6 +26,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Accessibility problems found by a static audit, including missing names for icon-only buttons
 
 ### Changed
+- Pin third-party GitHub Actions in privileged release and Store workflows to immutable commit SHAs
 - Search uses roughly a fifth of the memory it used to per clip, and returns results faster on a large history
 - Refreshed the interface icon set. The filter, settings, shield, play, pause, file, and flask icons are redrawn with the same meanings and slightly different shapes
 
