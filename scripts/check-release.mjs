@@ -24,6 +24,8 @@ const [
   secretsSource,
   modelsSource,
   securityDoc,
+  readmeDoc,
+  settingsPanelSource,
 ] = await Promise.all([
   read('package.json'),
   read('src-tauri/tauri.conf.json'),
@@ -40,6 +42,8 @@ const [
   read('src-tauri/src/secrets.rs'),
   read('src-tauri/src/models.rs'),
   read('SECURITY.md'),
+  read('README.md'),
+  read('frontend/src/components/SettingsPanel.tsx'),
 ]);
 
 const packageVersion = JSON.parse(packageText).version;
@@ -174,6 +178,40 @@ if (`${clipboardSource}\n${commandSource}`.includes('ClipboardContent::Files')) 
   throw new Error(
     'Release product code must not restore external file references as durable history'
   );
+}
+
+// The gates above encode that copied files are never stored. Public docs claimed
+// the opposite for months because nothing tied the two together. If file capture
+// is ever restored, delete these lines deliberately along with the design work.
+for (const [docName, doc] of [['README.md', readmeDoc], ['SECURITY.md', securityDoc]]) {
+  const fileClaim = doc.match(/^.*\bfile[- ](?:lists?|drop lists?)\b.*$/im)?.[0];
+  if (fileClaim) {
+    throw new Error(
+      `${docName} claims file-list clipboard history, which capture policy deliberately ignores: ${fileClaim.trim()}`
+    );
+  }
+}
+
+// A URL the frontend opens but the capability does not allow is rejected at the
+// Tauri boundary, which reads to the user as a button that does nothing.
+const openerScope = capability.permissions.find(
+  (permission) => permission?.identifier === 'opener:allow-open-url'
+);
+// No `$` anchor: these sources are CRLF, so a trailing `\r` would leave the
+// pattern matching nothing and the gate passing on an empty set.
+const allowedUrls = new Set((openerScope?.allow ?? []).map((entry) => entry.url));
+const openedUrls = [...settingsPanelSource.matchAll(/^const \w*URL = '([^']+)';/gm)].map(
+  ([, url]) => url
+);
+if (openedUrls.length === 0) {
+  throw new Error('Could not find the Settings link URL constants to check against the allowlist');
+}
+for (const openedUrl of openedUrls) {
+  if (!allowedUrls.has(openedUrl)) {
+    throw new Error(
+      `Settings opens ${openedUrl}, but src-tauri/capabilities/default.json does not allow it`
+    );
+  }
 }
 
 for (const sensitiveLogFragment of ['Detected self-paste for hash', 'full_path: {:?}', 'path match): {}']) {

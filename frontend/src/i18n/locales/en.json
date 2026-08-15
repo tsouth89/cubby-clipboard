@@ -165,6 +165,7 @@
     "upToDate": "You're on the latest version.",
     "sourceCode": "Source code on GitHub",
     "privacyPolicy": "Privacy policy",
+    "linkFailed": "Could not open {{url}} in your browser.",
     "openSourceTitle": "Free and open source.",
     "openSourceNote": "Cubby is GPL-3.0, a fork of PastePaw. © 2026 SouthForge AI.",
     "folderItemCount": "{{count}} items",
