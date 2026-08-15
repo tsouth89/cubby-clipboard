@@ -4,6 +4,9 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 
 ## Unreleased
 
+### Security
+- Pin third-party GitHub Actions in privileged release and Store workflows to immutable commit SHAs, and reject new mutable pins in CI
+
 ### Fixed
 - Backup export, backup import, and Ditto import now only write or read a path chosen in the file dialog, so a compromised Settings page cannot send history to an arbitrary location (SBS-808)
 
@@ -26,7 +29,6 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Accessibility problems found by a static audit, including missing names for icon-only buttons
 
 ### Changed
-- Pin third-party GitHub Actions in privileged release and Store workflows to immutable commit SHAs
 - Search uses roughly a fifth of the memory it used to per clip, and returns results faster on a large history
 - Refreshed the interface icon set. The filter, settings, shield, play, pause, file, and flask icons are redrawn with the same meanings and slightly different shapes
 
