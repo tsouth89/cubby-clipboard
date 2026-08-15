@@ -587,7 +587,7 @@ pub fn run_app() {
 }
 
 /// How the flyout anchors when it opens.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShowAnchor {
     /// Anchor near the mouse cursor (hotkey): center the flyout horizontally,
     /// prefer its full height below the cursor, then flip it above the cursor.
