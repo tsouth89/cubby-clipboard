@@ -1,6 +1,6 @@
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -13,6 +13,7 @@ use tauri_plugin_autostart::MacosLauncher;
 static IS_ANIMATING: AtomicBool = AtomicBool::new(false);
 static LAST_SHOW_TIME: AtomicI64 = AtomicI64::new(0);
 static SHOW_GENERATION: AtomicU64 = AtomicU64::new(0);
+static FLYOUT_WORKER_LIVE: AtomicBool = AtomicBool::new(false);
 const ANIMATION_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(1_000);
 
 /// Releases the show/hide lock even if a worker unwinds. A detached window
@@ -607,6 +608,28 @@ pub fn position_window_from_taskbar(window: &tauri::WebviewWindow) {
     animate_window_show(window, ShowAnchor::Bottom);
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlyoutRequest {
+    Show(ShowAnchor),
+    Hide,
+}
+
+fn pending_flyout() -> &'static Mutex<Option<(tauri::WebviewWindow, FlyoutRequest)>> {
+    static PENDING: OnceLock<Mutex<Option<(tauri::WebviewWindow, FlyoutRequest)>>> =
+        OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(None))
+}
+
+/// Invert a queued toggle so two presses cancel, instead of queueing hide+hide.
+fn next_toggle_request(pending: Option<FlyoutRequest>, visible_and_focused: bool) -> FlyoutRequest {
+    match pending {
+        Some(FlyoutRequest::Hide) => FlyoutRequest::Show(ShowAnchor::Cursor),
+        Some(FlyoutRequest::Show(_)) => FlyoutRequest::Hide,
+        None if visible_and_focused => FlyoutRequest::Hide,
+        None => FlyoutRequest::Show(ShowAnchor::Cursor),
+    }
+}
+
 /// Wait for the show/hide lock on a worker. Never sleep on the caller: tray
 /// clicks and hotkeys run on Tauri's event loop, and the show worker needs
 /// that loop to answer monitor/hwnd queries.
@@ -620,29 +643,69 @@ fn with_animation_guard_nonblocking(
     });
 }
 
-pub fn animate_window_show(window: &tauri::WebviewWindow, anchor: ShowAnchor) {
-    let window = window.clone();
-    with_animation_guard_nonblocking(move |guard| {
-        let Some(animation_guard) = guard else {
-            log::warn!("WINDOW: Show dropped, animation lock still held after 1s");
+fn request_flyout(window: tauri::WebviewWindow, request: FlyoutRequest) {
+    *pending_flyout().lock().unwrap() = Some((window, request));
+    kick_flyout_worker();
+}
+
+/// Hotkey toggle: invert a still-queued request so a double-tap is a no-op,
+/// not hide+hide or show+show against the same visible state.
+pub fn request_flyout_toggle(window: &tauri::WebviewWindow, visible_and_focused: bool) {
+    let mut slot = pending_flyout().lock().unwrap();
+    let next = next_toggle_request(
+        slot.as_ref().map(|(_, request)| *request),
+        visible_and_focused,
+    );
+    *slot = Some((window.clone(), next));
+    drop(slot);
+    kick_flyout_worker();
+}
+
+fn kick_flyout_worker() {
+    if FLYOUT_WORKER_LIVE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    std::thread::spawn(|| loop {
+        let job = pending_flyout().lock().unwrap().take();
+        let Some((window, request)) = job else {
+            FLYOUT_WORKER_LIVE.store(false, Ordering::SeqCst);
+            if pending_flyout().lock().unwrap().is_some()
+                && FLYOUT_WORKER_LIVE
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                continue;
+            }
             return;
         };
-        run_window_show(window, anchor, animation_guard);
+        let Some(guard) = AnimationGuard::acquire()
+            .or_else(|| AnimationGuard::acquire_within(ANIMATION_LOCK_WAIT))
+        else {
+            log::warn!("WINDOW: Flyout request dropped, animation lock still held after 1s");
+            continue;
+        };
+        match request {
+            FlyoutRequest::Show(anchor) => run_window_show(window, anchor, guard),
+            FlyoutRequest::Hide => {
+                let _ = window.hide();
+                drop(guard);
+            }
+        }
     });
+}
+
+pub fn animate_window_show(window: &tauri::WebviewWindow, anchor: ShowAnchor) {
+    request_flyout(window.clone(), FlyoutRequest::Show(anchor));
 }
 
 /// Hide once the show/hide lock is free. Drops the request if the lock is
 /// still held after the wait — unlike a paste callback, a toggle must not
 /// hide without mutual exclusion.
 pub fn animate_window_hide_when_idle(window: &tauri::WebviewWindow) {
-    let window = window.clone();
-    with_animation_guard_nonblocking(move |guard| {
-        let Some(_animation_guard) = guard else {
-            log::warn!("WINDOW: Toggle hide dropped, animation lock still held after 1s");
-            return;
-        };
-        let _ = window.hide();
-    });
+    request_flyout(window.clone(), FlyoutRequest::Hide);
 }
 
 fn run_window_show(
@@ -944,6 +1007,7 @@ fn fit_window_width(requested_width: u32, work_left: i32, work_right: i32) -> u3
     requested_width.min((work_right - work_left).max(1) as u32)
 }
 
+#[cfg(test)]
 fn point_is_inside_rect(
     point: windows::Win32::Foundation::POINT,
     rect: windows::Win32::Foundation::RECT,
@@ -1244,7 +1308,8 @@ pub fn update_tray_icon(tray: &TrayIcon, theme: &tauri::Theme) {
 mod flyout_tests {
     use super::{
         calculate_horizontal_placement, calculate_vertical_placement, click_hits_owned_hwnd,
-        fit_window_width, point_is_inside_rect, with_animation_guard_nonblocking, AnimationGuard,
+        fit_window_width, next_toggle_request, point_is_inside_rect,
+        with_animation_guard_nonblocking, AnimationGuard, FlyoutRequest, ShowAnchor,
     };
     use windows::Win32::Foundation::{POINT, RECT};
 
@@ -1345,6 +1410,28 @@ mod flyout_tests {
             "a hidden Settings/History/image window must not block hide"
         );
         assert!(!click_hits_owned_hwnd(10, false, &[10]));
+    }
+
+    #[test]
+    fn a_second_toggle_inverts_the_queued_action() {
+        assert_eq!(
+            next_toggle_request(None, true),
+            FlyoutRequest::Hide,
+            "first press on a visible flyout hides"
+        );
+        assert_eq!(
+            next_toggle_request(Some(FlyoutRequest::Hide), true),
+            FlyoutRequest::Show(ShowAnchor::Cursor),
+            "second press must not queue another hide"
+        );
+        assert_eq!(
+            next_toggle_request(None, false),
+            FlyoutRequest::Show(ShowAnchor::Cursor)
+        );
+        assert_eq!(
+            next_toggle_request(Some(FlyoutRequest::Show(ShowAnchor::Bottom)), false),
+            FlyoutRequest::Hide
+        );
     }
 
     #[test]

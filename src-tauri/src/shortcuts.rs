@@ -61,11 +61,9 @@ fn parser_hotkey(hotkey: &str) -> String {
 
 pub fn toggle_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        if window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false) {
-            crate::animate_window_hide_when_idle(&window);
-        } else {
-            crate::position_window_near_cursor(&window);
-        }
+        let visible_and_focused =
+            window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false);
+        crate::request_flyout_toggle(&window, visible_and_focused);
     }
 }
 
