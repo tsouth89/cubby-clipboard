@@ -66,6 +66,7 @@ mod constants;
 mod crypto;
 mod database;
 mod ditto_import;
+mod image_persist;
 mod models;
 mod ocr;
 mod ocr_queue;

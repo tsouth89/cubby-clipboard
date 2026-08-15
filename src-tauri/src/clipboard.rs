@@ -2010,7 +2010,27 @@ async fn process_clipboard_snapshot(
     let (emitted_id, inserted_new) = if let Some(existing_id) = existing_uuid {
         was_existing = true;
         if clip_type == "image" {
-            if let Err(error) = sqlx::query(
+            if let Some(full_bytes) = &full_image_content {
+                // Persist the new original first (temp file, then rename) so a
+                // failed write never commits this recapture and never truncates
+                // the previous `{uuid}.cubby`. A persist error is a capture
+                // miss: keep the prior row and do not enqueue OCR.
+                if recapture_existing_image(
+                    &db,
+                    &existing_id,
+                    full_bytes,
+                    &encrypted_source_app,
+                    &encrypted_source_icon,
+                    &encrypted_content,
+                    &encrypted_preview,
+                    encrypted_metadata.clone(),
+                )
+                .await
+                .is_err()
+                {
+                    return;
+                }
+            } else if let Err(error) = sqlx::query(
                 r#"
                 UPDATE clips
                 SET created_at = CURRENT_TIMESTAMP,
@@ -2039,44 +2059,6 @@ async fn process_clipboard_snapshot(
                     error
                 );
                 return;
-            }
-
-            if let Some(full_bytes) = &full_image_content {
-                match persist_full_image_file(
-                    &db.crypto,
-                    &db.image_dir,
-                    &existing_id,
-                    full_bytes,
-                ) {
-                    Ok(file_path) => {
-                        if let Err(error) = sqlx::query(
-                            r#"
-                            INSERT OR REPLACE INTO clip_images (clip_uuid, full_content, file_path, file_size, storage_kind, mime_type, created_at)
-                            VALUES (?, x'', ?, ?, 'file', 'image/png', CURRENT_TIMESTAMP)
-                            "#,
-                        )
-                        .bind(&existing_id)
-                        .bind(&file_path)
-                        .bind(full_bytes.len() as i64)
-                        .execute(pool)
-                        .await
-                        {
-                            log::error!(
-                                "CLIPBOARD: Failed to index image file for existing clip {}: {}",
-                                existing_id,
-                                error
-                            );
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        log::error!(
-                            "Failed to persist full image file for existing clip {}: {}",
-                            existing_id,
-                            e
-                        );
-                    }
-                }
             }
         } else {
             if let Err(error) = sqlx::query(r#"UPDATE clips SET created_at = CURRENT_TIMESTAMP, is_deleted = 0, source_app = ?, source_icon = ? WHERE uuid = ?"#)
@@ -2561,17 +2543,40 @@ pub fn create_image_preview(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(bytes.into_inner())
 }
 
-pub fn persist_full_image_file(
-    crypto: &crate::crypto::CryptoManager,
-    image_dir: &std::path::Path,
-    clip_uuid: &str,
-    png_bytes: &[u8],
-) -> Result<String, String> {
-    std::fs::create_dir_all(image_dir).map_err(|e| e.to_string())?;
-    let file_path = image_dir.join(format!("{}.cubby", clip_uuid));
-    let encrypted = crypto.encrypt(png_bytes)?;
-    std::fs::write(&file_path, encrypted).map_err(|e| e.to_string())?;
-    Ok(file_path.to_string_lossy().to_string())
+pub use crate::image_persist::persist_full_image_file;
+
+/// Persist a recaptured full-resolution original, then update the existing
+/// image row. The write happens first so a persist failure never commits the
+/// recapture `UPDATE` and never queues OCR against a missing file.
+async fn recapture_existing_image(
+    db: &Database,
+    existing_id: &str,
+    full_bytes: &[u8],
+    encrypted_source_app: &Option<String>,
+    encrypted_source_icon: &Option<String>,
+    encrypted_content: &[u8],
+    encrypted_preview: &str,
+    encrypted_metadata: Option<String>,
+) -> Result<(), String> {
+    match crate::image_persist::apply_existing_image_recapture(
+        &db.pool,
+        existing_id,
+        persist_full_image_file(&db.crypto, &db.image_dir, existing_id, full_bytes),
+        full_bytes.len() as i64,
+        encrypted_source_app,
+        encrypted_source_icon,
+        encrypted_content,
+        encrypted_preview,
+        encrypted_metadata,
+    )
+    .await
+    {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            record_capture_error(error.clone());
+            Err(error)
+        }
+    }
 }
 
 pub fn read_full_image_file(
