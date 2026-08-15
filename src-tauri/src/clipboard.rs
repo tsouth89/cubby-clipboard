@@ -435,6 +435,134 @@ enum CaptureAttempt {
     Deferred,
 }
 
+/// How many times one capture may restart after the clipboard sequence moves
+/// mid-read. Each restart re-collects metadata and payload together.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const MAX_SEQUENCE_BIND_ATTEMPTS: u32 = 3;
+
+/// The clipboard advanced while this capture was still reading. Metadata from
+/// the old sequence must not be paired with the new payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SequenceBindError {
+    Changed { from: u32, to: u32 },
+}
+
+/// Source/sensitivity collected before the payload is materialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct CapturePrivacyMetadata {
+    sensitive: bool,
+}
+
+/// One capture whose metadata and payload were read under the same sequence.
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum SequenceBoundCapture<T> {
+    Bound {
+        sequence: u32,
+        metadata: CapturePrivacyMetadata,
+        payload: T,
+    },
+    Changed {
+        from: u32,
+        to: u32,
+    },
+}
+
+/// Collect metadata, then payload, and keep the pair only if the clipboard
+/// sequence never moved. This is the test seam for SBS-767.
+#[cfg_attr(not(test), allow(dead_code))]
+fn bind_capture_to_sequence<S, M, P, T>(
+    read_sequence: S,
+    collect_metadata: M,
+    collect_payload: P,
+) -> SequenceBoundCapture<T>
+where
+    S: Fn() -> u32,
+    M: FnOnce() -> CapturePrivacyMetadata,
+    P: FnOnce() -> T,
+{
+    let start = read_sequence();
+    let metadata = collect_metadata();
+    let after_metadata = read_sequence();
+    if after_metadata != start {
+        return SequenceBoundCapture::Changed {
+            from: start,
+            to: after_metadata,
+        };
+    }
+    let payload = collect_payload();
+    let after_payload = read_sequence();
+    if after_payload != start {
+        return SequenceBoundCapture::Changed {
+            from: start,
+            to: after_payload,
+        };
+    }
+    SequenceBoundCapture::Bound {
+        sequence: start,
+        metadata,
+        payload,
+    }
+}
+
+/// Persist only when the sequence is still the one we bound. A later copy must
+/// not inherit this snapshot's privacy flags.
+fn persist_if_sequence_holds<T>(
+    expected: u32,
+    current: u32,
+    snapshot: T,
+) -> Result<T, SequenceBindError> {
+    if current == expected {
+        Ok(snapshot)
+    } else {
+        Err(SequenceBindError::Changed {
+            from: expected,
+            to: current,
+        })
+    }
+}
+
+/// Retry a delayed materialize, but abort as soon as the sequence moves so a
+/// later (possibly sensitive) payload is never kept with earlier metadata.
+fn materialize_with_sequence_guard<F, T>(
+    expected: u32,
+    read_sequence: impl Fn() -> u32,
+    mut attempt: F,
+    max_attempts: u32,
+) -> Result<Option<T>, SequenceBindError>
+where
+    F: FnMut(u32) -> Option<T>,
+{
+    for index in 0..max_attempts {
+        let current = read_sequence();
+        if current != expected {
+            return Err(SequenceBindError::Changed {
+                from: expected,
+                to: current,
+            });
+        }
+        if let Some(value) = attempt(index) {
+            let current = read_sequence();
+            if current != expected {
+                return Err(SequenceBindError::Changed {
+                    from: expected,
+                    to: current,
+                });
+            }
+            return Ok(Some(value));
+        }
+    }
+    let current = read_sequence();
+    if current != expected {
+        return Err(SequenceBindError::Changed {
+            from: expected,
+            to: current,
+        });
+    }
+    Ok(None)
+}
+
 /// Try to materialize and queue the clipboard content behind `sequence`.
 ///
 /// The sequence is marked handled only after a successful materialize (or a
@@ -473,10 +601,63 @@ fn deferral_decision(
 /// `Err(())` means the snapshot consumer is gone (process teardown).
 #[cfg(target_os = "windows")]
 fn capture_clipboard_update(
-    sequence: u32,
+    mut sequence: u32,
     event_tx: &tokio::sync::mpsc::UnboundedSender<ClipboardListenerEvent>,
 ) -> Result<CaptureAttempt, ()> {
+    let read_sequence =
+        || unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
+
+    for bind_attempt in 0..MAX_SEQUENCE_BIND_ATTEMPTS {
+        match capture_one_bound_sequence(sequence, &read_sequence, event_tx) {
+            Ok(attempt) => return Ok(attempt),
+            Err(BoundCaptureFailure::ConsumerGone) => return Err(()),
+            Err(BoundCaptureFailure::Sequence(SequenceBindError::Changed { from, to })) => {
+                log::debug!(
+                    "CLIPBOARD: Sequence changed {from} -> {to} during capture (bind attempt {}); retrying from metadata",
+                    bind_attempt + 1
+                );
+                // The clipboard now belongs to a newer copy. Bind the next
+                // attempt to that sequence rather than the stale event number.
+                sequence = to;
+            }
+        }
+    }
+
+    let current = read_sequence();
+    note_clipboard_event(current);
+    log::warn!(
+        "CLIPBOARD: Discarded capture because sequence {} kept changing during read",
+        current
+    );
+    Ok(CaptureAttempt::Handled)
+}
+
+#[cfg(target_os = "windows")]
+enum BoundCaptureFailure {
+    Sequence(SequenceBindError),
+    ConsumerGone,
+}
+
+#[cfg(target_os = "windows")]
+impl From<SequenceBindError> for BoundCaptureFailure {
+    fn from(error: SequenceBindError) -> Self {
+        Self::Sequence(error)
+    }
+}
+
+/// One metadata-then-payload read, kept only if the sequence stays put.
+#[cfg(target_os = "windows")]
+fn capture_one_bound_sequence(
+    mut sequence: u32,
+    read_sequence: &impl Fn() -> u32,
+    event_tx: &tokio::sync::mpsc::UnboundedSender<ClipboardListenerEvent>,
+) -> Result<CaptureAttempt, BoundCaptureFailure> {
     let started = Instant::now();
+    let live = read_sequence();
+    if live != sequence {
+        // The event sequence is already stale. Capture whatever is current.
+        sequence = live;
+    }
 
     // File clipboard payloads are references to external paths, not durable
     // clipboard content. Recording them as history creates entries that can
@@ -487,6 +668,17 @@ fn capture_clipboard_update(
     // as an image rather than as an unreliable file reference.
     let has_file_payload = clipboard_has_file_payload_format();
     let has_image_payload = clipboard_has_image_format();
+    let source_app_identity = get_clipboard_owner_identity();
+    let sensitive = clipboard_marked_sensitive();
+    let after_metadata = read_sequence();
+    if after_metadata != sequence {
+        return Err(SequenceBindError::Changed {
+            from: sequence,
+            to: after_metadata,
+        }
+        .into());
+    }
+
     if crate::clipboard_policy::classify_file_payload(has_file_payload, has_image_payload)
         == crate::clipboard_policy::FilePayloadPolicy::IgnoreFilePayload
     {
@@ -498,10 +690,22 @@ fn capture_clipboard_update(
         return Ok(CaptureAttempt::Handled);
     }
 
-    let source_app_identity = get_clipboard_owner_identity();
-    let sensitive = clipboard_marked_sensitive();
+    let materialized = materialize_with_sequence_guard(
+        sequence,
+        read_sequence,
+        |attempt| {
+            let content = materialize_clipboard_content_once(attempt);
+            if content.is_none() && attempt + 1 < 10 {
+                std::thread::sleep(clipboard_retry_delay(attempt));
+            }
+            content
+        },
+        10,
+    )?;
 
-    if let Some((content, formats)) = materialize_clipboard_content() {
+    persist_if_sequence_holds(sequence, read_sequence(), ())?;
+
+    if let Some((content, formats)) = materialized {
         note_clipboard_event(sequence);
         let snapshot = ClipboardSnapshot {
             sequence,
@@ -514,7 +718,7 @@ fn capture_clipboard_update(
         return event_tx
             .send(ClipboardListenerEvent::Content(snapshot))
             .map(|_| CaptureAttempt::Handled)
-            .map_err(|_| ());
+            .map_err(|_| BoundCaptureFailure::ConsumerGone);
     }
 
     if has_file_payload && has_image_payload {
@@ -530,6 +734,7 @@ fn capture_clipboard_update(
     }
 
     if clipboard_is_cleared() {
+        persist_if_sequence_holds(sequence, read_sequence(), ())?;
         // Empty clipboard (or empty text with no image/files). This is
         // the password-manager auto-clear signal; never treat a new
         // non-empty copy as a clear.
@@ -537,10 +742,11 @@ fn capture_clipboard_update(
         return event_tx
             .send(ClipboardListenerEvent::Cleared { sequence })
             .map(|_| CaptureAttempt::Handled)
-            .map_err(|_| ());
+            .map_err(|_| BoundCaptureFailure::ConsumerGone);
     }
 
     if clipboard_has_supported_format() {
+        persist_if_sequence_holds(sequence, read_sequence(), ())?;
         let (attempts, decision) = deferral_decision(
             DEFERRED_SEQUENCE.load(Ordering::SeqCst),
             DEFERRED_ATTEMPTS.load(Ordering::SeqCst),
@@ -571,6 +777,7 @@ fn capture_clipboard_update(
         return Ok(CaptureAttempt::Handled);
     }
 
+    persist_if_sequence_holds(sequence, read_sequence(), ())?;
     // Nothing we support (custom/private formats only). Mark handled so the
     // watchdog does not treat an ignored format as a dead listener.
     note_clipboard_event(sequence);
@@ -581,7 +788,7 @@ fn capture_clipboard_update(
     Ok(CaptureAttempt::Handled)
 }
 
-/// True when the clipboard advertises a format `materialize_clipboard_content`
+/// True when the clipboard advertises a format `materialize_clipboard_content_once`
 /// can read (text or an image). Used to tell "unsupported payload"
 /// (mark handled) apart from "supported but contended" (defer and retry).
 #[cfg(target_os = "windows")]
@@ -923,60 +1130,56 @@ fn run_native_listener(_event_tx: tokio::sync::mpsc::UnboundedSender<ClipboardLi
     record_capture_error("clipboard capture requires Windows");
 }
 
-fn materialize_clipboard_content() -> Option<(CapturedContent, Vec<CapturedFormat>)> {
+/// One materialize attempt. `attempt` is 0-based so the last try can do a
+/// slower image decode. The sequence-bound capture path checks the clipboard
+/// sequence around each call instead of sleeping across a sequence change.
+fn materialize_clipboard_content_once(
+    attempt: u32,
+) -> Option<(CapturedContent, Vec<CapturedFormat>)> {
     const ATTEMPTS: u32 = 10;
+    let last_attempt = attempt + 1 == ATTEMPTS;
 
-    for attempt in 0..ATTEMPTS {
-        // Screenshot tools commonly expose both a bitmap and CF_HDROP for the
-        // saved image. Treat that as an image in Cubby. If the advertised image
-        // is still being rendered, do not let the easier file read mask it
-        // immediately; retry the image for the complete bounded window.
-        if clipboard_has_image_format() && clipboard_has_file_payload_format() {
-            if let Ok(image) = read_clipboard_image_fast(attempt + 1 == ATTEMPTS) {
-                return Some((captured_image(image), Vec::new()));
-            }
-
-            if attempt + 1 < ATTEMPTS {
-                std::thread::sleep(clipboard_retry_delay(attempt));
-                continue;
-            }
-            // The caller records this hybrid update as handled. Do not fall
-            // through to text, where the path could be captured as a text clip.
-            return None;
-        }
-
-        if let Ok(ctx) = ClipboardContext::new() {
-            if let Ok(text) = ctx.get_text() {
-                if let Some(content) = capture_text(text) {
-                    let mut formats = Vec::new();
-                    if let Ok(html) = ctx.get_html() {
-                        if !html.is_empty() {
-                            formats.push(CapturedFormat {
-                                name: "html",
-                                content: html.into_bytes(),
-                            });
-                        }
-                    }
-                    if let Ok(rtf) = ctx.get_rich_text() {
-                        if !rtf.is_empty() {
-                            formats.push(CapturedFormat {
-                                name: "rtf",
-                                content: rtf.into_bytes(),
-                            });
-                        }
-                    }
-                    return Some((content, formats));
-                }
-            }
-        }
-
-        if let Ok(image) = read_clipboard_image_fast(attempt + 1 == ATTEMPTS) {
+    // Screenshot tools commonly expose both a bitmap and CF_HDROP for the
+    // saved image. Treat that as an image in Cubby. If the advertised image
+    // is still being rendered, do not let the easier file read mask it
+    // immediately; retry the image for the complete bounded window.
+    if clipboard_has_image_format() && clipboard_has_file_payload_format() {
+        if let Ok(image) = read_clipboard_image_fast(last_attempt) {
             return Some((captured_image(image), Vec::new()));
         }
+        // The caller records this hybrid update as handled on the last miss.
+        // Do not fall through to text, where the path could be captured as a
+        // text clip.
+        return None;
+    }
 
-        if attempt + 1 < ATTEMPTS {
-            std::thread::sleep(clipboard_retry_delay(attempt));
+    if let Ok(ctx) = ClipboardContext::new() {
+        if let Ok(text) = ctx.get_text() {
+            if let Some(content) = capture_text(text) {
+                let mut formats = Vec::new();
+                if let Ok(html) = ctx.get_html() {
+                    if !html.is_empty() {
+                        formats.push(CapturedFormat {
+                            name: "html",
+                            content: html.into_bytes(),
+                        });
+                    }
+                }
+                if let Ok(rtf) = ctx.get_rich_text() {
+                    if !rtf.is_empty() {
+                        formats.push(CapturedFormat {
+                            name: "rtf",
+                            content: rtf.into_bytes(),
+                        });
+                    }
+                }
+                return Some((content, formats));
+            }
         }
+    }
+
+    if let Ok(image) = read_clipboard_image_fast(last_attempt) {
+        return Some((captured_image(image), Vec::new()));
     }
 
     None
@@ -2841,6 +3044,99 @@ mod tests {
             is_remote_client_owner(Some("ncplayer.exe"), true),
             false
         ));
+    }
+
+    mod sequence_bind {
+        use super::super::{
+            bind_capture_to_sequence, materialize_with_sequence_guard, persist_if_sequence_holds,
+            CapturePrivacyMetadata, SequenceBindError, SequenceBoundCapture,
+        };
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        const PASSWORD: &str = "hunter2-from-the-next-copy";
+
+        #[test]
+        fn a_sequence_change_after_metadata_does_not_persist_sensitive_content() {
+            let sequence = AtomicU32::new(10);
+            let persisted = std::cell::RefCell::new(None);
+            let bound = bind_capture_to_sequence(
+                || sequence.load(Ordering::SeqCst),
+                || {
+                    let metadata = CapturePrivacyMetadata { sensitive: false };
+                    sequence.store(11, Ordering::SeqCst);
+                    metadata
+                },
+                || PASSWORD,
+            );
+            if let SequenceBoundCapture::Bound { payload, .. } = bound {
+                *persisted.borrow_mut() = Some(payload);
+            }
+            assert!(matches!(
+                bound,
+                SequenceBoundCapture::Changed { from: 10, to: 11 }
+            ));
+            assert!(
+                persisted.borrow().is_none(),
+                "sensitive content from the next sequence must not be persisted"
+            );
+        }
+
+        #[test]
+        fn a_sequence_change_during_delayed_materialize_does_not_persist_sensitive_content() {
+            let sequence = AtomicU32::new(20);
+            let attempts = AtomicU32::new(0);
+            let result = materialize_with_sequence_guard(
+                20,
+                || sequence.load(Ordering::SeqCst),
+                |_| {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    if attempt == 0 {
+                        sequence.store(21, Ordering::SeqCst);
+                        None
+                    } else {
+                        Some(PASSWORD)
+                    }
+                },
+                4,
+            );
+            assert!(matches!(
+                result,
+                Err(SequenceBindError::Changed { from: 20, to: 21 })
+            ));
+            assert_ne!(result.ok().flatten(), Some(PASSWORD));
+        }
+
+        #[test]
+        fn persist_is_rejected_when_the_sequence_moves_before_write() {
+            assert_eq!(
+                persist_if_sequence_holds(3, 4, PASSWORD),
+                Err(SequenceBindError::Changed { from: 3, to: 4 })
+            );
+            assert_eq!(persist_if_sequence_holds(3, 3, "safe"), Ok("safe"));
+        }
+
+        #[test]
+        fn a_stable_sequence_keeps_metadata_and_payload_together() {
+            let bound = bind_capture_to_sequence(
+                || 7,
+                || CapturePrivacyMetadata { sensitive: true },
+                || "tagged-secret",
+            );
+            match bound {
+                SequenceBoundCapture::Bound {
+                    sequence,
+                    metadata,
+                    payload,
+                } => {
+                    assert_eq!(sequence, 7);
+                    assert!(metadata.sensitive);
+                    assert_eq!(payload, "tagged-secret");
+                }
+                SequenceBoundCapture::Changed { from, to } => {
+                    panic!("stable sequence changed {from} -> {to}")
+                }
+            }
+        }
     }
 
     #[cfg(target_os = "windows")]

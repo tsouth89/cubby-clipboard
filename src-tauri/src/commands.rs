@@ -1517,6 +1517,34 @@ async fn update_clip_text_in_database(db: &Database, id: &str, text: &str) -> Re
         return Err("Image clips cannot be edited".to_string());
     }
 
+    let hash_material = crate::clipboard::build_clip_hash_material(
+        "text",
+        text.as_bytes(),
+        std::iter::empty::<(&str, &[u8])>(),
+    );
+    // Dedup treats an edited clip exactly like any other clip: the hash follows
+    // the content, so re-copying this text later matches this row instead of
+    // adding a third. A collision with a *different* clip is rejected with no
+    // mutation: deleting HTML/RTF first and then failing the unique hash left
+    // a half-edited row (SBS-768).
+    let content_hash = db.crypto.keyed_hash(&hash_material);
+    let preview = truncate_preview(text);
+    let encrypted_content = db.crypto.encrypt(text.as_bytes())?;
+    let encrypted_preview = db.crypto.encrypt_text(&preview)?;
+
+    let mut transaction = db.pool.begin().await.map_err(|e| e.to_string())?;
+
+    let existing_uuid: Option<String> =
+        sqlx::query_scalar("SELECT uuid FROM clips WHERE content_hash = ? AND uuid != ?")
+            .bind(&content_hash)
+            .bind(id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|e| e.to_string())?;
+    if existing_uuid.is_some() {
+        return Err("Another clip already has this text".to_string());
+    }
+
     // The edited text is now the whole clip. Any html/rtf captured alongside it
     // described the *old* text, so keeping them would paste the pre-edit version
     // into anything that prefers a rich format — the edit would look like it had
@@ -1525,33 +1553,29 @@ async fn update_clip_text_in_database(db: &Database, id: &str, text: &str) -> Re
     // formats: it has to describe what the clip now is.
     sqlx::query("DELETE FROM clip_formats WHERE clip_uuid = ?")
         .bind(id)
-        .execute(&db.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|e| e.to_string())?;
 
-    let hash_material = crate::clipboard::build_clip_hash_material(
-        "text",
-        text.as_bytes(),
-        std::iter::empty::<(&str, &[u8])>(),
-    );
-    // Dedup treats an edited clip exactly like any other clip: the hash follows
-    // the content, so re-copying this text later matches this row instead of
-    // adding a third. A collision with an existing clip is allowed rather than
-    // rejected — refusing an edit because some unrelated row happens to hold the
-    // same text would be the more surprising behavior.
-    let content_hash = db.crypto.keyed_hash(&hash_material);
-    let preview = truncate_preview(text);
-
-    sqlx::query(
+    let update = sqlx::query(
         "UPDATE clips SET clip_type = 'text', content = ?, text_preview = ?, content_hash = ? WHERE uuid = ?",
     )
-    .bind(db.crypto.encrypt(text.as_bytes())?)
-    .bind(db.crypto.encrypt_text(&preview)?)
+    .bind(encrypted_content)
+    .bind(encrypted_preview)
     .bind(&content_hash)
     .bind(id)
-    .execute(&db.pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    .execute(&mut *transaction)
+    .await;
+
+    match update {
+        Ok(_) => {}
+        Err(error) if is_unique_constraint_error(&error) => {
+            return Err("Another clip already has this text".to_string());
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+
+    transaction.commit().await.map_err(|e| e.to_string())?;
 
     // The index holds the pre-edit text until it is told otherwise, so search
     // would keep matching words the clip no longer contains.
@@ -1561,6 +1585,18 @@ async fn update_clip_text_in_database(db: &Database, id: &str, text: &str) -> Re
     // what this row used to hold.
     crate::clipboard::reset_capture_dedup();
     Ok(())
+}
+
+fn is_unique_constraint_error(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(database_error) => {
+            sqlx::error::DatabaseError::is_unique_violation(database_error.as_ref())
+                || sqlx::error::DatabaseError::message(database_error.as_ref())
+                    .to_ascii_lowercase()
+                    .contains("unique")
+        }
+        _ => error.to_string().to_ascii_lowercase().contains("unique"),
+    }
 }
 
 /// Preview text stored on the row, bounded so a huge clip does not bloat every
@@ -3150,6 +3186,97 @@ mod tests {
         assert!(update_clip_text_in_database(&database, "missing", "nope")
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn editing_a_rich_clip_to_an_existing_hash_is_rejected_without_mutation() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("editable", "original wording", "2026-06-01 09:00:00"),
+        )
+        .await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("existing", "already stored", "2026-06-01 10:00:00"),
+        )
+        .await;
+
+        let original_html = database.crypto.encrypt(b"<b>original wording</b>").unwrap();
+        let original_rtf = database.crypto.encrypt(b"{\\rtf original}").unwrap();
+        sqlx::query(
+            "INSERT INTO clip_formats (clip_uuid, format, content) VALUES ('editable', 'html', ?), ('editable', 'rtf', ?)",
+        )
+        .bind(&original_html)
+        .bind(&original_rtf)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        let existing_hash =
+            database
+                .crypto
+                .keyed_hash(&crate::clipboard::build_clip_hash_material(
+                    "text",
+                    b"already stored",
+                    std::iter::empty::<(&str, &[u8])>(),
+                ));
+        sqlx::query("UPDATE clips SET content_hash = ? WHERE uuid = 'existing'")
+            .bind(&existing_hash)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+
+        let before_text = get_clip_details_in_database(&database, "editable")
+            .await
+            .unwrap()
+            .content;
+        let before_hash: String =
+            sqlx::query_scalar("SELECT content_hash FROM clips WHERE uuid = 'editable'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+
+        let error = update_clip_text_in_database(&database, "editable", "already stored")
+            .await
+            .expect_err("a duplicate-hash edit must be rejected");
+        assert!(
+            error.to_lowercase().contains("already"),
+            "expected a duplicate-target error, got: {error}"
+        );
+
+        let after = get_clip_details_in_database(&database, "editable")
+            .await
+            .unwrap();
+        assert_eq!(after.content, before_text);
+        assert_eq!(after.content, "original wording");
+        let after_hash: String =
+            sqlx::query_scalar("SELECT content_hash FROM clips WHERE uuid = 'editable'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(after_hash, before_hash);
+
+        let format_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM clip_formats WHERE clip_uuid = 'editable'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(format_count, 2);
+        let html: Vec<u8> = sqlx::query_scalar(
+            "SELECT content FROM clip_formats WHERE clip_uuid = 'editable' AND format = 'html'",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        let rtf: Vec<u8> = sqlx::query_scalar(
+            "SELECT content FROM clip_formats WHERE clip_uuid = 'editable' AND format = 'rtf'",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(html, original_html);
+        assert_eq!(rtf, original_rtf);
     }
 
     #[tokio::test]
