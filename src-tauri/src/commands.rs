@@ -378,6 +378,19 @@ fn decrypt_clip_fields(db: &Database, clip: &mut Clip) -> Result<(), String> {
     Ok(())
 }
 
+/// Decrypt a list/search row. One unreadable neighbor must not fail the
+/// whole page: skip it and keep the rest. Single-clip reads still go
+/// through `decrypt_clip_fields` so they surface the error for that clip.
+fn decrypt_listed_clip(db: &Database, clip: &mut Clip) -> bool {
+    match decrypt_clip_fields(db, clip) {
+        Ok(()) => true,
+        Err(error) => {
+            log::warn!("CLIPS: Ignoring unreadable clip {}: {error}", clip.uuid);
+            false
+        }
+    }
+}
+
 async fn cleanup_orphan_clip_image_files(
     pool: &SqlitePool,
     image_dir: &std::path::Path,
@@ -994,9 +1007,7 @@ async fn get_clips_in_database(
     let sql_ms = sql_started.elapsed().as_millis();
 
     log::info!("DB: Found {} clips", clips.len());
-    for clip in &mut clips {
-        decrypt_clip_fields(db, clip)?;
-    }
+    clips.retain_mut(|clip| decrypt_listed_clip(db, clip));
 
     let image_rows = clips
         .iter()
@@ -1967,9 +1978,7 @@ async fn search_clips_in_database(
 
     let mut clips = fetch_clips_by_id(pool, &selected_ids).await?;
     let sql_ms = sql_started.elapsed().as_millis();
-    for clip in &mut clips {
-        decrypt_clip_fields(db, clip)?;
-    }
+    clips.retain_mut(|clip| decrypt_listed_clip(db, clip));
 
     let image_rows = clips
         .iter()
@@ -3049,6 +3058,24 @@ mod tests {
         );
     }
 
+    async fn corrupt_clip_content(database: &Database, id: &str) {
+        sqlx::query("UPDATE clips SET content = ? WHERE uuid = ?")
+            .bind(b"not-cub1".as_slice())
+            .bind(id)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+    }
+
+    async fn corrupt_clip_preview(database: &Database, id: &str) {
+        sqlx::query("UPDATE clips SET text_preview = ? WHERE uuid = ?")
+            .bind("not-cub1")
+            .bind(id)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+    }
+
     /// Three clips over three days from two apps, newest last.
     async fn seed_filter_clips(database: &Database) {
         insert_search_clip(
@@ -3809,6 +3836,202 @@ mod tests {
             database.search_index.source_app_counts(),
             vec![("code.exe".to_string(), 2), ("chrome.exe".to_string(), 1)]
         );
+    }
+
+    #[tokio::test]
+    async fn get_clips_skips_an_unreadable_content_row() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("readable", "visible neighbor", "2026-07-01 09:00:00")
+                .with_app("code.exe"),
+        )
+        .await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("broken-content", "should vanish", "2026-07-01 10:00:00")
+                .with_app("chrome.exe"),
+        )
+        .await;
+        corrupt_clip_content(&database, "broken-content").await;
+
+        let items =
+            get_clips_in_database(None, 20, 0, Some(true), None, None, None, None, &database)
+                .await
+                .expect("one unreadable neighbor must not fail the listing");
+        assert_eq!(
+            items
+                .iter()
+                .map(|clip| clip.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["readable"]
+        );
+
+        // Single-clip reads still fail for the broken row itself.
+        assert!(get_clip_details_in_database(&database, "broken-content")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn get_clips_skips_an_unreadable_preview_row() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("readable", "visible neighbor", "2026-07-02 09:00:00")
+                .with_app("code.exe"),
+        )
+        .await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("broken-preview", "should vanish", "2026-07-02 10:00:00")
+                .with_app("chrome.exe"),
+        )
+        .await;
+        corrupt_clip_preview(&database, "broken-preview").await;
+
+        let items =
+            get_clips_in_database(None, 20, 0, Some(true), None, None, None, None, &database)
+                .await
+                .expect("one unreadable preview must not fail the listing");
+        assert_eq!(
+            items
+                .iter()
+                .map(|clip| clip.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["readable"]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_clips_page_survives_an_unreadable_neighbor() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("newer", "page newer", "2026-07-03 12:00:00"),
+        )
+        .await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("broken-page", "page broken", "2026-07-03 11:00:00"),
+        )
+        .await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("older", "page older", "2026-07-03 10:00:00"),
+        )
+        .await;
+        corrupt_clip_content(&database, "broken-page").await;
+
+        // A page of 20 used to fail entirely once the middle row refused to
+        // decrypt. The readable neighbors on that page must still come back.
+        let items =
+            get_clips_in_database(None, 20, 0, Some(true), None, None, None, None, &database)
+                .await
+                .expect("a page must not become an IPC error for one bad row");
+        assert_eq!(
+            items
+                .iter()
+                .map(|clip| clip.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["newer", "older"]
+        );
+    }
+
+    #[tokio::test]
+    async fn search_clips_and_ensure_ready_skip_an_unreadable_clip() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("good-content", "alpha readable body", "2026-07-04 09:00:00")
+                .with_app("code.exe"),
+        )
+        .await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("good-preview", "bravo readable body", "2026-07-04 10:00:00")
+                .with_app("code.exe"),
+        )
+        .await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text(
+                "broken-content",
+                "alpha should vanish",
+                "2026-07-04 11:00:00",
+            )
+            .with_app("chrome.exe"),
+        )
+        .await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text(
+                "broken-preview",
+                "bravo should vanish",
+                "2026-07-04 12:00:00",
+            )
+            .with_app("chrome.exe"),
+        )
+        .await;
+        corrupt_clip_content(&database, "broken-content").await;
+        corrupt_clip_preview(&database, "broken-preview").await;
+
+        database
+            .search_index
+            .ensure_ready(&database.pool, &database.crypto)
+            .await
+            .expect("a corrupt payload must not leave the index unbuilt");
+
+        assert!(database
+            .search_index
+            .matches("readable")
+            .contains("good-content"));
+        assert!(database
+            .search_index
+            .matches("readable")
+            .contains("good-preview"));
+        assert!(!database
+            .search_index
+            .matches("vanish")
+            .contains("broken-content"));
+        assert!(!database
+            .search_index
+            .matches("vanish")
+            .contains("broken-preview"));
+        assert_eq!(
+            database.search_index.source_app_counts(),
+            vec![("code.exe".to_string(), 2)]
+        );
+
+        let found = search_clips_in_database(
+            "readable".into(),
+            None,
+            20,
+            0,
+            None,
+            None,
+            None,
+            None,
+            &database,
+        )
+        .await
+        .expect("search must not fail the page for one unreadable clip");
+        assert_eq!(
+            found
+                .iter()
+                .map(|clip| clip.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["good-preview", "good-content"]
+        );
+
+        // Source-app listing goes through ensure_ready + ids_for_source_app.
+        assert_eq!(
+            listed_ids(&database, None, None, Some("code.exe")).await,
+            vec!["good-preview", "good-content"]
+        );
+        assert!(listed_ids(&database, None, None, Some("chrome.exe"))
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
