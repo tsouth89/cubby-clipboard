@@ -331,6 +331,11 @@ fn build_ocr_match(ocr_text: &str, query: &str) -> Option<OcrMatch> {
 
 fn clip_to_search_item(clip: &Clip, query: &str) -> ClipboardItem {
     let mut item = clip_to_list_item(clip);
+    // Hidden list rows already blank content, notes, and OCR snippets.
+    // Search must not write those fields back from the decrypted image OCR.
+    if clip.is_hidden {
+        return item;
+    }
     if clip.clip_type == "image" {
         item.ocr_match = clip
             .ocr_text
@@ -1704,16 +1709,30 @@ pub async fn delete_folder(
     db: tauri::State<'_, Arc<Database>>,
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
-    let pool = &db.pool;
-
     let folder_id: i64 = id.parse().map_err(|_| "Invalid folder ID")?;
-    sqlx::query(r#"DELETE FROM folders WHERE id = ?"#)
+    delete_folder_in_pool(&db.pool, folder_id).await?;
+    let _ = window.emit("clipboard-change", ());
+    Ok(())
+}
+
+/// Unfile every member, then drop the folder, in one transaction.
+///
+/// `clips.folder_id` references `folders(id)` with no ON DELETE action, and the
+/// pool has foreign keys on. Deleting the folder row first fails for any folder
+/// that still has clips.
+async fn delete_folder_in_pool(pool: &SqlitePool, folder_id: i64) -> Result<(), String> {
+    let mut transaction = pool.begin().await.map_err(|e| e.to_string())?;
+    sqlx::query(r#"UPDATE clips SET folder_id = NULL WHERE folder_id = ?"#)
         .bind(folder_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|e| e.to_string())?;
-
-    let _ = window.emit("clipboard-change", ());
+    sqlx::query(r#"DELETE FROM folders WHERE id = ?"#)
+        .bind(folder_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| e.to_string())?;
+    transaction.commit().await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -2346,35 +2365,57 @@ pub async fn clear_all_clips(db: tauri::State<'_, Arc<Database>>) -> Result<(), 
 
 #[tauri::command]
 pub async fn remove_duplicate_clips(db: tauri::State<'_, Arc<Database>>) -> Result<i64, String> {
-    let pool = &db.pool;
+    remove_duplicate_clips_in_database(&db).await
+}
 
-    // Keepers are the oldest *visible* copy per hash: a soft-deleted survivor
-    // would make the content vanish from the UI entirely. Pinned rows are never
-    // deleted, matching retention and clear-all.
-    let result = sqlx::query(
-        r#"
-        DELETE FROM clips
-        WHERE is_pinned = 0
+/// Hard-delete unpinned clips that are not the oldest visible copy of their
+/// hash. After `idx_clips_hash_unique` that is mostly unpinned soft-deletes.
+///
+/// `clip_images` cascades with the clip row, so the file paths have to be
+/// collected first — the same order retention and hard-delete already use.
+async fn remove_duplicate_clips_in_database(db: &Database) -> Result<i64, String> {
+    let pool = &db.pool;
+    let duplicate_filter = r#"
+        is_pinned = 0
           AND id NOT IN (
             SELECT MIN(id)
             FROM clips
             WHERE is_deleted = 0
             GROUP BY content_hash
-        )
-    "#,
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+          )
+    "#;
+    let select_paths = format!(
+        "SELECT file_path FROM clip_images WHERE clip_uuid IN (SELECT uuid FROM clips WHERE {duplicate_filter})"
+    );
+    let delete_clips = format!("DELETE FROM clips WHERE {duplicate_filter}");
 
-    cleanup_orphan_clip_image_files(pool, &db.image_dir).await?;
+    let mut transaction = pool.begin().await.map_err(|e| e.to_string())?;
+    let image_paths: Vec<Option<String>> = sqlx::query_scalar(&select_paths)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|e| e.to_string())?;
+    let deleted = sqlx::query(&delete_clips)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| e.to_string())?
+        .rows_affected();
+    transaction.commit().await.map_err(|e| e.to_string())?;
 
-    if result.rows_affected() > 0 {
+    remove_clip_image_files(
+        &db.image_dir,
+        image_paths
+            .into_iter()
+            .flatten()
+            .filter(|path| !path.is_empty())
+            .collect(),
+    );
+
+    if deleted > 0 {
         crate::clipboard::reset_capture_dedup();
         db.search_index.invalidate();
     }
 
-    Ok(result.rows_affected() as i64)
+    Ok(deleted as i64)
 }
 
 #[tauri::command]
@@ -2762,9 +2803,10 @@ pub async fn import_from_ditto(
 mod tests {
     use super::{
         build_ocr_highlights, build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore,
-        directory_size_bytes, enforce_retention_in_pool, get_clip_details_in_database,
-        get_clips_in_database, load_recognized_text, migrate_clip_format_model,
-        migrate_encrypted_storage, ocr_text_layout, remove_clip_image_files, restore_hash_material,
+        delete_folder_in_pool, directory_size_bytes, enforce_retention_in_pool,
+        get_clip_details_in_database, get_clips_in_database, load_recognized_text,
+        migrate_clip_format_model, migrate_encrypted_storage, ocr_text_layout,
+        remove_clip_image_files, remove_duplicate_clips_in_database, restore_hash_material,
         search_clips_in_database, set_clip_notes_in_database, set_clip_ocr_text_in_database,
         toggle_clip_hidden_in_pool, toggle_clip_pin_in_pool, update_clip_text_in_database,
         ClipboardContent, NOTE_CHAR_LIMIT, OCR_SNIPPET_CHAR_LIMIT,
@@ -3351,6 +3393,167 @@ mod tests {
                 .unwrap();
         assert_eq!(items[0].content, "swordfish token 8821");
         assert!(!items[0].is_hidden);
+    }
+
+    #[tokio::test]
+    async fn hidden_image_search_does_not_leak_ocr_snippets() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture {
+                id: "shot",
+                clip_type: "image",
+                content: "",
+                preview: "Screenshot",
+                ocr: Some("recovery code 8821 on the screenshot"),
+                folder_id: None,
+                pinned: false,
+                created_at: "2026-05-02 09:00:00",
+                source_app: None,
+            },
+        )
+        .await;
+
+        let visible = search_clips_in_database(
+            "8821".into(),
+            None,
+            10,
+            0,
+            None,
+            None,
+            None,
+            None,
+            &database,
+        )
+        .await
+        .unwrap();
+        assert_eq!(visible.len(), 1);
+        assert!(
+            visible[0].ocr_match.is_some(),
+            "a visible image search should still show the OCR snippet"
+        );
+
+        assert!(toggle_clip_hidden_in_pool(&database.pool, "shot")
+            .await
+            .expect("toggle should hide"));
+
+        let found = search_clips_in_database(
+            "8821".into(),
+            None,
+            10,
+            0,
+            None,
+            None,
+            None,
+            None,
+            &database,
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.len(), 1, "a hidden image is still searchable");
+        assert!(found[0].is_hidden);
+        assert!(found[0].content.is_empty());
+        assert!(
+            found[0].ocr_match.is_none(),
+            "the OCR snippet is the hidden text"
+        );
+        assert!(
+            found[0].ocr_highlights.is_none(),
+            "highlight boxes are made of the same OCR words"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_folder_unfiles_member_clips() {
+        let database = test_database().await;
+        let folder_id = sqlx::query("INSERT INTO folders (name) VALUES ('Receipts')")
+            .execute(&database.pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+        insert_search_clip(
+            &database,
+            SearchFixture {
+                id: "filed",
+                clip_type: "text",
+                content: "invoice 42",
+                preview: "invoice 42",
+                ocr: None,
+                folder_id: Some(folder_id),
+                pinned: false,
+                created_at: "2026-05-03 09:00:00",
+                source_app: None,
+            },
+        )
+        .await;
+
+        delete_folder_in_pool(&database.pool, folder_id)
+            .await
+            .expect("a folder with clips should delete");
+
+        let remaining_folders: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM folders")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining_folders, 0);
+
+        let remaining_folder_id: Option<i64> =
+            sqlx::query_scalar("SELECT folder_id FROM clips WHERE uuid = 'filed'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining_folder_id, None, "members should be unfiled");
+    }
+
+    #[tokio::test]
+    async fn remove_duplicates_deletes_soft_deleted_image_files() {
+        let database = test_database().await;
+        std::fs::create_dir_all(&database.image_dir).unwrap();
+
+        insert_search_clip(
+            &database,
+            SearchFixture::text("keeper", "visible copy", "2026-05-04 09:00:00"),
+        )
+        .await;
+
+        sqlx::query(
+            r#"
+            INSERT INTO clips
+                (uuid, clip_type, content, text_preview, content_hash, is_deleted)
+            VALUES ('gone', 'image', X'', 'Screenshot', 'hash-gone', 1)
+            "#,
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        let gone_path = database.image_dir.join("gone.cubby");
+        std::fs::write(&gone_path, b"full-resolution-bytes").unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO clip_images (clip_uuid, full_content, file_path, file_size, storage_kind)
+            VALUES ('gone', X'', ?, 21, 'file')
+            "#,
+        )
+        .bind(gone_path.to_string_lossy().as_ref())
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        let deleted = remove_duplicate_clips_in_database(&database)
+            .await
+            .expect("duplicate cleanup should succeed");
+        assert_eq!(deleted, 1);
+
+        let remaining: Vec<String> = sqlx::query_scalar("SELECT uuid FROM clips ORDER BY uuid")
+            .fetch_all(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, vec!["keeper"]);
+        assert!(
+            !gone_path.exists(),
+            "the full-resolution file must not outlive the clip row"
+        );
     }
 
     #[tokio::test]

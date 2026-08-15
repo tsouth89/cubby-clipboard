@@ -13,6 +13,7 @@ import { useLanguage } from '../hooks/useLanguage';
 import { useSystemAccent } from '../hooks/useSystemAccent';
 import { useRevealedClips } from '../hooks/useRevealedClips';
 import { customRange, DATE_PRESET_LABELS, DatePreset, presetRange } from '../utils/dateRange';
+import { folderSelectionAfterReload } from '../utils/folderSelection';
 import {
   applySelectionClick,
   EMPTY_SELECTION,
@@ -85,6 +86,8 @@ export function HistoryWindow() {
 
   const clipsRef = useRef<ClipboardItem[]>(clips);
   clipsRef.current = clips;
+  const selectedFolderRef = useRef(selectedFolder);
+  selectedFolderRef.current = selectedFolder;
   // Guards against an older load landing after a newer one and restoring stale
   // results — the same discipline the flyout uses.
   const loadIdRef = useRef(0);
@@ -157,7 +160,13 @@ export function HistoryWindow() {
 
   const loadFolders = useCallback(async () => {
     try {
-      setFolders(await invoke<FolderItem[]>('get_folders'));
+      const data = await invoke<FolderItem[]>('get_folders');
+      setFolders(data);
+      const next = folderSelectionAfterReload(selectedFolderRef.current, data);
+      if (next !== selectedFolderRef.current) {
+        selectedFolderRef.current = next;
+        setSelectedFolder(next);
+      }
     } catch (error) {
       console.error('Failed to load folders:', error);
     }
@@ -201,11 +210,16 @@ export function HistoryWindow() {
   // anywhere shows up here without a manual refresh.
   useEffect(() => {
     const unlistenClipboard = listen('clipboard-change', () => {
-      loadClips(false);
-      loadFolders();
-      refreshTotalCount();
-      // A new clip can introduce an app, or move one up the list.
-      loadSourceApps();
+      void (async () => {
+        const previous = selectedFolderRef.current;
+        await loadFolders();
+        if (selectedFolderRef.current === previous) {
+          loadClips(false);
+        }
+        refreshTotalCount();
+        // A new clip can introduce an app, or move one up the list.
+        loadSourceApps();
+      })();
     });
     const unlistenOcr = listen<string>('ocr-completed', (event) => {
       setClips((previous) =>
@@ -217,12 +231,17 @@ export function HistoryWindow() {
     // the next action against one. Refreshing when the window is focused again
     // catches every such change without a new cross-window event contract.
     const refreshOnFocus = () => {
-      loadClips(false);
-      loadFolders();
-      refreshTotalCount();
-      // Deleting elsewhere can empty out an app, changing its count or dropping
-      // it from the filter list entirely.
-      loadSourceApps();
+      void (async () => {
+        const previous = selectedFolderRef.current;
+        await loadFolders();
+        if (selectedFolderRef.current === previous) {
+          loadClips(false);
+        }
+        refreshTotalCount();
+        // Deleting elsewhere can empty out an app, changing its count or dropping
+        // it from the filter list entirely.
+        loadSourceApps();
+      })();
     };
     window.addEventListener('focus', refreshOnFocus);
 

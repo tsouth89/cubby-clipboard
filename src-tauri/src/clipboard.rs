@@ -1988,12 +1988,29 @@ async fn process_clipboard_snapshot(
     {
         log::error!("CLIPBOARD: Failed to persist auxiliary formats: {}", error);
         if inserted_new {
-            let image_path: Option<String> =
-                sqlx::query_scalar("SELECT file_path FROM clip_images WHERE clip_uuid = ?")
-                    .bind(&emitted_id)
-                    .fetch_optional(pool)
-                    .await
-                    .unwrap_or(None);
+            let image_path: Option<String> = match sqlx::query_scalar(
+                "SELECT file_path FROM clip_images WHERE clip_uuid = ?",
+            )
+            .bind(&emitted_id)
+            .fetch_optional(pool)
+            .await
+            {
+                Ok(path) => path,
+                Err(error) => {
+                    // A failed lookup is not "no row". Cascading the clip
+                    // delete would drop the path before we could collect it,
+                    // so fall back to the managed `{uuid}.cubby` name.
+                    log::warn!(
+                            "CLIPBOARD: Failed to look up image path while rolling back {emitted_id}: {error}"
+                        );
+                    Some(
+                        db.image_dir
+                            .join(format!("{emitted_id}.cubby"))
+                            .to_string_lossy()
+                            .to_string(),
+                    )
+                }
+            };
             match sqlx::query("DELETE FROM clips WHERE uuid = ?")
                 .bind(&emitted_id)
                 .execute(pool)
@@ -2196,11 +2213,25 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
     };
 
     let file_path: Option<String> =
-        sqlx::query_scalar(r#"SELECT file_path FROM clip_images WHERE clip_uuid = ?"#)
+        match sqlx::query_scalar(r#"SELECT file_path FROM clip_images WHERE clip_uuid = ?"#)
             .bind(&recent.uuid)
             .fetch_optional(&mut *transaction)
             .await
-            .unwrap_or(None);
+        {
+            Ok(path) => path,
+            Err(error) => {
+                log::warn!(
+                    "CLIPBOARD: Failed to look up image path while forgetting {}: {error}",
+                    recent.uuid
+                );
+                Some(
+                    db.image_dir
+                        .join(format!("{}.cubby", recent.uuid))
+                        .to_string_lossy()
+                        .to_string(),
+                )
+            }
+        };
 
     // Guarded delete: re-check is_pinned in the same statement so a pin that
     // lands between the earlier SELECT and this DELETE cannot leave orphan
