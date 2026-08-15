@@ -16,6 +16,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Screenshot notes now show on the History row, not only in the preview pane (SBS-807)
 - The image window no longer offers Copy image after the original has expired (SBS-807)
 - Backup export, backup import, and Ditto import now only write or read a path chosen in the file dialog, so a compromised Settings page cannot send history to an arbitrary location (SBS-808)
+- Refuse an encrypted backup export when any live clip field cannot be fully decrypted, and leave an existing destination file unchanged (SBS-772)
 
 ## v1.3.1
 
