@@ -1,3 +1,4 @@
+use sqlx::error::DatabaseError;
 use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -490,24 +491,28 @@ impl Database {
 
 /// Ensure `db_path` is either absent (will be created) or a healthy SQLite file.
 ///
-/// On open/integrity failure the existing `cubby.db` (+ WAL/SHM) is renamed to a
-/// timestamped quarantine name and startup continues with a fresh file. The
-/// DPAPI-protected `storage.key` and image blobs are left alone so a future
-/// manual recovery from the quarantine file can still decrypt.
+/// Quarantine runs only when an integrity check itself reports corruption, or
+/// when SQLite proves the file is not a database. Transient open/query errors
+/// (BUSY, LOCKED, I/O, permissions) leave the original file untouched and
+/// surface a startup error instead (SBS-770).
 async fn prepare_database_file(db_path: &Path) -> Result<(), String> {
     if !db_path.exists() {
         return Ok(());
     }
 
-    match verify_database_quick_check(db_path).await {
-        Ok(()) => {
+    apply_database_health(db_path, assess_database_file(db_path).await).await
+}
+
+async fn apply_database_health(db_path: &Path, health: DatabaseHealth) -> Result<(), String> {
+    match health {
+        DatabaseHealth::Healthy => {
             if let Err(error) = refresh_rolling_backup(db_path).await {
                 // Backup is best-effort; a full disk must not block capture.
                 log::warn!("STORAGE: Could not refresh history backup: {error}");
             }
             Ok(())
         }
-        Err(reason) => {
+        DatabaseHealth::Corrupt { reason } => {
             // Structural diagnostics only: never log row contents.
             log::error!(
                 "STORAGE: Clipboard history database is unusable ({}); quarantining",
@@ -520,6 +525,10 @@ async fn prepare_database_file(db_path: &Path) -> Result<(), String> {
             restore_from_rolling_backup(db_path).await;
             Ok(())
         }
+        DatabaseHealth::Unassessable { reason } => Err(format!(
+            "could not assess clipboard history ({}); the existing database was left untouched",
+            sanitize_storage_diagnostic(&reason)
+        )),
     }
 }
 
@@ -534,12 +543,15 @@ async fn restore_from_rolling_backup(db_path: &Path) {
         return;
     }
 
-    if let Err(error) = verify_database_quick_check(&backup).await {
-        log::error!(
-            "STORAGE: Rolling backup failed verification ({}); starting with an empty history",
-            sanitize_storage_diagnostic(&error)
-        );
-        return;
+    match assess_database_file(&backup).await {
+        DatabaseHealth::Healthy => {}
+        DatabaseHealth::Corrupt { reason } | DatabaseHealth::Unassessable { reason } => {
+            log::error!(
+                "STORAGE: Rolling backup failed verification ({}); starting with an empty history",
+                sanitize_storage_diagnostic(&reason)
+            );
+            return;
+        }
     }
 
     let source = backup.clone();
@@ -558,19 +570,62 @@ async fn restore_from_rolling_backup(db_path: &Path) {
     }
 }
 
-async fn verify_database_quick_check(db_path: &Path) -> Result<(), String> {
+/// How many times a recoverable health-check error is retried before startup
+/// fails without touching the file.
+const HEALTH_CHECK_ATTEMPTS: u32 = 5;
+const HEALTH_CHECK_BUSY_TIMEOUT: Duration = Duration::from_millis(50);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DatabaseHealth {
+    Healthy,
+    /// Integrity check ran and reported damage, or SQLite proved this is not a
+    /// database. The only case that may quarantine.
+    Corrupt {
+        reason: String,
+    },
+    /// Operational error: lock, I/O, permissions. Do not quarantine.
+    Unassessable {
+        reason: String,
+    },
+}
+
+async fn assess_database_file(db_path: &Path) -> DatabaseHealth {
+    let mut last_unassessable = None;
+    for attempt in 0..HEALTH_CHECK_ATTEMPTS {
+        match assess_database_file_once(db_path).await {
+            DatabaseHealth::Healthy => return DatabaseHealth::Healthy,
+            DatabaseHealth::Corrupt { reason } => {
+                return DatabaseHealth::Corrupt { reason };
+            }
+            DatabaseHealth::Unassessable { reason } => {
+                last_unassessable = Some(reason);
+                if attempt + 1 < HEALTH_CHECK_ATTEMPTS {
+                    let delay_ms = 20u64 << attempt.min(4);
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+    }
+    DatabaseHealth::Unassessable {
+        reason: last_unassessable.unwrap_or_else(|| "could not assess database".to_string()),
+    }
+}
+
+async fn assess_database_file_once(db_path: &Path) -> DatabaseHealth {
     use sqlx::Connection;
 
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(db_path)
         .create_if_missing(false)
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .busy_timeout(HEALTH_CHECK_BUSY_TIMEOUT);
 
     // One connection (not a pool) so Windows releases the file handle before
     // quarantine rename runs.
-    let mut conn = sqlx::SqliteConnection::connect_with(&options)
-        .await
-        .map_err(|e| format!("open failed: {e}"))?;
+    let mut conn = match sqlx::SqliteConnection::connect_with(&options).await {
+        Ok(conn) => conn,
+        Err(error) => return classify_health_check_error(&error, "open"),
+    };
 
     // quick_check catches most corruption at startup without a full page walk.
     let result: Result<String, sqlx::Error> = sqlx::query_scalar("PRAGMA quick_check")
@@ -578,6 +633,8 @@ async fn verify_database_quick_check(db_path: &Path) -> Result<(), String> {
         .await;
 
     // Checkpoint so a subsequent file copy of the main DB is consistent.
+    // A checkpoint error is not an integrity verdict: the file may still be
+    // healthy, and failing here must not quarantine or block startup.
     let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
         .execute(&mut conn)
         .await;
@@ -590,10 +647,76 @@ async fn verify_database_quick_check(db_path: &Path) -> Result<(), String> {
     }
 
     match result {
-        Ok(text) if text.eq_ignore_ascii_case("ok") => Ok(()),
-        Ok(text) => Err(format!("quick_check: {text}")),
-        Err(e) => Err(format!("quick_check failed: {e}")),
+        Ok(text) if text.eq_ignore_ascii_case("ok") => DatabaseHealth::Healthy,
+        Ok(text) => DatabaseHealth::Corrupt {
+            reason: format!("quick_check: {text}"),
+        },
+        Err(error) => classify_health_check_error(&error, "quick_check"),
     }
+}
+
+/// Kept for tests that only need "usable or not".
+async fn verify_database_quick_check(db_path: &Path) -> Result<(), String> {
+    match assess_database_file(db_path).await {
+        DatabaseHealth::Healthy => Ok(()),
+        DatabaseHealth::Corrupt { reason } | DatabaseHealth::Unassessable { reason } => Err(reason),
+    }
+}
+
+fn classify_health_check_error(error: &sqlx::Error, stage: &str) -> DatabaseHealth {
+    match error {
+        sqlx::Error::Database(database_error) => classify_sqlite_health_failure(
+            database_error.code().as_deref(),
+            &format!("{stage} failed: {database_error}"),
+        ),
+        sqlx::Error::Io(io_error) => DatabaseHealth::Unassessable {
+            reason: format!("{stage} failed: {io_error}"),
+        },
+        sqlx::Error::PoolTimedOut => DatabaseHealth::Unassessable {
+            reason: format!("{stage} failed: timed out"),
+        },
+        other => classify_sqlite_health_failure(None, &format!("{stage} failed: {other}")),
+    }
+}
+
+fn classify_sqlite_health_failure(code: Option<&str>, reason: &str) -> DatabaseHealth {
+    if sqlite_failure_is_corruption(code, reason) {
+        DatabaseHealth::Corrupt {
+            reason: reason.to_string(),
+        }
+    } else {
+        DatabaseHealth::Unassessable {
+            reason: reason.to_string(),
+        }
+    }
+}
+
+fn sqlite_failure_is_corruption(code: Option<&str>, reason: &str) -> bool {
+    if let Some(primary) = sqlite_primary_result_code(code) {
+        // SQLITE_CORRUPT = 11, SQLITE_NOTADB = 26.
+        if primary == 11 || primary == 26 {
+            return true;
+        }
+        // Operational primary codes are never treated as corruption.
+        if matches!(primary, 3 | 5 | 6 | 8 | 10 | 13 | 14 | 15) {
+            return false;
+        }
+    }
+
+    let lower = reason.to_ascii_lowercase();
+    lower.contains("not a database")
+        || lower.contains("file is encrypted or is not a database")
+        || lower.contains("malformed")
+}
+
+fn sqlite_primary_result_code(code: Option<&str>) -> Option<i64> {
+    let code = code?;
+    let parsed = code
+        .strip_prefix("SQLITE_")
+        .unwrap_or(code)
+        .parse::<i64>()
+        .ok()?;
+    Some(parsed & 0xff)
 }
 
 async fn refresh_rolling_backup(db_path: &Path) -> Result<(), String> {
@@ -869,9 +992,10 @@ async fn add_column_if_missing(pool: &SqlitePool, sql: &str) -> Result<(), sqlx:
 #[cfg(test)]
 mod tests {
     use super::{
-        prepare_database_file, quarantine_database_files, replace_backup_atomically,
-        rolling_backup_path, sanitize_storage_diagnostic, should_skip_backup_refresh,
-        verify_database_quick_check, Database,
+        apply_database_health, classify_sqlite_health_failure, prepare_database_file,
+        quarantine_database_files, replace_backup_atomically, rolling_backup_path,
+        sanitize_storage_diagnostic, should_skip_backup_refresh, sqlite_failure_is_corruption,
+        verify_database_quick_check, Database, DatabaseHealth,
     };
     use crate::crypto::CryptoManager;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -1599,6 +1723,82 @@ mod tests {
         assert!(!clean.contains('\n'));
         assert!(!clean.contains('\u{7}'));
         assert!(clean.chars().count() <= 183);
+    }
+
+    #[test]
+    fn busy_locked_and_io_errors_are_not_corruption() {
+        for (code, message) in [
+            (Some("5"), "open failed: database is locked"),
+            (Some("6"), "quick_check failed: database table is locked"),
+            (Some("10"), "open failed: disk I/O error"),
+            (Some("14"), "open failed: unable to open database file"),
+            (Some("261"), "open failed: database is locked"),
+            (None, "open failed: permission denied"),
+        ] {
+            assert!(
+                !sqlite_failure_is_corruption(code, message),
+                "{code:?} {message} must not quarantine"
+            );
+            assert!(matches!(
+                classify_sqlite_health_failure(code, message),
+                DatabaseHealth::Unassessable { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn integrity_and_notadb_failures_are_corruption() {
+        assert!(matches!(
+            classify_sqlite_health_failure(Some("26"), "open failed: file is not a database"),
+            DatabaseHealth::Corrupt { .. }
+        ));
+        assert!(matches!(
+            classify_sqlite_health_failure(Some("11"), "quick_check failed: malformed"),
+            DatabaseHealth::Corrupt { .. }
+        ));
+        assert!(sqlite_failure_is_corruption(
+            None,
+            "open failed: file is not a database"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_transient_health_error_leaves_the_database_untouched() {
+        let directory = temp_dir();
+        let database_path = directory.join("cubby.db");
+        let payload = b"keep-this-history-file";
+        std::fs::write(&database_path, payload).unwrap();
+
+        let result = apply_database_health(
+            &database_path,
+            DatabaseHealth::Unassessable {
+                reason: "database is locked".to_string(),
+            },
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a transient failure must surface a startup error, got {result:?}"
+        );
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("left untouched"),
+            "expected a non-destructive error, got: {error}"
+        );
+        assert!(database_path.exists(), "original path must remain");
+        assert_eq!(std::fs::read(&database_path).unwrap(), payload);
+        let quarantined: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("corrupt-"))
+            .collect();
+        assert!(
+            quarantined.is_empty(),
+            "transient errors must not quarantine, got {quarantined:?}"
+        );
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
