@@ -633,6 +633,7 @@ fn next_toggle_request(pending: Option<FlyoutRequest>, visible_and_focused: bool
 /// Wait for the show/hide lock on a worker. Never sleep on the caller: tray
 /// clicks and hotkeys run on Tauri's event loop, and the show worker needs
 /// that loop to answer monitor/hwnd queries.
+#[cfg(test)]
 fn with_animation_guard_nonblocking(
     on_ready: impl FnOnce(Option<AnimationGuard>) + Send + 'static,
 ) {
