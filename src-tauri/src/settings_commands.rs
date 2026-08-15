@@ -21,9 +21,11 @@ pub async fn get_settings(app: AppHandle) -> Result<serde_json::Value, String> {
             "startup_available".to_string(),
             serde_json::json!(startup_available),
         );
+        // Same source as the plugin registration in lib.rs, so the reported
+        // capability cannot claim an updater that was never installed.
         obj.insert(
             "self_update_available".to_string(),
-            serde_json::json!(!store_build),
+            serde_json::json!(crate::self_update_supported()),
         );
         if !startup_available {
             obj.insert("startup_with_windows".to_string(), serde_json::json!(false));

@@ -10,13 +10,61 @@ const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 const TEXT_PREFIX: &str = "CUB1:";
 
-fn load_protected_key(key_path: &Path) -> Result<[u8; KEY_LEN], String> {
+/// Why Cubby could not open its encrypted storage.
+///
+/// Everything except a DPAPI account mismatch collapses into `Other`, which
+/// carries the same text the callers used to produce. The mismatch is separated
+/// because it is the one failure with a real recovery path, and the one a user
+/// can reach without anything being broken: DPAPI ties the storage key to the
+/// Windows account that created it, so carrying a portable folder to another
+/// user or PC produces exactly this and nothing else.
+#[derive(Debug)]
+pub enum StorageError {
+    /// The key file is present and intact, but this Windows account cannot
+    /// unprotect it. The key and database are left untouched, so the original
+    /// account can still read them.
+    KeyNotForThisUser {
+        key_path: std::path::PathBuf,
+        detail: String,
+    },
+    Other(String),
+}
+
+impl std::fmt::Display for StorageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::KeyNotForThisUser { key_path, detail } => write!(
+                formatter,
+                "the storage key at {} belongs to a different Windows account: {detail}",
+                key_path.display()
+            ),
+            Self::Other(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl From<String> for StorageError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+fn load_protected_key(key_path: &Path) -> Result<[u8; KEY_LEN], StorageError> {
     let protected = std::fs::read(key_path)
         .map_err(|e| format!("failed to read protected storage key: {e}"))?;
-    let plaintext = unprotect_for_current_user(&protected)?;
+    // A failure here is an account mismatch, not corruption: the bytes were
+    // read fine and DPAPI refused them. Reported separately so startup can
+    // explain it instead of dying, and so nothing treats it as a reason to
+    // recreate the key over a database only the other account can read.
+    let plaintext = unprotect_for_current_user(&protected).map_err(|detail| {
+        StorageError::KeyNotForThisUser {
+            key_path: key_path.to_path_buf(),
+            detail,
+        }
+    })?;
     plaintext
         .try_into()
-        .map_err(|_| "protected storage key has an invalid length".to_string())
+        .map_err(|_| StorageError::Other("protected storage key has an invalid length".to_string()))
 }
 
 #[derive(Clone)]
@@ -25,16 +73,16 @@ pub struct CryptoManager {
 }
 
 impl CryptoManager {
-    pub fn load_or_create(db_path: &Path, allow_create: bool) -> Result<Self, String> {
+    pub fn load_or_create(db_path: &Path, allow_create: bool) -> Result<Self, StorageError> {
         let key_path = db_path.with_file_name("storage.key");
         let key = if key_path.exists() {
             load_protected_key(&key_path)?
         } else {
             if !allow_create {
-                return Err(
+                return Err(StorageError::Other(
                     "encrypted clipboard history exists, but its protected storage key is missing"
                         .to_string(),
-                );
+                ));
             }
             let mut key = [0_u8; KEY_LEN];
             getrandom::fill(&mut key)
@@ -62,7 +110,9 @@ impl CryptoManager {
                 }
                 Err(error) => {
                     let _ = std::fs::remove_file(&temporary_path);
-                    return Err(format!("failed to install protected storage key: {error}"));
+                    return Err(StorageError::Other(format!(
+                        "failed to install protected storage key: {error}"
+                    )));
                 }
             }
         };
@@ -231,7 +281,7 @@ fn unprotect_for_current_user(_protected: &[u8]) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CryptoManager, KEY_LEN};
+    use super::{CryptoManager, StorageError, KEY_LEN};
 
     #[test]
     fn encrypted_payloads_round_trip_and_detect_tampering() {
@@ -328,8 +378,48 @@ mod tests {
         let error = CryptoManager::load_or_create(&database_path, false)
             .err()
             .expect("missing protected key should fail");
-        assert!(error.contains("storage key is missing"));
+        assert!(error.to_string().contains("storage key is missing"));
+        assert!(matches!(error, StorageError::Other(_)));
         assert!(!directory.join("storage.key").exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A key this account cannot unprotect must be reported as its own thing,
+    /// not folded in with corruption or a missing file. Startup keys the
+    /// recovery dialog off that distinction, and the wrong classification would
+    /// send a portable user carrying their folder between accounts back to a
+    /// bare panic.
+    ///
+    /// Bytes DPAPI will refuse stand in for another account's key: an actual
+    /// cross-account key cannot be produced from inside one test process, and
+    /// `CryptUnprotectData` rejects both for the same reason.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn unreadable_key_is_reported_as_belonging_to_another_account() {
+        let directory =
+            std::env::temp_dir().join(format!("cubby-key-foreign-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database_path = directory.join("cubby.db");
+        let key_path = directory.join("storage.key");
+        std::fs::write(&key_path, b"not a DPAPI blob this account can open").unwrap();
+
+        let error = CryptoManager::load_or_create(&database_path, true)
+            .err()
+            .expect("an unreadable key must not silently create a new one");
+
+        match &error {
+            StorageError::KeyNotForThisUser {
+                key_path: reported, ..
+            } => assert_eq!(reported, &key_path),
+            other => panic!("expected KeyNotForThisUser, got {other:?}"),
+        }
+        // The whole point: the user's key is still on disk, so the original
+        // account can still read the database it belongs to.
+        assert!(key_path.exists());
+        assert_eq!(
+            std::fs::read(&key_path).unwrap(),
+            b"not a DPAPI blob this account can open"
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -2227,8 +2227,10 @@ pub struct StorageReclaim {
 
 /// The Cubby history data directory: `cubby.db` (+ its `-wal`/`-shm` sidecars),
 /// the `images/` blob directory, and `storage.key`. It is `image_dir`'s parent
-/// (`image_dir` is `<data_dir>/images`). Tauri writes logs to a separate LogDir,
-/// so everything here is history state.
+/// (`image_dir` is `<data_dir>/images`). Logs go to their own directory
+/// (`lib.rs::persistent_log_target`), so everything here is history state. In
+/// portable mode that log directory is `<data_dir>/logs`, a sibling of
+/// `images/` rather than a child, so it is still outside this accounting.
 fn history_data_dir(db: &Database) -> std::path::PathBuf {
     db.image_dir
         .parent()

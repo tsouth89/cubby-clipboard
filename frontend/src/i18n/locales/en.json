@@ -165,6 +165,7 @@
     "versionLabel": "Version {{version}}",
     "checkUpdates": "Check for updates",
     "upToDate": "You're on the latest version.",
+    "portableUpdateNote": "The portable version does not update itself. To upgrade, download the newest portable ZIP and replace Cubby Clipboard.exe. Keep the 'data' folder and portable.txt next to it and your history, settings, and folders carry over.",
     "sourceCode": "Source code on GitHub",
     "privacyPolicy": "Privacy policy",
     "linkFailed": "Could not open {{url}} in your browser.",

@@ -1700,6 +1700,20 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                           </button>
                         )}
                       </div>
+                      {/* Portable builds have no self-update: it installs an
+                          NSIS package, which would split the app from the data
+                          folder the user carries with it. Say how to upgrade by
+                          hand instead of leaving a version number and no path
+                          forward. Store builds need nothing here — Windows
+                          updates them. */}
+                      {settings.self_update_available === false && settings.is_portable && (
+                        <div className="flex gap-3 px-4 py-3.5">
+                          <Info size={16} className="mt-0.5 flex-shrink-0 text-muted-foreground" />
+                          <p className="text-xs leading-relaxed text-muted-foreground">
+                            {t('settings.portableUpdateNote')}
+                          </p>
+                        </div>
+                      )}
                       <button
                         onClick={() => handleOpenUrl(GITHUB_URL)}
                         className="flex w-full items-center gap-3 px-4 py-3 text-sm transition-colors hover:bg-accent/40"
