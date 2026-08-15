@@ -52,6 +52,7 @@ impl Drop for AnimationGuard {
 
 mod backup;
 mod cf_html;
+mod clip_list;
 mod clipboard;
 mod clipboard_policy;
 mod commands;

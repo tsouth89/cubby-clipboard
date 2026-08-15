@@ -1,6 +1,5 @@
 use crate::database::Database;
 use crate::models::{Clip, ClipboardItem, Folder, FolderItem, OcrHighlights, OcrMatch, OcrRect};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use clipboard_rs::common::RustImage;
 use clipboard_rs::{Clipboard, ClipboardContent, ClipboardContext, RustImageData};
 use sqlx::SqlitePool;
@@ -9,53 +8,29 @@ use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
 
-fn clip_to_list_item(clip: &Clip) -> ClipboardItem {
+fn clip_to_list_item(clip: &Clip, preview_only: bool) -> ClipboardItem {
     // A hidden clip ships no content and no preview — not even a thumbnail.
     // Blanking it in the frontend instead would leave the secret sitting in the
     // renderer's memory and in every IPC payload, which makes "hidden" a
     // decoration rather than a property. Revealing for the session fetches the
     // real payload on demand through get_clip_details.
-    if clip.is_hidden {
-        return ClipboardItem {
-            id: clip.uuid.clone(),
-            clip_type: clip.clip_type.clone(),
-            content: String::new(),
-            preview: String::new(),
-            folder_id: clip.folder_id.map(|id| id.to_string()),
-            is_pinned: clip.is_pinned,
-            created_at: clip.created_at.to_rfc3339(),
-            source_app: clip.source_app.clone(),
-            source_icon: clip.source_icon.clone(),
-            metadata: clip.metadata.clone(),
-            has_ocr_text: clip
-                .ocr_text
-                .as_deref()
-                .is_some_and(|text| !text.trim().is_empty()),
-            // Search snippets and highlight boxes are made of the very text
-            // being hidden, so they have to go too.
-            ocr_match: None,
-            ocr_highlights: None,
-            image_expired: clip.full_image_expired,
-            // The note goes too. It is text the user wrote *about* this clip —
-            // "AWS root password" is a plausible note on exactly the kind of
-            // clip worth hiding — so shipping it would put the secret back on
-            // the row by another route. Revealing fetches it with the payload.
-            notes: None,
-            is_hidden: true,
-        };
-    }
-
-    let content_str = if clip.clip_type == "image" {
-        BASE64.encode(&clip.content)
-    } else {
-        String::from_utf8_lossy(&clip.content).to_string()
-    };
-
+    //
+    // preview_only is what the flyout and History window already request.
+    // ClipCard only renders the truncated preview (and the image thumbnail),
+    // and paste/copy go by uuid, so the full decrypted body does not belong
+    // on a text list row. Image rows still ship the thumbnail in `content`
+    // because that is what imageSrcFromContent displays.
+    let hidden = clip.is_hidden;
     ClipboardItem {
         id: clip.uuid.clone(),
         clip_type: clip.clip_type.clone(),
-        content: content_str,
-        preview: clip.text_preview.clone(),
+        content: crate::clip_list::list_item_content(
+            &clip.clip_type,
+            &clip.content,
+            preview_only,
+            hidden,
+        ),
+        preview: crate::clip_list::list_item_preview(&clip.text_preview, hidden),
         folder_id: clip.folder_id.map(|id| id.to_string()),
         is_pinned: clip.is_pinned,
         created_at: clip.created_at.to_rfc3339(),
@@ -66,11 +41,17 @@ fn clip_to_list_item(clip: &Clip) -> ClipboardItem {
             .ocr_text
             .as_deref()
             .is_some_and(|text| !text.trim().is_empty()),
+        // Search snippets and highlight boxes are made of the very text
+        // being hidden, so they have to go too.
         ocr_match: None,
         ocr_highlights: None,
         image_expired: clip.full_image_expired,
-        notes: clip.notes.clone(),
-        is_hidden: false,
+        // The note goes too on a hidden row. It is text the user wrote *about*
+        // this clip — "AWS root password" is a plausible note on exactly the
+        // kind of clip worth hiding — so shipping it would put the secret back
+        // on the row by another route. Revealing fetches it with the payload.
+        notes: crate::clip_list::list_item_notes(clip.notes.as_deref(), hidden),
+        is_hidden: hidden,
     }
 }
 
@@ -330,7 +311,8 @@ fn build_ocr_match(ocr_text: &str, query: &str) -> Option<OcrMatch> {
 }
 
 fn clip_to_search_item(clip: &Clip, query: &str) -> ClipboardItem {
-    let mut item = clip_to_list_item(clip);
+    // Search has no preview_only flag; SBS-829 is the get_clips list path.
+    let mut item = clip_to_list_item(clip, false);
     // Hidden list rows already blank content, notes, and OCR snippets.
     // Search must not write those fields back from the decrypted image OCR.
     if clip.is_hidden {
@@ -1131,7 +1113,7 @@ async fn get_clips_in_database(
         .iter()
         .enumerate()
         .map(|(idx, clip)| {
-            let item = clip_to_list_item(clip);
+            let item = clip_to_list_item(clip, preview_only);
             // Only log first 10 clips to reduce noise
             if idx < 10 {
                 log::trace!(
@@ -2776,16 +2758,15 @@ async fn get_clip_details_in_database(db: &Database, id: &str) -> Result<ClipDet
     decrypt_clip_fields(db, &mut clip)?;
 
     let image_expired = clip.full_image_expired;
-    let content = if clip.clip_type == "image" {
-        if image_expired {
-            // Only the thumbnail survives. Hand it back so the pane still shows
-            // something, flagged so the UI can say the original is gone.
-            BASE64.encode(&clip.content)
-        } else {
-            BASE64.encode(&load_full_image_content(db, &mut clip).await?)
-        }
+    let content = if clip.clip_type == "image" && !image_expired {
+        crate::clip_list::details_item_content(
+            &clip.clip_type,
+            &load_full_image_content(db, &mut clip).await?,
+        )
     } else {
-        String::from_utf8_lossy(&clip.content).to_string()
+        // Text, or an image whose full blob was dropped by retention: the
+        // surviving bytes (thumbnail for the latter) are what the pane shows.
+        crate::clip_list::details_item_content(&clip.clip_type, &clip.content)
     };
 
     let ocr_layout = clip
@@ -3034,6 +3015,7 @@ mod tests {
     use crate::clipboard::CapturedFormat;
     use crate::database::Database;
     use crate::models::Clip;
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use sqlx::sqlite::SqlitePoolOptions;
     use std::sync::Arc;
 
@@ -3822,8 +3804,131 @@ mod tests {
             get_clips_in_database(None, 10, 0, Some(true), None, None, None, None, &database)
                 .await
                 .unwrap();
-        assert_eq!(items[0].content, "swordfish token 8821");
         assert!(!items[0].is_hidden);
+        // preview_only still withholds the body after unhide; the row shows
+        // the stored preview, and get_clip_details remains the reveal path.
+        assert!(items[0].content.is_empty());
+        assert_eq!(items[0].preview, "swordfish token 8821");
+    }
+
+    #[tokio::test]
+    async fn preview_only_list_withholds_full_text_but_details_still_return_it() {
+        let database = test_database().await;
+        // A unique suffix so we can prove the full body is absent, not just
+        // that the preview happens to look similar.
+        let secret = "UNIQUE-SBS-829-SECRET-TOKEN-8821-DO-NOT-SHIP";
+        let full_body = format!("{}{secret}", "copied log line\n".repeat(200));
+        assert!(
+            full_body.len() > 2000,
+            "the fixture must be large enough that preview cannot be the whole body"
+        );
+        insert_search_clip(
+            &database,
+            SearchFixture {
+                id: "dump",
+                clip_type: "text",
+                content: &full_body,
+                preview: "copied log line",
+                ocr: None,
+                folder_id: None,
+                pinned: false,
+                created_at: "2026-08-15 09:00:00",
+                source_app: None,
+            },
+        )
+        .await;
+        insert_search_clip(
+            &database,
+            SearchFixture {
+                id: "shot",
+                clip_type: "image",
+                content: "thumb-png-bytes",
+                preview: "Screenshot",
+                ocr: None,
+                folder_id: None,
+                pinned: false,
+                created_at: "2026-08-15 08:00:00",
+                source_app: None,
+            },
+        )
+        .await;
+
+        let preview_only =
+            get_clips_in_database(None, 10, 0, Some(true), None, None, None, None, &database)
+                .await
+                .unwrap();
+        let dump = preview_only
+            .iter()
+            .find(|item| item.id == "dump")
+            .expect("the text dump should be listed");
+        assert!(
+            dump.content.is_empty(),
+            "preview_only text rows must not ship the decrypted body"
+        );
+        assert_eq!(dump.preview, "copied log line");
+        assert!(
+            !dump.content.contains(secret),
+            "the unique secret must not appear in list content"
+        );
+        assert!(
+            !dump.preview.contains(secret),
+            "the stored preview is the truncated list text, not the full dump"
+        );
+
+        let shot = preview_only
+            .iter()
+            .find(|item| item.id == "shot")
+            .expect("the image should be listed");
+        assert_eq!(
+            shot.content,
+            BASE64.encode(b"thumb-png-bytes"),
+            "image rows still ship the thumbnail preview_only is meant to keep"
+        );
+        assert_eq!(shot.preview, "Screenshot");
+
+        let full =
+            get_clips_in_database(None, 10, 0, Some(false), None, None, None, None, &database)
+                .await
+                .unwrap();
+        let dump_full = full
+            .iter()
+            .find(|item| item.id == "dump")
+            .expect("the text dump should be listed");
+        assert_eq!(dump_full.content, full_body);
+        assert!(dump_full.content.contains(secret));
+
+        let omitted = get_clips_in_database(None, 10, 0, None, None, None, None, None, &database)
+            .await
+            .unwrap();
+        let dump_omitted = omitted
+            .iter()
+            .find(|item| item.id == "dump")
+            .expect("the text dump should be listed");
+        assert_eq!(
+            dump_omitted.content, full_body,
+            "omitting preview_only keeps today's full-content list payload"
+        );
+
+        toggle_clip_hidden_in_pool(&database.pool, "dump")
+            .await
+            .expect("hide should apply");
+        let hidden =
+            get_clips_in_database(None, 10, 0, Some(true), None, None, None, None, &database)
+                .await
+                .unwrap();
+        let dump_hidden = hidden
+            .iter()
+            .find(|item| item.id == "dump")
+            .expect("a hidden clip is still listed");
+        assert!(dump_hidden.is_hidden);
+        assert!(dump_hidden.content.is_empty());
+        assert!(dump_hidden.preview.is_empty());
+
+        let details = get_clip_details_in_database(&database, "dump")
+            .await
+            .unwrap();
+        assert_eq!(details.content, full_body);
+        assert!(details.content.contains(secret));
     }
 
     #[tokio::test]
