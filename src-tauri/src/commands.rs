@@ -719,7 +719,10 @@ pub async fn migrate_clip_format_model(db: &Database) -> Result<u64, String> {
     Ok(clips.len() as u64)
 }
 
-async fn load_full_image_content(db: &Database, clip: &mut Clip) -> Result<Vec<u8>, String> {
+pub(crate) async fn load_full_image_content(
+    db: &Database,
+    clip: &mut Clip,
+) -> Result<Vec<u8>, String> {
     let pool = &db.pool;
     if clip.clip_type != "image" {
         return Err("Clip is not an image".to_string());
