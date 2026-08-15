@@ -10,45 +10,9 @@ use tauri::{
 #[cfg(not(feature = "app-store"))]
 use tauri_plugin_autostart::MacosLauncher;
 
-static IS_ANIMATING: AtomicBool = AtomicBool::new(false);
 static LAST_SHOW_TIME: AtomicI64 = AtomicI64::new(0);
 static SHOW_GENERATION: AtomicU64 = AtomicU64::new(0);
 static FLYOUT_WORKER_LIVE: AtomicBool = AtomicBool::new(false);
-const ANIMATION_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(1_000);
-
-/// Releases the show/hide lock even if a worker unwinds. A detached window
-/// thread panic must not leave Cubby permanently unable to open again.
-struct AnimationGuard;
-
-impl AnimationGuard {
-    fn acquire() -> Option<Self> {
-        IS_ANIMATING
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .ok()
-            .map(|_| Self)
-    }
-
-    /// Wait briefly for an in-flight show/hide instead of dropping the request.
-    /// A missed toggle leaves the flyout in the opposite state from the keypress.
-    fn acquire_within(timeout: std::time::Duration) -> Option<Self> {
-        let deadline = std::time::Instant::now() + timeout;
-        loop {
-            if let Some(guard) = Self::acquire() {
-                return Some(guard);
-            }
-            if std::time::Instant::now() >= deadline {
-                return None;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    }
-}
-
-impl Drop for AnimationGuard {
-    fn drop(&mut self) {
-        IS_ANIMATING.store(false, Ordering::SeqCst);
-    }
-}
 
 mod backup;
 mod cf_html;
@@ -85,10 +49,15 @@ mod settings_manager;
 mod shortcuts;
 pub mod win_v_activation;
 mod win_v_replacement;
+mod window_state;
 
 use database::Database;
 use models::get_runtime;
 use settings_manager::SettingsManager;
+use window_state::{
+    click_hits_owned_hwnd, is_new_mouse_press, outside_click_watcher_should_exit,
+    should_ignore_blur, AnimationGuard, ANIMATION_LOCK_WAIT, IS_ANIMATING,
+};
 
 fn to_plugin_log_target(target: log_targets::LogTarget) -> tauri_plugin_log::Target {
     match target {
@@ -274,8 +243,7 @@ pub fn run_app() {
                     // Debounce: Ignore blur events immediately after showing
                     let last_show = LAST_SHOW_TIME.load(Ordering::SeqCst);
                     let now = chrono::Local::now().timestamp_millis();
-                    let debounce_ms = 500;
-                    if now - last_show < debounce_ms {
+                    if should_ignore_blur(now, last_show) {
                         return;
                     }
 
@@ -1032,13 +1000,6 @@ fn point_is_inside_rect(
     point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
 }
 
-/// True when the top-level window under the cursor is one of our visible
-/// owned HWNDs. Rect overlap is not enough: History/image can sit behind
-/// another app and still cover most of the monitor.
-fn click_hits_owned_hwnd(top_hwnd: isize, top_visible: bool, owned_visible: &[isize]) -> bool {
-    top_visible && owned_visible.contains(&top_hwnd)
-}
-
 fn any_mouse_button_down() -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
@@ -1112,15 +1073,17 @@ fn watch_for_outside_click(window: tauri::WebviewWindow, generation: u64) {
         let mut buttons_were_down = any_mouse_button_down();
 
         loop {
-            if SHOW_GENERATION.load(Ordering::SeqCst) != generation
-                || !window.is_visible().unwrap_or(false)
-            {
+            if outside_click_watcher_should_exit(
+                SHOW_GENERATION.load(Ordering::SeqCst),
+                generation,
+                window.is_visible().unwrap_or(false),
+            ) {
                 break;
             }
 
             let buttons_down = any_mouse_button_down();
 
-            if buttons_down && !buttons_were_down {
+            if is_new_mouse_press(buttons_down, buttons_were_down) {
                 if let Some(cursor) = cursor_position() {
                     if !click_is_on_owned_window(window.app_handle(), cursor) {
                         animate_window_hide(&window, None);
