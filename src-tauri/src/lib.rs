@@ -68,6 +68,7 @@ mod crypto;
 mod database;
 mod ditto_import;
 mod image_persist;
+mod log_targets;
 mod models;
 mod ocr;
 mod ocr_queue;
@@ -88,6 +89,20 @@ mod win_v_replacement;
 use database::Database;
 use models::get_runtime;
 use settings_manager::SettingsManager;
+
+fn to_plugin_log_target(target: log_targets::LogTarget) -> tauri_plugin_log::Target {
+    match target {
+        log_targets::LogTarget::Stdout => {
+            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout)
+        }
+        log_targets::LogTarget::Webview => {
+            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview)
+        }
+        log_targets::LogTarget::LogDir => {
+            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: None })
+        }
+    }
+}
 
 pub fn run_app() {
     let data_dir = get_data_dir();
@@ -179,21 +194,12 @@ pub fn run_app() {
         })
         .level_for("sqlx", log::LevelFilter::Warn);
 
-    #[cfg(debug_assertions)]
-    {
-        log_builder = log_builder.targets([
-            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
-            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
-        ]);
-    }
-
-    #[cfg(not(debug_assertions))]
-    {
-        log_builder = log_builder.targets([
-            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: None }),
-            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
-        ]);
-    }
+    log_builder = log_builder.targets(
+        log_targets::log_targets(cfg!(debug_assertions))
+            .iter()
+            .copied()
+            .map(to_plugin_log_target),
+    );
 
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();

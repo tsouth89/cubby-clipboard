@@ -34,6 +34,8 @@ const [
   publishStoreWorkflow,
   validateStoreWorkflow,
   verifyInstallerSignature,
+  libSource,
+  logTargetsSource,
 ] = await Promise.all([
   read('package.json'),
   read('src-tauri/tauri.conf.json'),
@@ -58,6 +60,8 @@ const [
   read('.github/workflows/publish-store-packages.yml'),
   read('.github/workflows/validate-store-submission.yml'),
   read('scripts/verify-installer-signature.ps1'),
+  read('src-tauri/src/lib.rs'),
+  read('src-tauri/src/log_targets.rs'),
 ]);
 
 const packageVersion = JSON.parse(packageText).version;
@@ -271,6 +275,35 @@ for (const sensitiveLogFragment of ['Detected self-paste for hash', 'full_path: 
   if (clipboardSource.includes(sensitiveLogFragment)) {
     throw new Error(`Clipboard source contains privacy-sensitive production logging: ${sensitiveLogFragment}`);
   }
+}
+
+// SBS-837: release builds must not stream Rust logs into the WebView.
+// Prefer an inline `#[cfg(not(debug_assertions))]` targets list when present;
+// otherwise the production arm of `log_targets()` is the source of truth.
+const inlineReleaseTargets = libSource.match(
+  /#\[cfg\(not\(debug_assertions\)\)\][\s\S]*?\.targets\(\[([\s\S]*?)\]\)/,
+)?.[1];
+if (inlineReleaseTargets?.includes('Webview')) {
+  throw new Error('Release log_builder.targets must not include Webview');
+}
+
+if (!libSource.includes('log_targets(cfg!(debug_assertions))')) {
+  throw new Error(
+    'lib.rs must install logger targets from log_targets(cfg!(debug_assertions))',
+  );
+}
+
+const productionLogTargets = logTargetsSource.match(
+  /if debug_assertions \{[\s\S]*?\} else \{([\s\S]*?)\}/,
+)?.[1];
+if (!productionLogTargets) {
+  throw new Error('Could not find the production arm of log_targets()');
+}
+if (productionLogTargets.includes('Webview')) {
+  throw new Error('Release log_builder.targets must not include Webview');
+}
+if (!productionLogTargets.includes('LogDir')) {
+  throw new Error('Release log_builder.targets must still include LogDir');
 }
 
 const secretGates = [
