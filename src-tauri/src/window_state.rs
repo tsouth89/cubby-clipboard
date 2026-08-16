@@ -131,6 +131,15 @@ mod tests {
                 AnimationGuard::acquire_on(&FLAG).is_none(),
                 "the toggle is dropped if a second animation can start"
             );
+            // `is_none()` alone would not catch `then_some`: it builds the
+            // guard before it reads the bool, so a *failed* acquire would
+            // construct one and immediately drop it, clearing the flag out
+            // from under the show/hide that still holds it. Win+V takes this
+            // path (`acquire`) before it ever reaches `acquire_within`.
+            assert!(
+                FLAG.load(Ordering::SeqCst),
+                "a failed acquire must leave the in-flight animation holding the lock"
+            );
         }
         assert!(
             !FLAG.load(Ordering::SeqCst),
@@ -186,16 +195,45 @@ mod tests {
         );
     }
 
+    /// Goes through `acquire_within_on`, not `lock_animation_within`. Testing
+    /// the raw helper leaves the guard-returning wrapper uncovered on its
+    /// success path: a body that waited, took the lock, and still returned
+    /// `None` would pass every other test here, and `kick_flyout_worker` reads
+    /// that `None` as a dropped request while `IS_ANIMATING` stays true — so
+    /// every later Win+V waits a second and gives up until restart.
     #[test]
     fn acquire_within_succeeds_after_the_holder_drops() {
+        static FLAG: AtomicBool = AtomicBool::new(true);
+        let unlocker = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(25));
+            unlock_animation(&FLAG);
+        });
+        // Seconds, not milliseconds: the assertion is "the wait succeeds once
+        // the holder drops", not "the runner scheduled the unlocker on time".
+        let guard = AnimationGuard::acquire_within_on(&FLAG, Duration::from_secs(30))
+            .expect("waiting for the lock must succeed once the in-flight show/hide drops it");
+        assert!(
+            FLAG.load(Ordering::SeqCst),
+            "a successful wait must hold the lock, not merely report success"
+        );
+        drop(guard);
+        assert!(
+            !FLAG.load(Ordering::SeqCst),
+            "the waited-for guard must release the lock like any other"
+        );
+        unlocker.join().expect("the unlocker thread must not panic");
+    }
+
+    /// The raw helper on its own, kept because `acquire_within_on` is a thin
+    /// wrapper over it and a bug in either one is worth naming separately.
+    #[test]
+    fn lock_animation_within_succeeds_after_the_holder_drops() {
         let flag = Arc::new(AtomicBool::new(true));
         let released = flag.clone();
         let unlocker = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(25));
             unlock_animation(&released);
         });
-        // Seconds, not milliseconds: the assertion is "the wait succeeds once
-        // the holder drops", not "the runner scheduled the unlocker on time".
         assert!(
             lock_animation_within(&flag, Duration::from_secs(30)),
             "waiting for the lock must succeed once the in-flight show/hide drops it"
