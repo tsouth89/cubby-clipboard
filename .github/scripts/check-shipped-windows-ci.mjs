@@ -162,16 +162,20 @@ function jobProblems(job) {
   if (!/\bmkdir\s+dist\b/.test(body) && !/New-Item[^\n]*\bdist\b/.test(body)) {
     problems.push('job must create dist so tauri generate_context can see frontendDist');
   }
-  if (!/--manifest-path\s+src-tauri\/Cargo\.toml/.test(body)) {
+  const checkLines = body
+    .split('\n')
+    .filter((line) => /cargo\s+check\b/.test(line))
+    .join('\n');
+  if (!/--manifest-path\s+src-tauri\/Cargo\.toml/.test(checkLines)) {
     problems.push('cargo check must use --manifest-path src-tauri/Cargo.toml');
   }
-  if (!/--target\s+\$\{\{\s*matrix\.target\s*\}\}/.test(body)) {
+  if (!/--target\s+\$\{\{\s*matrix\.target\s*\}\}/.test(checkLines)) {
     problems.push('cargo check must pass --target ${{ matrix.target }}');
   }
-  if (!/--all-targets/.test(body)) {
+  if (!/--all-targets/.test(checkLines)) {
     problems.push('cargo check must pass --all-targets so feature-gated bins and tests compile');
   }
-  if (!/\$\{\{\s*matrix\.extra_args\s*\}\}/.test(body)) {
+  if (!/\$\{\{\s*matrix\.extra_args\s*\}\}/.test(checkLines)) {
     problems.push('cargo check must apply matrix.extra_args so app-store is not a host-only flag');
   }
   const cacheKey = firstMatch(job.lines, /^\s+key:\s*(.+)$/);

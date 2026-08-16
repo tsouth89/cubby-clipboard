@@ -184,6 +184,21 @@ test('a matrix that never creates dist is rejected', () => {
   );
 });
 
+test('cargo check flags are not satisfied by a different cargo invocation in the same job', () => {
+  const result = evaluateShippedWindowsCi(
+    VALID_JOB.replace(
+      '- run: cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} --all-targets ${{ matrix.extra_args }}',
+      `- run: cargo check --manifest-path src-tauri/Cargo.toml --target \${{ matrix.target }} \${{ matrix.extra_args }}
+      - run: cargo test --all-targets`,
+    ),
+  );
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.jobLevelProblems.some((problem) => problem.includes('--all-targets')),
+    result.jobLevelProblems.join('; '),
+  );
+});
+
 test('a cache key that omits target is rejected so matrix legs cannot clobber each other', () => {
   const result = evaluateShippedWindowsCi(
     VALID_JOB.replace(
