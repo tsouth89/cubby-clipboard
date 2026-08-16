@@ -2733,7 +2733,10 @@ pub async fn pick_backup_save_path(app: AppHandle) -> Result<String, String> {
         .set_file_name(&suggested)
         .blocking_save_file()
     {
-        Some(path) => Ok(path.to_string()),
+        Some(path) => crate::path_grant::grant_picker_path(
+            crate::path_grant::PathGrantPurpose::BackupSave,
+            path.to_string(),
+        ),
         None => Err("No location selected".to_string()),
     }
 }
@@ -2748,7 +2751,10 @@ pub async fn pick_backup_file(app: AppHandle) -> Result<String, String> {
         .add_filter("Cubby backup", &["cubbybak"])
         .blocking_pick_file()
     {
-        Some(path) => Ok(path.to_string()),
+        Some(path) => crate::path_grant::grant_picker_path(
+            crate::path_grant::PathGrantPurpose::BackupOpen,
+            path.to_string(),
+        ),
         None => Err("No file selected".to_string()),
     }
 }
@@ -2759,7 +2765,7 @@ pub async fn export_backup(
     passphrase: String,
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<usize, String> {
-    crate::backup::export_backup(db.inner(), &path, &passphrase).await
+    crate::path_grant::export_granted_backup(db.inner(), path, passphrase).await
 }
 
 #[tauri::command]
@@ -2769,7 +2775,7 @@ pub async fn import_backup(
     dry_run: bool,
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<crate::backup::BackupImportResult, String> {
-    crate::backup::import_backup(db.inner(), &path, &passphrase, dry_run).await
+    crate::path_grant::import_granted_backup(db.inner(), path, passphrase, dry_run).await
 }
 
 #[tauri::command]
@@ -2785,7 +2791,10 @@ pub async fn pick_ditto_database(app: AppHandle) -> Result<String, String> {
     }
 
     match dialog.blocking_pick_file() {
-        Some(path) => Ok(path.to_string()),
+        Some(path) => crate::path_grant::grant_picker_path(
+            crate::path_grant::PathGrantPurpose::DittoOpen,
+            path.to_string(),
+        ),
         None => Err("No file selected".to_string()),
     }
 }
@@ -2828,7 +2837,7 @@ pub async fn import_from_ditto(
     dry_run: bool,
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<crate::ditto_import::DittoImportResult, String> {
-    let result = crate::ditto_import::import_from_ditto(&db, &db_path, dry_run).await?;
+    let result = crate::path_grant::import_granted_ditto(&db, db_path, dry_run).await?;
     if !dry_run && result.imported > 0 {
         db.search_index.invalidate();
     }

@@ -2,6 +2,11 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
+## Unreleased
+
+### Fixed
+- Backup export, backup import, and Ditto import now only write or read a path chosen in the file dialog, so a compromised Settings page cannot send history to an arbitrary location (SBS-808)
+
 ## v1.3.1
 
 ### Added
