@@ -24,6 +24,7 @@ struct Inner {
     state: Mutex<HelperState>,
     watchdog_started: AtomicBool,
     activation_port: u16,
+    activation_token: String,
 }
 
 impl Drop for Inner {
@@ -40,21 +41,46 @@ pub struct WinVReplacementManager {
 
 impl WinVReplacementManager {
     pub fn new(app: AppHandle) -> Result<Self, String> {
+        // Fail closed if we cannot mint a token: an unauthenticated bind is
+        // the SBS-809 bug. Do not bind first and "add a token later".
+        let activation_token = crate::win_v_activation::generate_token()?;
         let socket = UdpSocket::bind(("127.0.0.1", 0))
             .map_err(|error| format!("Could not create the Cubby shortcut channel: {error}"))?;
         let activation_port = socket
             .local_addr()
             .map_err(|error| format!("Could not inspect the Cubby shortcut channel: {error}"))?
             .port();
+        let listener_token = activation_token.clone();
         std::thread::spawn(move || {
-            let mut buffer = [0_u8; 32];
+            let mut buffer = [0_u8; crate::win_v_activation::RECV_BUFFER_LEN];
+            let mut rate = crate::win_v_activation::ActivationRateLimit::default();
             loop {
                 match socket.recv_from(&mut buffer) {
-                    Ok((length, _)) if &buffer[..length] == b"activate" => {
-                        log::debug!("WIN_V: Received direct shortcut activation");
-                        crate::shortcuts::toggle_main_window(&app);
+                    Ok((length, source)) => {
+                        match crate::win_v_activation::decide_activation(
+                            &buffer[..length],
+                            source,
+                            &listener_token,
+                            &mut rate,
+                            std::time::Instant::now(),
+                        ) {
+                            crate::win_v_activation::ActivationDecision::Accept => {
+                                log::debug!("WIN_V: Received authorized shortcut activation");
+                                crate::shortcuts::toggle_main_window(&app);
+                            }
+                            crate::win_v_activation::ActivationDecision::RejectUnauthenticated => {
+                                log::debug!("WIN_V: Ignored unauthenticated shortcut activation");
+                            }
+                            crate::win_v_activation::ActivationDecision::RejectOrigin => {
+                                log::debug!(
+                                    "WIN_V: Ignored shortcut activation from outside loopback"
+                                );
+                            }
+                            crate::win_v_activation::ActivationDecision::RejectRateLimited => {
+                                log::debug!("WIN_V: Ignored shortcut activation (rate limited)");
+                            }
+                        }
                     }
-                    Ok(_) => {}
                     Err(error) => {
                         log::error!("WIN_V: Shortcut activation listener failed: {error}");
                         return;
@@ -68,6 +94,7 @@ impl WinVReplacementManager {
                 state: Mutex::new(HelperState::default()),
                 watchdog_started: AtomicBool::new(false),
                 activation_port,
+                activation_token,
             }),
         })
     }
@@ -93,7 +120,11 @@ impl WinVReplacementManager {
             stop_child(&mut state.child);
         }
 
-        ensure_child_running(&mut state, self.inner.activation_port)?;
+        ensure_child_running(
+            &mut state,
+            self.inner.activation_port,
+            &self.inner.activation_token,
+        )?;
         drop(state);
         self.start_watchdog();
         Ok(())
@@ -140,14 +171,20 @@ fn watchdog_loop(inner: Weak<Inner>) {
 
         if exited {
             state.child = None;
-            if let Err(error) = ensure_child_running(&mut state, inner.activation_port) {
+            if let Err(error) =
+                ensure_child_running(&mut state, inner.activation_port, &inner.activation_token)
+            {
                 log::error!("WIN_V: Helper restart failed: {error}");
             }
         }
     }
 }
 
-fn ensure_child_running(state: &mut HelperState, activation_port: u16) -> Result<(), String> {
+fn ensure_child_running(
+    state: &mut HelperState,
+    activation_port: u16,
+    activation_token: &str,
+) -> Result<(), String> {
     if let Some(child) = state.child.as_mut() {
         match child.try_wait() {
             Ok(None) => return Ok(()),
@@ -164,6 +201,8 @@ fn ensure_child_running(state: &mut HelperState, activation_port: u16) -> Result
         .arg(std::process::id().to_string())
         .arg("--activation-port")
         .arg(activation_port.to_string())
+        .arg("--activation-token")
+        .arg(activation_token)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -187,11 +226,9 @@ fn ensure_child_running(state: &mut HelperState, activation_port: u16) -> Result
         return Err(format!("Win+V helper exited during startup with {status}"));
     }
 
-    log::info!(
-        "WIN_V: Replacement helper started (pid {}, direct activation port {})",
-        child.id(),
-        activation_port
-    );
+    // Do not log the port or the token. The port was previously printed at
+    // Info and made the unauthenticated channel easier to find (SBS-809).
+    log::info!("WIN_V: Replacement helper started (pid {})", child.id());
     state.child = Some(child);
     Ok(())
 }

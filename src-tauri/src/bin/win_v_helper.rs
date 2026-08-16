@@ -1,5 +1,6 @@
 #[cfg(target_os = "windows")]
 mod windows_helper {
+    use cubby::win_v_activation;
     use serde::Serialize;
     use std::env;
     use std::net::UdpSocket;
@@ -31,6 +32,7 @@ mod windows_helper {
     static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
     static ACCEPT_TEST_INPUT: AtomicBool = AtomicBool::new(false);
     static ACTIVATION_PORT: AtomicU16 = AtomicU16::new(0);
+    static ACTIVATION_TOKEN: OnceLock<String> = OnceLock::new();
     /// The user's configured Cubby hotkey, parsed into a physical chord. When a
     /// remote client is focused this chord is caught here, below the remote
     /// client's key forwarding, so the same hotkey that opens Cubby locally also
@@ -387,12 +389,19 @@ mod windows_helper {
                 .map_err(|error| format!("shortcut fallback injection failed: {error:?}"));
         }
 
+        let token = ACTIVATION_TOKEN.get().ok_or_else(|| {
+            "activation token missing; refusing to send an unauthenticated datagram".to_string()
+        })?;
+        let payload = win_v_activation::encode_activate(token).ok_or_else(|| {
+            "activation token is malformed; refusing to send an unauthenticated datagram"
+                .to_string()
+        })?;
         let socket = UdpSocket::bind(("127.0.0.1", 0))
             .map_err(|error| format!("could not create activation socket: {error}"))?;
         let sent = socket
-            .send_to(b"activate", ("127.0.0.1", activation_port))
+            .send_to(&payload, ("127.0.0.1", activation_port))
             .map_err(|error| format!("could not signal Cubby: {error}"))?;
-        if sent != b"activate".len() {
+        if sent != payload.len() {
             return Err(format!("activation message was truncated to {sent} bytes"));
         }
         Ok(())
@@ -611,6 +620,11 @@ mod windows_helper {
             .and_then(|pair| pair[1].parse::<u16>().ok())
     }
 
+    fn parse_activation_token() -> Option<String> {
+        let args: Vec<String> = env::args().collect();
+        win_v_activation::token_from_args(args.iter().map(String::as_str))
+    }
+
     fn parse_activation_hotkey() -> Option<TriggerChord> {
         let args: Vec<String> = env::args().collect();
         args.windows(2)
@@ -643,6 +657,9 @@ mod windows_helper {
         let timeout_seconds = parse_timeout_seconds();
         let parent_pid = parse_parent_pid();
         ACTIVATION_PORT.store(parse_activation_port().unwrap_or(0), Ordering::SeqCst);
+        if let Some(token) = parse_activation_token() {
+            let _ = ACTIVATION_TOKEN.set(token);
+        }
         ACCEPT_TEST_INPUT.store(
             env::args().any(|arg| arg == "--accept-injected-test-events"),
             Ordering::SeqCst,

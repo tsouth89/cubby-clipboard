@@ -18,10 +18,10 @@ Cubby's shortcut behavior is not complete until this matrix passes on Windows 11
 This default mode is provided by Cubby's bundled Windows shortcut helper. Users do not
 need PowerToys or another remapping application.
 
-The helper intercepts an exact physical `Win+V` chord and forwards it to Cubby's
-privately registered `Win+Alt+V` shortcut. Additional held modifiers do not
-trigger Cubby. If the helper is stopped or crashes, its keyboard hook disappears
-and native Windows behavior is restored.
+The helper intercepts an exact physical `Win+V` chord and signals the main
+Cubby process over the authenticated loopback channel. Additional held modifiers
+do not trigger Cubby. If the helper is stopped or crashes, its keyboard hook
+disappears and native Windows behavior is restored.
 
 Acceptance:
 

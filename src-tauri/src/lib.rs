@@ -81,6 +81,7 @@ mod secrets;
 mod settings_commands;
 mod settings_manager;
 mod shortcuts;
+pub mod win_v_activation;
 mod win_v_replacement;
 
 use database::Database;
