@@ -3,6 +3,7 @@ import {
   ClipDetails,
   fullTextForEdit,
   isEditReady,
+  previewBodyText,
   withSavedOcrText,
   withSavedText,
 } from './clipPreviewState';
@@ -26,6 +27,36 @@ describe('fullTextForEdit', () => {
 
   it('falls back to the list row only when nothing else is loaded', () => {
     expect(fullTextForEdit(null, undefined, 'row body')).toBe('row body');
+  });
+});
+
+describe('previewBodyText', () => {
+  it('shows the stored preview while details are still loading a preview_only row', () => {
+    // The row as `get_clips` with `previewOnly: true` ships it.
+    expect(previewBodyText(null, '', 'copied log line')).toBe('copied log line');
+  });
+
+  it('still shows the stored preview when the details load fails', () => {
+    // Same inputs — a failed fetch leaves `details` null — so the banner about
+    // showing the list preview is not sitting over a blank body.
+    expect(previewBodyText(null, '', 'copied log line')).toBe('copied log line');
+  });
+
+  it('replaces the preview with the full body once details land', () => {
+    expect(previewBodyText(details, '', 'copied log line')).toBe('old body');
+  });
+
+  it('prefers a reveal payload over the row preview', () => {
+    expect(previewBodyText(null, 'revealed body', 'copied log line')).toBe('revealed body');
+  });
+
+  it('uses a full list row when preview_only was not requested', () => {
+    expect(previewBodyText(null, 'the whole clip', 'the whole')).toBe('the whole clip');
+  });
+
+  it('renders nothing when there is nothing at all, rather than "undefined"', () => {
+    expect(previewBodyText(null, '', '')).toBe('');
+    expect(previewBodyText(null, undefined, undefined)).toBe('');
   });
 });
 

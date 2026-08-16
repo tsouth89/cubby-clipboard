@@ -31,6 +31,7 @@ import {
   ClipDetails,
   fullTextForEdit,
   isEditReady,
+  previewBodyText,
   withSavedOcrText,
   withSavedText,
 } from '../utils/clipPreviewState';
@@ -246,7 +247,7 @@ export function ClipPreview({
   // The row itself carries no content while hidden, so a revealed clip has to
   // read from the copy the reveal fetched or the pane renders empty.
   const source = revealed ?? clip;
-  const text = isImage ? '' : (details?.content ?? source.content ?? clip.preview);
+  const text = isImage ? '' : previewBodyText(details, source.content, clip.preview);
   const kind = isImage ? imageLabel(label) : contentKind(text, clip.clip_type);
   const captured = (() => {
     const parsed = new Date(clip.created_at);

@@ -2759,10 +2759,11 @@ async fn get_clip_details_in_database(db: &Database, id: &str) -> Result<ClipDet
 
     let image_expired = clip.full_image_expired;
     let content = if clip.clip_type == "image" && !image_expired {
-        crate::clip_list::details_item_content(
-            &clip.clip_type,
-            &load_full_image_content(db, &mut clip).await?,
-        )
+        // Bind the loaded blob first. Passing the load call straight as an
+        // argument would hold `&mut clip` across `&clip.clip_type` in the same
+        // call, which does not borrow-check. The branch already knows the type.
+        let full = load_full_image_content(db, &mut clip).await?;
+        crate::clip_list::details_item_content("image", &full)
     } else {
         // Text, or an image whose full blob was dropped by retention: the
         // surviving bytes (thumbnail for the latter) are what the pane shows.

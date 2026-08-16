@@ -13,6 +13,8 @@ import { useTheme } from '../hooks/useTheme';
 import { useLanguage } from '../hooks/useLanguage';
 import { useSystemAccent } from '../hooks/useSystemAccent';
 import { useRevealedClips } from '../hooks/useRevealedClips';
+import { collectBulkCopyText } from '../utils/bulkCopy';
+import { ClipDetails } from '../utils/clipPreviewState';
 import { customRange, DATE_PRESET_LABELS, DatePreset, presetRange } from '../utils/dateRange';
 import { folderSelectionAfterReload } from '../utils/folderSelection';
 import { clipLoadFailure } from '../utils/clipLoadFailure';
@@ -408,24 +410,29 @@ export function HistoryWindow() {
     const chosen = selectedIds
       .map((id) => clipsRef.current.find((clip) => clip.id === id))
       .filter((clip): clip is ClipboardItem => Boolean(clip));
-    // Images have no text to concatenate. Take their recognized text where OCR
-    // found some, and say plainly how many contributed nothing.
-    const parts: string[] = [];
-    let skipped = 0;
-    for (const clip of chosen) {
-      const text = clip.clip_type === 'image' ? '' : (clip.content ?? clip.preview ?? '');
-      if (text.trim()) parts.push(text);
-      else skipped += 1;
-    }
+    // Fetch each text clip's body by uuid. This list is loaded with
+    // `previewOnly: true`, so a text row's `content` is empty and its `preview`
+    // is only the stored prefix — copying either would ship the wrong text
+    // under a success toast. Images have no text to concatenate and are
+    // reported as skipped.
+    const { parts, skipped, failed } = await collectBulkCopyText(chosen, async (id) => {
+      const details = await invoke<ClipDetails>('get_clip_details', { id });
+      return details.content;
+    });
     if (parts.length === 0) {
-      toast.error('Nothing to copy from the selected clips');
+      toast.error(
+        failed > 0 ? 'Failed to load the selected clips' : 'Nothing to copy from the selected clips'
+      );
       return;
     }
     try {
       await invoke('copy_selected_text', { text: parts.join('\n\n') });
+      const notes: string[] = [];
+      if (skipped > 0) notes.push(`${skipped} without text skipped`);
+      if (failed > 0) notes.push(`${failed} failed to load`);
       toast.success(
-        skipped > 0
-          ? `Copied ${parts.length} clips (${skipped} without text skipped)`
+        notes.length > 0
+          ? `Copied ${parts.length} clips (${notes.join(', ')})`
           : `Copied ${parts.length} clips`
       );
     } catch (error) {
