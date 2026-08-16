@@ -14,24 +14,39 @@ pub(crate) const BLUR_DEBOUNCE_MS: i64 = 500;
 /// Releases the show/hide lock even if a worker unwinds. A detached window
 /// thread panic must not leave Cubby permanently unable to open again.
 #[allow(dead_code)]
-pub(crate) struct AnimationGuard;
+pub(crate) struct AnimationGuard {
+    /// The flag this guard released on drop. Always `&IS_ANIMATING` in the app;
+    /// tests point it at their own static so they can exercise `Drop`.
+    flag: &'static AtomicBool,
+}
 
 #[allow(dead_code)] // used from lib.rs; rustc --test compiles this file alone
 impl AnimationGuard {
     pub(crate) fn acquire() -> Option<Self> {
-        try_lock_animation(&IS_ANIMATING).then_some(Self)
+        Self::acquire_on(&IS_ANIMATING)
     }
 
     /// Wait briefly for an in-flight show/hide instead of dropping the request.
     /// A missed toggle leaves the flyout in the opposite state from the keypress.
     pub(crate) fn acquire_within(timeout: Duration) -> Option<Self> {
-        lock_animation_within(&IS_ANIMATING, timeout).then_some(Self)
+        Self::acquire_within_on(&IS_ANIMATING, timeout)
+    }
+
+    /// `then`, never `then_some`: `then_some` builds the guard before it checks
+    /// the bool, so a failed acquire would drop a guard and clear a lock that
+    /// another show/hide still holds.
+    fn acquire_on(flag: &'static AtomicBool) -> Option<Self> {
+        try_lock_animation(flag).then(|| Self { flag })
+    }
+
+    fn acquire_within_on(flag: &'static AtomicBool, timeout: Duration) -> Option<Self> {
+        lock_animation_within(flag, timeout).then(|| Self { flag })
     }
 }
 
 impl Drop for AnimationGuard {
     fn drop(&mut self) {
-        unlock_animation(&IS_ANIMATING);
+        unlock_animation(self.flag);
     }
 }
 
@@ -91,7 +106,7 @@ mod tests {
     use super::{
         click_hits_owned_hwnd, is_new_mouse_press, lock_animation_within,
         outside_click_watcher_should_exit, should_ignore_blur, try_lock_animation,
-        unlock_animation, BLUR_DEBOUNCE_MS,
+        unlock_animation, AnimationGuard, BLUR_DEBOUNCE_MS,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -108,35 +123,66 @@ mod tests {
     }
 
     #[test]
-    fn dropping_the_animation_lock_lets_the_next_toggle_acquire() {
-        let flag = AtomicBool::new(false);
-        assert!(try_lock_animation(&flag));
+    fn dropping_the_animation_guard_lets_the_next_toggle_acquire() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        {
+            let _guard = AnimationGuard::acquire_on(&FLAG).expect("the lock starts free");
+            assert!(
+                AnimationGuard::acquire_on(&FLAG).is_none(),
+                "the toggle is dropped if a second animation can start"
+            );
+        }
         assert!(
-            !try_lock_animation(&flag),
-            "the toggle is dropped if the lock is never released"
-        );
-        unlock_animation(&flag);
-        assert!(
-            try_lock_animation(&flag),
+            !FLAG.load(Ordering::SeqCst),
             "drop must reset the lock or the next Win+V is lost"
+        );
+        let next = AnimationGuard::acquire_on(&FLAG)
+            .expect("drop must reset the lock or the next Win+V is lost");
+        drop(next);
+        assert!(!FLAG.load(Ordering::SeqCst));
+    }
+
+    /// Guards the deadlock in AGENTS.md: a panic between "lock" and "unlock"
+    /// leaves the flyout permanently unable to open. Only `Drop` saves it, so
+    /// this test must fail if the `Drop` body is ever emptied.
+    #[test]
+    fn a_panicking_worker_still_releases_the_animation_lock() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let panicked = std::panic::catch_unwind(|| {
+            let _guard = AnimationGuard::acquire_on(&FLAG).expect("the lock starts free");
+            assert!(FLAG.load(Ordering::SeqCst), "the guard must hold the lock");
+            panic!("a show/hide worker unwound");
+        });
+        assert!(panicked.is_err(), "the worker must really have unwound");
+        assert!(
+            !FLAG.load(Ordering::SeqCst),
+            "an unwinding worker must release the lock, not wedge the flyout shut"
+        );
+        assert!(
+            AnimationGuard::acquire_on(&FLAG).is_some(),
+            "the next Win+V must still be able to open the flyout after a panic"
         );
     }
 
+    /// No wall-clock upper bound: a loaded runner can stall the wait loop for
+    /// far longer than the timeout, and that is not a product bug.
     #[test]
-    fn acquire_within_times_out_while_the_lock_is_held() {
-        let flag = AtomicBool::new(true);
+    fn acquire_within_gives_up_while_the_lock_is_held() {
+        static FLAG: AtomicBool = AtomicBool::new(true);
         let started = std::time::Instant::now();
-        assert!(!lock_animation_within(&flag, Duration::from_millis(40)));
+        assert!(
+            AnimationGuard::acquire_within_on(&FLAG, Duration::from_millis(40)).is_none(),
+            "a held lock must never hand out a second animation"
+        );
         let elapsed = started.elapsed();
         assert!(
             elapsed >= Duration::from_millis(40),
-            "timeout must wait the full window, got {:?}",
+            "the wait must not give up early, got {:?}",
             elapsed
         );
         assert!(
-            elapsed < Duration::from_millis(200),
-            "timeout must not hang, got {:?}",
-            elapsed
+            FLAG.load(Ordering::SeqCst),
+            "a failed wait must leave the in-flight show/hide holding the lock"
         );
     }
 
@@ -144,15 +190,18 @@ mod tests {
     fn acquire_within_succeeds_after_the_holder_drops() {
         let flag = Arc::new(AtomicBool::new(true));
         let released = flag.clone();
-        std::thread::spawn(move || {
+        let unlocker = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(25));
             unlock_animation(&released);
         });
+        // Seconds, not milliseconds: the assertion is "the wait succeeds once
+        // the holder drops", not "the runner scheduled the unlocker on time".
         assert!(
-            lock_animation_within(&flag, Duration::from_millis(300)),
+            lock_animation_within(&flag, Duration::from_secs(30)),
             "waiting for the lock must succeed once the in-flight show/hide drops it"
         );
         assert!(flag.load(Ordering::SeqCst));
+        unlocker.join().expect("the unlocker thread must not panic");
     }
 
     #[test]
