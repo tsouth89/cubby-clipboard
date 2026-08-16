@@ -34,7 +34,7 @@
         "default"
       ]
     },
-    "withGlobalTauri": true
+    "withGlobalTauri": false
   },
   "plugins": {
     "updater": {

@@ -34,6 +34,8 @@ const [
   publishStoreWorkflow,
   validateStoreWorkflow,
   verifyInstallerSignature,
+  libSource,
+  logTargetsSource,
 ] = await Promise.all([
   read('package.json'),
   read('src-tauri/tauri.conf.json'),
@@ -58,6 +60,8 @@ const [
   read('.github/workflows/publish-store-packages.yml'),
   read('.github/workflows/validate-store-submission.yml'),
   read('scripts/verify-installer-signature.ps1'),
+  read('src-tauri/src/lib.rs'),
+  read('src-tauri/src/log_targets.rs'),
 ]);
 
 const packageVersion = JSON.parse(packageText).version;
@@ -271,6 +275,113 @@ for (const sensitiveLogFragment of ['Detected self-paste for hash', 'full_path: 
   if (clipboardSource.includes(sensitiveLogFragment)) {
     throw new Error(`Clipboard source contains privacy-sensitive production logging: ${sensitiveLogFragment}`);
   }
+}
+
+// SBS-837: release builds must not stream Rust logs into the WebView.
+// `log_targets()` is the single source of truth and calling it is mandatory --
+// an inline `#[cfg(not(debug_assertions))]` targets list is not an accepted
+// substitute. The inline scan below only exists to reject a leftover one that
+// still names Webview.
+const inlineReleaseTargets = libSource.match(
+  /#\[cfg\(not\(debug_assertions\)\)\][\s\S]*?\.targets\(\[([\s\S]*?)\]\)/,
+)?.[1];
+if (inlineReleaseTargets?.includes('Webview')) {
+  throw new Error('Release log_builder.targets must not include Webview');
+}
+
+if (!libSource.includes('log_targets(cfg!(debug_assertions))')) {
+  throw new Error(
+    'lib.rs must install logger targets from log_targets(cfg!(debug_assertions))',
+  );
+}
+
+const productionLogTargets = logTargetsSource.match(
+  /if debug_assertions \{[\s\S]*?\} else \{([\s\S]*?)\}/,
+)?.[1];
+if (!productionLogTargets) {
+  throw new Error('Could not find the production arm of log_targets()');
+}
+if (productionLogTargets.includes('Webview')) {
+  throw new Error('Release log_builder.targets must not include Webview');
+}
+if (!productionLogTargets.includes('LogDir')) {
+  throw new Error('Release log_builder.targets must still include LogDir');
+}
+
+// The enum above is only as good as the mapping onto `tauri_plugin_log`.
+// `to_plugin_log_target` is the one place that can construct
+// `TargetKind::Webview`, so pin each arm to its own TargetKind and refuse any
+// other mention of Webview in lib.rs (for example a target appended after the
+// helper's list).
+const pluginTargetMapper = libSource.match(
+  /fn to_plugin_log_target\([\s\S]*?\n\}/,
+)?.[0];
+if (!pluginTargetMapper) {
+  throw new Error('Could not find to_plugin_log_target() in lib.rs');
+}
+
+const logTargetArms = new Map(
+  [
+    ...pluginTargetMapper.matchAll(
+      /LogTarget::(Stdout|Webview|LogDir)\s*=>([\s\S]*?)(?=LogTarget::(?:Stdout|Webview|LogDir)\s*=>|$)/g,
+    ),
+  ].map(([, variant, body]) => [variant, body]),
+);
+for (const [variant, expectedKind] of [
+  ['Stdout', 'TargetKind::Stdout'],
+  ['Webview', 'TargetKind::Webview'],
+  ['LogDir', 'TargetKind::LogDir'],
+]) {
+  const arm = logTargetArms.get(variant);
+  if (arm === undefined) {
+    throw new Error(`to_plugin_log_target() is missing the LogTarget::${variant} arm`);
+  }
+  if (!arm.includes(expectedKind)) {
+    throw new Error(`LogTarget::${variant} must map to ${expectedKind}`);
+  }
+  if (variant !== 'Webview' && arm.includes('TargetKind::Webview')) {
+    throw new Error(`LogTarget::${variant} must not map to TargetKind::Webview`);
+  }
+}
+
+const countWebviewKind = (source) => source.split('TargetKind::Webview').length - 1;
+if (countWebviewKind(libSource) !== countWebviewKind(logTargetArms.get('Webview'))) {
+  throw new Error(
+    'lib.rs must only name TargetKind::Webview inside the LogTarget::Webview arm of to_plugin_log_target()',
+  );
+}
+
+// The mapper being clean is still not enough. A release build compiles
+// `to_plugin_log_target(LogTarget::Webview)`, so the *call site* could hand it
+// an extra variant -- `.chain(std::iter::once(LogTarget::Webview))` before the
+// `.map`, or a second `.targets()` -- and every check above would stay green
+// while fern installed the Webview target anyway. Pin the argument exactly, and
+// refuse `LogTarget::Webview` anywhere in lib.rs outside the mapper's own arm.
+const countLogTargetWebview = (source) => source.split('LogTarget::Webview').length - 1;
+if (countLogTargetWebview(libSource) !== countLogTargetWebview(pluginTargetMapper)) {
+  throw new Error(
+    'lib.rs must only name LogTarget::Webview inside to_plugin_log_target(); the log_builder call site must not select it',
+  );
+}
+
+const targetsCallCount = libSource.split('.targets(').length - 1;
+if (targetsCallCount !== 1) {
+  throw new Error(
+    `lib.rs must call log_builder.targets() exactly once, found ${targetsCallCount}`,
+  );
+}
+const targetsArgument = libSource.match(/\.targets\(([\s\S]*?)\n\s*\);/)?.[1];
+if (targetsArgument === undefined) {
+  throw new Error('Could not find the log_builder.targets(...) call in lib.rs');
+}
+const expectedTargetsArgument =
+  'log_targets::log_targets(cfg!(debug_assertions)).iter().copied().map(to_plugin_log_target)';
+// Whitespace-insensitive, and a trailing comma from rustfmt is not a combinator.
+const normalizedTargetsArgument = targetsArgument.replace(/\s+/g, '').replace(/,$/, '');
+if (normalizedTargetsArgument !== expectedTargetsArgument) {
+  throw new Error(
+    `log_builder.targets() must be exactly \`${expectedTargetsArgument}\`, with no extra combinators that could add a destination`,
+  );
 }
 
 const secretGates = [
