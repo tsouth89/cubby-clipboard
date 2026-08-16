@@ -30,6 +30,8 @@ In addition to AES-256-GCM at rest, Cubby skips:
 - Text that matches high-confidence secret heuristics such as private keys, cloud API tokens, and grouped payment-card numbers (off by default, enable in Settings; category logged, never content). This one is opt-in because a wrong guess silently drops a clip the user wanted to keep.
 - A one-time seeded ignore list of major password-manager executables, editable in Settings.
 
+Release Info logs persist under the application log directory. The History source-app filter is recorded there as `none` / `blank` / `set`, not as the selected application name.
+
 ## Clipboard history at rest
 
 Cubby encrypts clipboard payloads, previews, source attribution, metadata, and image files with AES-256-GCM. Dedupe values use a keyed HMAC rather than a plain content hash. The random storage key is protected for the current Windows user with DPAPI and is never stored in plaintext.
