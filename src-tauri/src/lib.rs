@@ -513,6 +513,12 @@ pub fn run_app() {
                 }
             });
 
+            // Refresh cubby.db.bak while this session stays up so a machine
+            // that never quits still gets a daily recovery copy (SBS-771).
+            // Startup already took one pass in Database::new; this only
+            // copies when the existing backup is older than 24h.
+            database::start_rolling_backup_scheduler(db_path);
+
             // Asset capture sessions open immediately and drive their staged UI from
             // the frontend. Debug builds only; see asset_capture_enabled().
             let asset_capture = asset_capture_enabled();

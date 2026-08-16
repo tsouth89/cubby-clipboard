@@ -85,9 +85,10 @@ issue. Do not paste clipboard contents into bug reports or logs.
 
 1. Fresh install: `%AppData%` (or portable data dir) has no `cubby.db`; first
    launch creates it and capture works.
-2. After history exists, quit Cubby and confirm a `cubby.db.bak` appears within
-   one successful launch (rolling backup; may skip if a backup younger than
-   24h already exists).
+2. After history exists, confirm a `cubby.db.bak` appears within one successful
+   launch (rolling backup; may skip if a backup younger than 24h already
+   exists). Leave Cubby running past that 24h cadence and confirm the same
+   file is rewritten without quitting.
 3. With Cubby quit, replace `cubby.db` with garbage bytes (or truncate mid-file).
    Relaunch: app must start, capture must work, and the bad file must be renamed
    to something like `cubby.db.corrupt-YYYYMMDD-HHMMSS`. `storage.key` must
