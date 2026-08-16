@@ -350,11 +350,33 @@ fn clip_to_search_item(clip: &Clip, query: &str) -> ClipboardItem {
 }
 
 fn decrypt_clip_fields(db: &Database, clip: &mut Clip) -> Result<(), String> {
+    // Content and preview are the clip. Everything below is decoration, and a
+    // broken decoration must not make an otherwise readable clip disappear —
+    // the search index already treats the source app that way
+    // (`SearchIndex::ensure_ready`), so listing and details now match it.
     clip.content = db.crypto.decrypt(&clip.content)?;
     clip.text_preview = db.crypto.decrypt_text(&clip.text_preview)?;
-    db.crypto.decrypt_optional_text(&mut clip.source_app)?;
-    db.crypto.decrypt_optional_text(&mut clip.source_icon)?;
-    db.crypto.decrypt_optional_text(&mut clip.metadata)?;
+    if let Err(error) = db.crypto.decrypt_optional_text(&mut clip.source_app) {
+        log::warn!(
+            "CLIPS: Ignoring an unreadable source app on clip {}: {error}",
+            clip.uuid
+        );
+        clip.source_app = None;
+    }
+    if let Err(error) = db.crypto.decrypt_optional_text(&mut clip.source_icon) {
+        log::warn!(
+            "CLIPS: Ignoring an unreadable source icon on clip {}: {error}",
+            clip.uuid
+        );
+        clip.source_icon = None;
+    }
+    if let Err(error) = db.crypto.decrypt_optional_text(&mut clip.metadata) {
+        log::warn!(
+            "CLIPS: Ignoring unreadable metadata on clip {}: {error}",
+            clip.uuid
+        );
+        clip.metadata = None;
+    }
     // OCR text is auxiliary; never let a bad value block loading the clip.
     if db.crypto.decrypt_optional_text(&mut clip.ocr_text).is_err() {
         clip.ocr_text = None;
@@ -389,6 +411,82 @@ fn decrypt_listed_clip(db: &Database, clip: &mut Clip) -> bool {
             false
         }
     }
+}
+
+/// One batch of ordered rows, plus whether the source has anything left after
+/// it. The flag is the source's own business: a SQL page is exhausted when it
+/// comes back short, while an id list is exhausted when the ids run out, which
+/// is not the same thing once a row is deleted mid-scan.
+struct ClipBatch {
+    rows: Vec<Clip>,
+    exhausted: bool,
+}
+
+/// Page by readable rows instead of SQL rows.
+///
+/// Both clients count what they displayed and send that count back as the next
+/// offset, and both treat a short page as the end of history. So dropping an
+/// unreadable row *after* the database applied LIMIT/OFFSET truncates history:
+/// the page comes back one short, the client stops asking, and the offset it
+/// would send next points at a row it has already been given. Skipping
+/// `offset` readable rows and then collecting `limit` more keeps that contract
+/// exact. The scan runs one page at a time, so memory stays bounded no matter
+/// how far down the unreadable row sits.
+async fn collect_readable_clips<F, Fut>(
+    db: &Database,
+    offset: usize,
+    limit: usize,
+    fetch_batch: F,
+) -> Result<Vec<Clip>, String>
+where
+    F: Fn(usize, usize) -> Fut,
+    Fut: std::future::Future<Output = Result<ClipBatch, String>>,
+{
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut page: Vec<Clip> = Vec::new();
+    let mut scanned = 0_usize;
+    let mut readable = 0_usize;
+    loop {
+        let batch = fetch_batch(scanned, limit).await?;
+        scanned = scanned.saturating_add(limit);
+        for mut clip in batch.rows {
+            if !decrypt_listed_clip(db, &mut clip) {
+                continue;
+            }
+            readable += 1;
+            if readable <= offset {
+                continue;
+            }
+            page.push(clip);
+            if page.len() == limit {
+                return Ok(page);
+            }
+        }
+        if batch.exhausted {
+            return Ok(page);
+        }
+    }
+}
+
+/// Readable-row paging over an id list the caller has already ordered and
+/// filtered (search hits, source-app matches).
+async fn collect_readable_clips_by_id(
+    db: &Database,
+    ids: &[String],
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<Clip>, String> {
+    collect_readable_clips(db, offset, limit, |start, count| async move {
+        let end = start.saturating_add(count).min(ids.len());
+        let chunk = ids.get(start..end).unwrap_or_default();
+        Ok(ClipBatch {
+            rows: fetch_clips_by_id(&db.pool, chunk).await?,
+            exhausted: end >= ids.len(),
+        })
+    })
+    .await
 }
 
 async fn cleanup_orphan_clip_image_files(
@@ -947,9 +1045,13 @@ async fn get_clips_in_database(
         date_from.as_deref(),
         date_to.as_deref(),
     );
+    // The client counts displayed rows, so offset and limit count readable
+    // clips, not database rows.
+    let requested_offset = offset.max(0) as usize;
+    let requested_limit = limit.max(0) as usize;
 
     let sql_started = Instant::now();
-    let mut clips: Vec<Clip> = if let Some(app) = source_app.as_deref() {
+    let clips: Vec<Clip> = if let Some(app) = source_app.as_deref() {
         // The app name is encrypted with a random nonce, so SQL can neither
         // match nor group on it. Take the ordered ids from the database, narrow
         // them against the in-memory index, and page the result — the same
@@ -973,41 +1075,50 @@ async fn get_clips_in_database(
             if let Some(to) = date_to.as_deref() {
                 query = query.bind(to.to_string());
             }
-            let ordered_ids = query.fetch_all(pool).await.map_err(|e| e.to_string())?;
-            let page: Vec<String> = ordered_ids
+            let ordered_ids: Vec<String> = query.fetch_all(pool).await.map_err(|e| e.to_string())?;
+            let matching: Vec<String> = ordered_ids
                 .into_iter()
                 .filter(|id| allowed.contains(id))
-                .skip(offset.max(0) as usize)
-                .take(limit.max(0) as usize)
                 .collect();
-            fetch_clips_by_id(pool, &page).await?
+            collect_readable_clips_by_id(db, &matching, requested_offset, requested_limit).await?
         }
     } else {
-        let sql = format!(
+        let list_sql = format!(
             "SELECT * FROM clips WHERE {where_body} \
              ORDER BY is_pinned DESC, created_at DESC, uuid DESC LIMIT ? OFFSET ?"
         );
-        let mut query = sqlx::query_as::<_, Clip>(&sql);
-        if let Some(id) = folder_id {
-            query = query.bind(id);
-        }
-        if let Some(from) = date_from.as_deref() {
-            query = query.bind(from.to_string());
-        }
-        if let Some(to) = date_to.as_deref() {
-            query = query.bind(to.to_string());
-        }
-        query
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| e.to_string())?
+        let date_from = date_from.as_deref();
+        let date_to = date_to.as_deref();
+        collect_readable_clips(db, requested_offset, requested_limit, |start, count| {
+            let sql = list_sql.as_str();
+            async move {
+                let mut query = sqlx::query_as::<_, Clip>(sql);
+                if let Some(id) = folder_id {
+                    query = query.bind(id);
+                }
+                if let Some(from) = date_from {
+                    query = query.bind(from.to_string());
+                }
+                if let Some(to) = date_to {
+                    query = query.bind(to.to_string());
+                }
+                let rows = query
+                    .bind(count as i64)
+                    .bind(start as i64)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(ClipBatch {
+                    exhausted: rows.len() < count,
+                    rows,
+                })
+            }
+        })
+        .await?
     };
     let sql_ms = sql_started.elapsed().as_millis();
 
-    log::info!("DB: Found {} clips", clips.len());
-    clips.retain_mut(|clip| decrypt_listed_clip(db, clip));
+    log::info!("DB: Found {} readable clips", clips.len());
 
     let image_rows = clips
         .iter()
@@ -1045,8 +1156,8 @@ async fn get_clips_in_database(
         raw_bytes,
         preview_only,
         filter_id,
-        offset,
-        limit
+        requested_offset,
+        requested_limit
     );
 
     Ok(items)
@@ -1966,19 +2077,20 @@ async fn search_clips_in_database(
         .fetch_all(pool)
         .await
         .map_err(|error| error.to_string())?;
-    let selected_ids = ordered_ids
+    let matching = ordered_ids
         .into_iter()
         .filter(|id| candidates.contains(id))
-        .skip(requested_offset)
-        .take(requested_limit)
         .collect::<Vec<_>>();
-    if selected_ids.is_empty() {
+    if matching.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut clips = fetch_clips_by_id(pool, &selected_ids).await?;
+    // An indexed hit can still fail to decrypt here (the index skips the
+    // content of an image clip, so a corrupt thumbnail only surfaces now), so
+    // the page is filled with readable rows rather than trimmed after the fact.
+    let clips = collect_readable_clips_by_id(db, &matching, requested_offset, requested_limit)
+        .await?;
     let sql_ms = sql_started.elapsed().as_millis();
-    clips.retain_mut(|clip| decrypt_listed_clip(db, clip));
 
     let image_rows = clips
         .iter()
@@ -3076,6 +3188,63 @@ mod tests {
             .unwrap();
     }
 
+    async fn corrupt_clip_source_app(database: &Database, id: &str) {
+        sqlx::query("UPDATE clips SET source_app = ? WHERE uuid = ?")
+            .bind("not-cub1")
+            .bind(id)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+    }
+
+    /// `count` text clips one minute apart, all matching the query "pageable".
+    /// Returns their ids in listing order: newest first.
+    async fn seed_paging_clips(database: &Database, count: usize) -> Vec<String> {
+        let mut ids = Vec::with_capacity(count);
+        for index in 0..count {
+            let id = format!("page-{index:02}");
+            let created_at = format!("2026-07-01 12:{index:02}:00");
+            insert_search_clip(
+                database,
+                SearchFixture::text(&id, "pageable body", &created_at),
+            )
+            .await;
+            ids.push(id);
+        }
+        ids.reverse();
+        ids
+    }
+
+    async fn paged_ids(database: &Database, limit: i64, offset: i64) -> Vec<String> {
+        get_clips_in_database(
+            None, limit, offset, None, None, None, None, None, database,
+        )
+        .await
+        .expect("listing must survive an unreadable clip")
+        .into_iter()
+        .map(|clip| clip.id)
+        .collect()
+    }
+
+    async fn searched_ids(database: &Database, limit: i64, offset: i64) -> Vec<String> {
+        search_clips_in_database(
+            "pageable".into(),
+            None,
+            limit,
+            offset,
+            None,
+            None,
+            None,
+            None,
+            database,
+        )
+        .await
+        .expect("search must survive an unreadable hit")
+        .into_iter()
+        .map(|clip| clip.id)
+        .collect()
+    }
+
     /// Three clips over three days from two apps, newest last.
     async fn seed_filter_clips(database: &Database) {
         insert_search_clip(
@@ -4032,6 +4201,132 @@ mod tests {
         assert!(listed_ids(&database, None, None, Some("chrome.exe"))
             .await
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_clips_keeps_a_clip_whose_source_app_is_unreadable() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("broken-app", "readable body", "2026-07-05 09:00:00")
+                .with_app("code.exe"),
+        )
+        .await;
+        corrupt_clip_source_app(&database, "broken-app").await;
+
+        let items =
+            get_clips_in_database(None, 20, 0, Some(true), None, None, None, None, &database)
+                .await
+                .expect("a decorative field must not fail the listing");
+        assert_eq!(
+            items
+                .iter()
+                .map(|clip| clip.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["broken-app"],
+            "content and preview decrypt, so the clip stays in the list"
+        );
+        assert_eq!(items[0].source_app, None, "the broken field is cleared");
+    }
+
+    /// The clients count the rows they displayed and send that count back as
+    /// the next offset, so a page has to hold `limit` *readable* clips.
+    #[tokio::test]
+    async fn paging_hands_back_every_readable_clip_around_an_unreadable_one() {
+        let database = test_database().await;
+        let ids = seed_paging_clips(&database, 26).await;
+        // Listing position 5, well inside the first page of 20.
+        corrupt_clip_content(&database, &ids[5]).await;
+        let readable: Vec<&str> = ids
+            .iter()
+            .filter(|id| *id != &ids[5])
+            .map(String::as_str)
+            .collect();
+
+        let first = paged_ids(&database, 20, 0).await;
+        assert_eq!(first.len(), 20, "a full page, not 19");
+        assert_eq!(first, readable[..20]);
+
+        let second = paged_ids(&database, 20, 20).await;
+        assert_eq!(second, readable[20..], "the tail is still reachable");
+
+        let mut seen = first;
+        seen.extend(second);
+        assert_eq!(seen, readable, "no duplicate and no missing clip");
+    }
+
+    #[tokio::test]
+    async fn paging_fills_pages_when_unreadable_clips_are_interleaved() {
+        let database = test_database().await;
+        let ids = seed_paging_clips(&database, 30).await;
+        let broken: Vec<String> = [0_usize, 4, 9, 18, 23]
+            .iter()
+            .map(|position| ids[*position].clone())
+            .collect();
+        for id in &broken {
+            corrupt_clip_content(&database, id).await;
+        }
+        let readable: Vec<&str> = ids
+            .iter()
+            .filter(|id| !broken.contains(id))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(readable.len(), 25);
+
+        let first = paged_ids(&database, 20, 0).await;
+        let second = paged_ids(&database, 20, 20).await;
+        assert_eq!(first.len(), 20);
+        assert_eq!(second.len(), 5, "the short page is the real end of history");
+        let mut seen = first;
+        seen.extend(second);
+        assert_eq!(seen, readable);
+    }
+
+    /// An image clip is indexed from its preview, so a corrupt thumbnail is a
+    /// search hit that only fails when the page is decrypted.
+    #[tokio::test]
+    async fn search_paging_survives_a_hit_that_fails_to_decrypt() {
+        let database = test_database().await;
+        let mut ids = seed_paging_clips(&database, 25).await;
+        insert_search_clip(
+            &database,
+            SearchFixture {
+                id: "page-image",
+                clip_type: "image",
+                content: "pageable image bytes",
+                preview: "pageable body",
+                ocr: None,
+                folder_id: None,
+                pinned: false,
+                created_at: "2026-07-01 12:19:30",
+                source_app: None,
+            },
+        )
+        .await;
+        corrupt_clip_content(&database, "page-image").await;
+        // Newest first: the image sits between minute 20 and minute 19.
+        ids.insert(5, "page-image".to_string());
+        let readable: Vec<&str> = ids
+            .iter()
+            .filter(|id| *id != "page-image")
+            .map(String::as_str)
+            .collect();
+
+        database
+            .search_index
+            .ensure_ready(&database.pool, &database.crypto)
+            .await
+            .expect("the index should build");
+        assert!(
+            database.search_index.matches("pageable").contains("page-image"),
+            "the corrupt thumbnail is still a search candidate"
+        );
+
+        let first = searched_ids(&database, 20, 0).await;
+        assert_eq!(first.len(), 20, "a full page of readable hits");
+        assert_eq!(first, readable[..20]);
+        let second = searched_ids(&database, 20, 20).await;
+        assert_eq!(second, readable[20..]);
     }
 
     #[tokio::test]
