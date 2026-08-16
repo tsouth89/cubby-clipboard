@@ -49,3 +49,55 @@ test('a page with no mention passes', () => {
     []
   );
 });
+
+test('an earlier negated clause does not hide a later file-list claim', () => {
+  assert.equal(
+    findFileListHistoryClaims('<p>Cubby does not upload anything and stores file lists.</p>').length,
+    1
+  );
+  assert.equal(
+    findFileListHistoryClaims('<p>Cubby never captures passwords, but it records file lists.</p>')
+      .length,
+    1
+  );
+});
+
+test('inline tags and nbsp still count as a file-list mention', () => {
+  assert.equal(
+    findFileListHistoryClaims('<p>It supports file <strong>lists</strong>.</p>').length,
+    1
+  );
+  assert.equal(findFileListHistoryClaims('<p>It supports file&nbsp;lists.</p>').length, 1);
+});
+
+test('copied-files wording is guarded the same way as file lists', () => {
+  assert.equal(
+    findFileListHistoryClaims('<p>Cubby records copied files in history.</p>').length,
+    1
+  );
+  assert.deepEqual(
+    findFileListHistoryClaims('<p>Copied files are not stored as history.</p>'),
+    []
+  );
+});
+
+test('file-list is not matched inside other words', () => {
+  assert.deepEqual(
+    findFileListHistoryClaims('<p>User profile lists are shown in Settings.</p>'),
+    []
+  );
+});
+
+test('a negation between the verb and the mention is a disclaimer', () => {
+  assert.deepEqual(
+    findFileListHistoryClaims('<p>Cubby stores text without file lists.</p>'),
+    []
+  );
+});
+
+test('gerund disclaimers are not reported', () => {
+  assert.deepEqual(
+    findFileListHistoryClaims('<p>Ignoring file lists since v1.2.4.</p>'),
+    []
+  );
+});
