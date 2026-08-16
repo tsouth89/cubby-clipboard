@@ -157,3 +157,20 @@ When Dependabot opens an actions pin update:
    `node --test .github/scripts/check-privileged-action-pins.test.mjs`.
 5. Merge the pin update. Do not retarget the `uses:` ref back to a floating
    tag such as `@v3` or `@stable`.
+
+## Pre-merge Windows compile matrix (SBS-779)
+
+Pull-request CI cargo-checks four shipped configurations on `windows-latest`:
+
+- x64 default
+- x64 `app-store`
+- ARM64 default
+- ARM64 `app-store`
+
+That is a `cargo check --all-targets` per leg, not a bundle. Release still owns
+NSIS packaging, signing, and the Store installer. `.github/scripts/check-shipped-windows-ci.mjs`
+fails the required CI job if a leg is removed or renamed into an opaque matrix.
+
+A configuration-specific compile break should now fail the PR (`Check <arch> <features>`)
+instead of the first tag/release build that exercises that pair.
+

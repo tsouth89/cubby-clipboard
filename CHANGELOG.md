@@ -8,6 +8,9 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - History source-app filter values are no longer written to the persistent Info log (SBS-773)
 - Pin third-party GitHub Actions in privileged release and Store workflows to immutable commit SHAs, and reject new mutable pins in CI
 
+### Changed
+- Pre-merge CI now cargo-checks x64 and ARM64 default and Microsoft Store feature builds, so those configurations fail on the pull request instead of at release (SBS-779)
+
 ### Fixed
 - Backup export, backup import, and Ditto import now only write or read a path chosen in the file dialog, so a compromised Settings page cannot send history to an arbitrary location (SBS-808)
 
