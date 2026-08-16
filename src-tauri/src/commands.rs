@@ -2271,16 +2271,31 @@ fn directory_size_bytes(path: &std::path::Path, exclude: Option<&std::path::Path
     total
 }
 
-/// Bytes of clipboard history on disk, logs excluded.
+/// The log directory to leave out of a history measurement, if there is one.
 ///
-/// A portable run keeps its logs at `<data_dir>/logs`, a child of the directory
-/// measured here, so without this the log file would show up as "Storage used"
-/// and would move the reclaim before/after numbers. The excluded path comes from
-/// `portable_log_dir` itself, so the two cannot drift apart. An installed run has
-/// no such directory and the exclusion matches nothing.
+/// Only a portable run puts logs inside the history data directory, and only
+/// when that directory *is* the portable root. An installed run keeps them
+/// under `%LOCALAPPDATA%`, so excluding `<history_dir>/logs` there would
+/// silently drop a real user folder — or one left behind by a portable copy
+/// someone moved — out of "Storage used" and the reclaim before/after.
+///
+/// The path comes from `portable_log_dir` itself, so the measurement and the
+/// log location cannot drift apart.
+fn excluded_log_dir(
+    history_dir: &std::path::Path,
+    portable_root: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    let root = portable_root?;
+    if root != history_dir {
+        return None;
+    }
+    crate::portable_log_dir(Some(root))
+}
+
+/// Bytes of clipboard history on disk, portable logs excluded.
 async fn history_disk_bytes(db: &Database) -> Result<i64, String> {
     let dir = history_data_dir(db);
-    let logs = crate::portable_log_dir(Some(dir.clone()));
+    let logs = excluded_log_dir(&dir, crate::portable_data_dir());
     tokio::task::spawn_blocking(move || directory_size_bytes(&dir, logs.as_deref()))
         .await
         .map_err(|error| error.to_string())
@@ -3026,7 +3041,7 @@ pub async fn import_from_ditto(
 mod tests {
     use super::{
         build_ocr_highlights, build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore,
-        delete_folder_in_pool, directory_size_bytes, enforce_retention_in_pool,
+        delete_folder_in_pool, directory_size_bytes, enforce_retention_in_pool, excluded_log_dir,
         get_clip_details_in_database, get_clips_in_database, get_clips_request_log,
         history_disk_bytes, load_recognized_text, mark_clip_used, migrate_clip_format_model,
         migrate_encrypted_storage, ocr_text_layout, remove_clip_image_files,
@@ -5487,10 +5502,38 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// Which log folder, if any, the storage readout leaves out. Only a
+    /// portable run puts logs inside the measured directory; an installed run
+    /// keeps them under `%LOCALAPPDATA%`, so a `logs` folder found there is
+    /// somebody's data and must be counted.
+    #[test]
+    fn only_a_portable_run_excludes_a_log_folder_from_storage_used() {
+        let history = std::env::temp_dir().join(format!("cubby-excl-{}", uuid::Uuid::new_v4()));
+
+        // Portable: the history data directory *is* the portable root.
+        assert_eq!(
+            excluded_log_dir(&history, Some(history.clone())),
+            Some(history.join("logs")),
+            "a portable run must leave its own log directory out"
+        );
+
+        // Installed: no portable root at all, so nothing is excluded and a
+        // user's `logs` folder still counts toward Storage used.
+        assert_eq!(excluded_log_dir(&history, None), None);
+
+        // A portable install whose root is somewhere else entirely must not
+        // make this directory's `logs` folder disappear from the measurement.
+        assert_eq!(
+            excluded_log_dir(&history, Some(history.join("elsewhere"))),
+            None
+        );
+    }
+
     /// The wiring, not just the walker: what `Storage used` and the reclaim
-    /// before/after actually report for a portable layout.
+    /// before/after report for the layout the test binary actually runs in,
+    /// which is the installed one (no `portable.txt` beside the test exe).
     #[tokio::test]
-    async fn history_disk_bytes_leaves_out_the_log_file() {
+    async fn history_disk_bytes_counts_an_installed_layout_whole() {
         let root = std::env::temp_dir().join(format!("cubby-history-{}", uuid::Uuid::new_v4()));
         let images = root.join("images");
         let logs = root.join("logs");
@@ -5507,12 +5550,13 @@ mod tests {
             .expect("measurement should succeed");
         assert_eq!(before, 524);
 
-        // Writing a log file must not change the reported history size.
-        std::fs::write(logs.join("Cubby.log"), vec![0u8; 9000]).expect("log file should write");
+        // Installed logs live under %LOCALAPPDATA%, so a `logs` folder here is
+        // user data. Skipping it would under-report by that whole subtree.
+        std::fs::write(logs.join("notes.txt"), vec![0u8; 9000]).expect("file should write");
         let after = history_disk_bytes(&database)
             .await
             .expect("measurement should succeed");
-        assert_eq!(after, before);
+        assert_eq!(after, 9524, "an installed run must not skip a logs folder");
 
         std::fs::remove_dir_all(&root).ok();
     }

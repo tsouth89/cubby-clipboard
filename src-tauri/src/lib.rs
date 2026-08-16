@@ -922,11 +922,11 @@ fn self_update_supported_for(portable: bool) -> bool {
 ///
 /// Takes the root as an argument rather than reading it, so the mapping is
 /// testable without an installed executable next to a `portable.txt`, and so
-/// `commands::history_disk_bytes` can ask where the logs would sit inside a data
+/// `commands::excluded_log_dir` can ask where the logs would sit inside a data
 /// directory it already has in hand. That second caller is why the storage
 /// readout and this mapping cannot drift apart: logs land inside the history
 /// data directory in portable mode, and the size measurement must skip exactly
-/// the folder this function names.
+/// the folder this function names — and only then.
 ///
 /// The first caller is the `LogTarget::LogDir` arm of `to_plugin_log_target`,
 /// which decides between the portable folder and the OS log directory.
