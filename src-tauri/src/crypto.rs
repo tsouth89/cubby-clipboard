@@ -3,6 +3,7 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use std::io;
 use std::path::Path;
 
 const ENVELOPE_MAGIC: &[u8; 4] = b"CUB1";
@@ -75,44 +76,44 @@ pub struct CryptoManager {
 impl CryptoManager {
     pub fn load_or_create(db_path: &Path, allow_create: bool) -> Result<Self, StorageError> {
         let key_path = db_path.with_file_name("storage.key");
-        let key = if key_path.exists() {
-            load_protected_key(&key_path)?
-        } else {
-            if !allow_create {
-                return Err(StorageError::Other(
-                    "encrypted clipboard history exists, but its protected storage key is missing"
-                        .to_string(),
+        let key = match key_path.try_exists() {
+            Ok(true) => load_protected_key(&key_path)?,
+            Err(error) => {
+                return Err(StorageError::Other(format!(
+                    "failed to inspect protected storage key path {}: {error}",
+                    key_path.display()
+                )));
+            }
+            Ok(false) => {
+                if !allow_create {
+                    return Err(StorageError::Other(
+                        "encrypted clipboard history exists, but its protected storage key is missing"
+                            .to_string(),
+                    ));
+                }
+                let mut key = [0_u8; KEY_LEN];
+                getrandom::fill(&mut key)
+                    .map_err(|e| format!("failed to generate storage key: {e}"))?;
+                let protected = protect_for_current_user(&key)?;
+                if let Some(parent) = key_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("failed to create storage directory: {e}"))?;
+                }
+                let temporary_path = key_path.with_file_name(format!(
+                    "storage.key.{}.{}.tmp",
+                    std::process::id(),
+                    uuid::Uuid::new_v4()
                 ));
-            }
-            let mut key = [0_u8; KEY_LEN];
-            getrandom::fill(&mut key)
-                .map_err(|e| format!("failed to generate storage key: {e}"))?;
-            let protected = protect_for_current_user(&key)?;
-            if let Some(parent) = key_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("failed to create storage directory: {e}"))?;
-            }
-            let temporary_path = key_path.with_file_name(format!(
-                "storage.key.{}.{}.tmp",
-                std::process::id(),
-                uuid::Uuid::new_v4()
-            ));
-            std::fs::write(&temporary_path, protected)
-                .map_err(|e| format!("failed to persist protected storage key: {e}"))?;
-            match std::fs::hard_link(&temporary_path, &key_path) {
-                Ok(()) => {
-                    let _ = std::fs::remove_file(&temporary_path);
-                    key
-                }
-                Err(_) if key_path.exists() => {
-                    let _ = std::fs::remove_file(&temporary_path);
-                    load_protected_key(&key_path)?
-                }
-                Err(error) => {
-                    let _ = std::fs::remove_file(&temporary_path);
-                    return Err(StorageError::Other(format!(
-                        "failed to install protected storage key: {error}"
-                    )));
+                std::fs::write(&temporary_path, protected)
+                    .map_err(|e| format!("failed to persist protected storage key: {e}"))?;
+                // CreateHardLinkW is NTFS-only. Portable first-run on FAT/exFAT
+                // (the path our own tests name `D:\USB\Cubby\data`) used to
+                // write a temp key, fail the link, delete the temp, and panic in
+                // Database::new (SBS-908). Backup export already special-cases
+                // FAT; this path has to as well.
+                match install_storage_key_file(&temporary_path, &key_path)? {
+                    KeyInstall::Installed => key,
+                    KeyInstall::AlreadyPresent => load_protected_key(&key_path)?,
                 }
             }
         };
@@ -211,6 +212,224 @@ impl CryptoManager {
     }
 }
 
+/// How the volume under `storage.key` answered "do you support hard links?"
+///
+/// Three states, not two. "GetVolumeInformationW failed" is not "this is
+/// FAT", and collapsing them is how a lock or permission error would be
+/// treated as "just rename it".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VolumeHardLinkSupport {
+    Supported,
+    Unsupported,
+    Unknown,
+}
+
+enum KeyInstall {
+    Installed,
+    AlreadyPresent,
+}
+
+fn install_storage_key_file(
+    temporary_path: &Path,
+    key_path: &Path,
+) -> Result<KeyInstall, StorageError> {
+    install_storage_key_file_with(
+        temporary_path,
+        key_path,
+        probe_volume_hard_link_support(temporary_path),
+        |source, destination| std::fs::hard_link(source, destination),
+    )
+}
+
+fn install_storage_key_file_with(
+    temporary_path: &Path,
+    key_path: &Path,
+    volume: VolumeHardLinkSupport,
+    hard_link: impl Fn(&Path, &Path) -> io::Result<()>,
+) -> Result<KeyInstall, StorageError> {
+    install_storage_key_file_using(
+        temporary_path,
+        key_path,
+        volume,
+        hard_link,
+        key_is_already_present,
+    )
+}
+
+/// `key_present` is injected so a test can fail the presence check the way a
+/// locked or permission-denied parent does. That check is a `?` in the middle
+/// of the install, so it is the path most likely to skip cleanup.
+fn install_storage_key_file_using(
+    temporary_path: &Path,
+    key_path: &Path,
+    volume: VolumeHardLinkSupport,
+    hard_link: impl Fn(&Path, &Path) -> io::Result<()>,
+    key_present: impl Fn(&Path) -> Result<bool, StorageError>,
+) -> Result<KeyInstall, StorageError> {
+    let outcome: Result<KeyInstall, StorageError> = (|| {
+        let link_result = match volume {
+            // Known no-hard-link volume (FAT/exFAT). Do not call
+            // CreateHardLinkW; it cannot succeed, and the failure is not a race.
+            VolumeHardLinkSupport::Unsupported => None,
+            VolumeHardLinkSupport::Supported | VolumeHardLinkSupport::Unknown => {
+                Some(hard_link(temporary_path, key_path))
+            }
+        };
+
+        match link_result {
+            Some(Ok(())) => return Ok(KeyInstall::Installed),
+            Some(Err(_)) if key_present(key_path)? => return Ok(KeyInstall::AlreadyPresent),
+            Some(Err(error)) if hard_link_error_means_unsupported(&error) => {
+                // Volume probe said Supported or Unknown, but the link error is
+                // the specific "this filesystem cannot do this" set. Fall
+                // through to an exclusive rename. A lock or access-denied does
+                // not land here.
+            }
+            Some(Err(error)) => return Err(install_key_error(volume, error)),
+            None => {}
+        }
+
+        match rename_without_replace(temporary_path, key_path) {
+            Ok(()) => Ok(KeyInstall::Installed),
+            Err(_) if key_present(key_path)? => Ok(KeyInstall::AlreadyPresent),
+            Err(error) => Err(StorageError::Other(format!(
+                "failed to install protected storage key: {error}"
+            ))),
+        }
+    })();
+
+    // One cleanup for every exit, including the `?` on the presence checks
+    // above. Leaving the temp behind leaves generated key bytes on disk, and a
+    // first run that keeps failing keeps accumulating them. After a successful
+    // rename the path is already gone, so this is a no-op there.
+    let _ = std::fs::remove_file(temporary_path);
+    outcome
+}
+
+fn install_key_error(volume: VolumeHardLinkSupport, error: io::Error) -> StorageError {
+    let message = match volume {
+        VolumeHardLinkSupport::Unknown => format!(
+            "failed to install protected storage key: {error} (volume hard-link support could not be determined)"
+        ),
+        _ => format!("failed to install protected storage key: {error}"),
+    };
+    StorageError::Other(message)
+}
+
+/// `exists()` treats an unreadable path as missing. That is the three-state
+/// collapse: a permission or lock error is not "no key yet".
+fn key_is_already_present(key_path: &Path) -> Result<bool, StorageError> {
+    key_path.try_exists().map_err(|error| {
+        StorageError::Other(format!(
+            "failed to inspect protected storage key path {}: {error}",
+            key_path.display()
+        ))
+    })
+}
+
+fn hard_link_error_means_unsupported(error: &io::Error) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        // CreateHardLinkW on FAT/exFAT: ERROR_INVALID_FUNCTION (1).
+        // Some filter drivers surface ERROR_NOT_SUPPORTED (50).
+        matches!(error.raw_os_error(), Some(1) | Some(50))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        error.kind() == io::ErrorKind::Unsupported
+    }
+}
+
+fn probe_volume_hard_link_support(path: &Path) -> VolumeHardLinkSupport {
+    match volume_reports_hard_links(path) {
+        Ok(true) => VolumeHardLinkSupport::Supported,
+        Ok(false) => VolumeHardLinkSupport::Unsupported,
+        Err(_) => VolumeHardLinkSupport::Unknown,
+    }
+}
+
+/// `Ok(true)` / `Ok(false)` are answers. `Err` is "we could not ask".
+#[cfg(target_os = "windows")]
+fn volume_reports_hard_links(path: &Path) -> Result<bool, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+
+    // FILE_SUPPORTS_HARD_LINKS. Named here so a missing windows-crate
+    // constant cannot change the meaning; the value is from GetVolumeInformationW.
+    const FILE_SUPPORTS_HARD_LINKS: u32 = 0x0040_0000;
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut root = [0_u16; 520];
+    unsafe { GetVolumePathNameW(PCWSTR(wide.as_ptr()), &mut root) }
+        .map_err(|error| error.to_string())?;
+
+    let mut flags = 0_u32;
+    unsafe {
+        GetVolumeInformationW(
+            PCWSTR(root.as_ptr()),
+            None,
+            None,
+            None,
+            Some(&mut flags),
+            None,
+        )
+    }
+    .map_err(|error| error.to_string())?;
+
+    Ok(flags & FILE_SUPPORTS_HARD_LINKS != 0)
+}
+
+/// Production first-run is Windows (DPAPI). On this crate's Linux compile
+/// we cannot ask a volume the same way, so the answer is Unknown rather
+/// than a guessed Supported.
+#[cfg(not(target_os = "windows"))]
+fn volume_reports_hard_links(_path: &Path) -> Result<bool, String> {
+    Err("volume hard-link support is only queried on Windows".to_string())
+}
+
+/// Install the temp key as `storage.key` without replacing a file that
+/// already won the race. `std::fs::rename` on Windows uses
+/// MOVEFILE_REPLACE_EXISTING, which would let a second first-run overwrite
+/// the key the first process is already using.
+fn rename_without_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
+        let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination_wide: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        unsafe {
+            MoveFileExW(
+                PCWSTR(source_wide.as_ptr()),
+                PCWSTR(destination_wide.as_ptr()),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        }
+        .map_err(|error| io::Error::other(error.to_string()))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Unix rename replaces. The Windows arm uses MoveFileExW without
+        // MOVEFILE_REPLACE_EXISTING so a second first-run cannot overwrite
+        // the winner. Mirror that here: refuse when dest is already present.
+        match destination.try_exists() {
+            Ok(true) => Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "protected storage key already exists",
+            )),
+            Ok(false) => std::fs::rename(source, destination),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn protect_for_current_user(plaintext: &[u8]) -> Result<Vec<u8>, String> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
@@ -282,6 +501,7 @@ fn unprotect_for_current_user(_protected: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::{CryptoManager, StorageError, KEY_LEN};
+    use std::io;
 
     #[test]
     fn encrypted_payloads_round_trip_and_detect_tampering() {
@@ -420,6 +640,187 @@ mod tests {
             std::fs::read(&key_path).unwrap(),
             b"not a DPAPI blob this account can open"
         );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn key_install_dir() -> std::path::PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "cubby-key-install-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    fn unsupported_hard_link_error() -> io::Error {
+        #[cfg(target_os = "windows")]
+        {
+            io::Error::from_raw_os_error(1)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            io::Error::new(io::ErrorKind::Unsupported, "hard links are not supported")
+        }
+    }
+
+    /// First-run on FAT/exFAT cannot CreateHardLinkW. The install must still
+    /// put `storage.key` in place; otherwise Database::new panics and a
+    /// portable USB never starts (SBS-908).
+    #[test]
+    fn storage_key_installs_when_volume_cannot_hard_link() {
+        let directory = key_install_dir();
+        let temporary_path = directory.join("storage.key.1.tmp");
+        let key_path = directory.join("storage.key");
+        std::fs::write(&temporary_path, b"protected-key-bytes").unwrap();
+
+        let result = super::install_storage_key_file_with(
+            &temporary_path,
+            &key_path,
+            super::VolumeHardLinkSupport::Unsupported,
+            |_, _| panic!("FAT/exFAT must not call hard_link"),
+        );
+
+        assert!(matches!(result, Ok(super::KeyInstall::Installed)));
+        assert_eq!(std::fs::read(&key_path).unwrap(), b"protected-key-bytes");
+        assert!(!temporary_path.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A volume we could not classify, plus a hard-link error that is not
+    /// "this filesystem cannot do this", is not FAT. Guessing a rename would
+    /// treat a lock or access-denied as a successful install.
+    #[test]
+    fn unknown_hard_link_failure_does_not_install_by_guessing() {
+        let directory = key_install_dir();
+        let temporary_path = directory.join("storage.key.1.tmp");
+        let key_path = directory.join("storage.key");
+        std::fs::write(&temporary_path, b"protected-key-bytes").unwrap();
+
+        let error = super::install_storage_key_file_with(
+            &temporary_path,
+            &key_path,
+            super::VolumeHardLinkSupport::Unknown,
+            |_, _| Err(io::Error::from_raw_os_error(33)),
+        )
+        .err()
+        .expect("an unclassified hard-link failure must not install the key");
+
+        assert!(error
+            .to_string()
+            .contains("volume hard-link support could not be determined"));
+        assert!(!key_path.exists());
+        assert!(!temporary_path.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// The error code is a stronger signal than a failed volume probe: USB
+    /// that GetVolumeInformationW could not name still has to start.
+    #[test]
+    fn unsupported_hard_link_error_falls_back_when_volume_is_unknown() {
+        let directory = key_install_dir();
+        let temporary_path = directory.join("storage.key.1.tmp");
+        let key_path = directory.join("storage.key");
+        std::fs::write(&temporary_path, b"protected-key-bytes").unwrap();
+
+        let result = super::install_storage_key_file_with(
+            &temporary_path,
+            &key_path,
+            super::VolumeHardLinkSupport::Unknown,
+            |_, _| Err(unsupported_hard_link_error()),
+        );
+
+        assert!(matches!(result, Ok(super::KeyInstall::Installed)));
+        assert_eq!(std::fs::read(&key_path).unwrap(), b"protected-key-bytes");
+        assert!(!temporary_path.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A second first-run must load the key that already landed. Exclusive
+    /// rename is the FAT stand-in for "hard_link fails if dest exists"; a
+    /// replacing rename would let the loser overwrite the winner.
+    #[test]
+    fn existing_dest_wins_on_unsupported_volume() {
+        let directory = key_install_dir();
+        let temporary_path = directory.join("storage.key.1.tmp");
+        let key_path = directory.join("storage.key");
+        std::fs::write(&key_path, b"winner").unwrap();
+        std::fs::write(&temporary_path, b"loser").unwrap();
+
+        let result = super::install_storage_key_file_with(
+            &temporary_path,
+            &key_path,
+            super::VolumeHardLinkSupport::Unsupported,
+            |_, _| panic!("FAT/exFAT must not call hard_link"),
+        );
+
+        assert!(matches!(result, Ok(super::KeyInstall::AlreadyPresent)));
+        assert_eq!(std::fs::read(&key_path).unwrap(), b"winner");
+        assert!(!temporary_path.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// SBS-908: the presence check is a `?` in the middle of the install, so a
+    /// `try_exists` that fails (locked parent, access denied, sharing
+    /// violation) used to return before the temp cleanup. Repeated failing
+    /// first runs then left generated key bytes on disk under
+    /// `storage.key.<pid>.<uuid>.tmp`.
+    #[test]
+    fn failed_presence_check_still_removes_the_temporary_key() {
+        let directory = key_install_dir();
+        let temporary_path = directory.join("storage.key.1.tmp");
+        let key_path = directory.join("storage.key");
+        std::fs::write(&temporary_path, b"protected-key-bytes").unwrap();
+
+        let error = super::install_storage_key_file_using(
+            &temporary_path,
+            &key_path,
+            super::VolumeHardLinkSupport::Supported,
+            |_, _| Err(io::Error::from_raw_os_error(33)),
+            |_| {
+                Err(super::StorageError::Other(
+                    "failed to inspect protected storage key path".to_string(),
+                ))
+            },
+        )
+        .err()
+        .expect("an unreadable key path must not report a successful install");
+
+        assert!(error.to_string().contains("failed to inspect"));
+        assert!(!key_path.exists());
+        assert!(
+            !temporary_path.exists(),
+            "the generated key bytes must not survive a failed presence check"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A Supported volume that fails hard_link for a reason that is not
+    /// "filesystem cannot do this" must not fall through to rename.
+    #[test]
+    fn supported_volume_does_not_rename_on_unrelated_hard_link_error() {
+        let directory = key_install_dir();
+        let temporary_path = directory.join("storage.key.1.tmp");
+        let key_path = directory.join("storage.key");
+        std::fs::write(&temporary_path, b"protected-key-bytes").unwrap();
+
+        let error = super::install_storage_key_file_with(
+            &temporary_path,
+            &key_path,
+            super::VolumeHardLinkSupport::Supported,
+            |_, _| Err(io::Error::from_raw_os_error(33)),
+        )
+        .err()
+        .expect("an NTFS hard-link failure is not a FAT fallback");
+
+        assert!(!error
+            .to_string()
+            .contains("volume hard-link support could not be determined"));
+        assert!(error
+            .to_string()
+            .contains("failed to install protected storage key"));
+        assert!(!key_path.exists());
+        assert!(!temporary_path.exists());
         std::fs::remove_dir_all(directory).unwrap();
     }
 }
