@@ -54,6 +54,7 @@ jobs:
       - uses: actions/cache@v6
         with:
           key: \${{ runner.os }}-cargo-check-\${{ matrix.target }}-\${{ matrix.features }}-lock
+      - run: mkdir dist
       - run: cargo check --manifest-path src-tauri/Cargo.toml --target \${{ matrix.target }} --all-targets \${{ matrix.extra_args }}
 `;
 
@@ -125,7 +126,62 @@ test('a cargo build / tauri build matrix is rejected as too expensive', () => {
     VALID_JOB.replace('cargo check --manifest-path', 'cargo build --manifest-path'),
   );
   assert.equal(result.ok, false);
-  assert.match(result.reason + ' ' + result.jobLevelProblems.join(';'), /no CI job runs cargo check|not bundle/);
+  assert.match(result.reason, /no CI job runs cargo check/);
+});
+
+test('a cargo check job that also cargo-builds is rejected as too expensive', () => {
+  const result = evaluateShippedWindowsCi(
+    VALID_JOB.replace(
+      '- run: cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} --all-targets ${{ matrix.extra_args }}',
+      `- run: cargo check --manifest-path src-tauri/Cargo.toml --target \${{ matrix.target }} --all-targets \${{ matrix.extra_args }}
+      - run: cargo build --manifest-path src-tauri/Cargo.toml --target \${{ matrix.target }}`,
+    ),
+  );
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.jobLevelProblems.some((problem) => problem.includes('not bundle')),
+    result.jobLevelProblems.join('; '),
+  );
+});
+
+test('an extra ubuntu cargo check job is not treated as the shipped-Windows matrix', () => {
+  const result = evaluateShippedWindowsCi(`${VALID_JOB}
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo check --manifest-path src-tauri/Cargo.toml
+`);
+  assert.equal(result.ok, true, result.reason || result.jobLevelProblems.join('; '));
+  assert.equal(result.matched.length, 4);
+});
+
+test('include rows indented more than two spaces still parse', () => {
+  const result = evaluateShippedWindowsCi(
+    VALID_JOB.replaceAll(
+      '          - arch:',
+      '            - arch:',
+    ).replaceAll(
+      '            target:',
+      '              target:',
+    ).replaceAll(
+      '            features:',
+      '              features:',
+    ).replaceAll(
+      '            extra_args:',
+      '              extra_args:',
+    ),
+  );
+  assert.equal(result.ok, true, result.reason || result.jobLevelProblems.join('; '));
+  assert.equal(result.matched.length, 4);
+});
+
+test('a matrix that never creates dist is rejected', () => {
+  const result = evaluateShippedWindowsCi(VALID_JOB.replace('      - run: mkdir dist\n', ''));
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.jobLevelProblems.some((problem) => problem.includes('create dist')),
+    result.jobLevelProblems.join('; '),
+  );
 });
 
 test('a cache key that omits target is rejected so matrix legs cannot clobber each other', () => {

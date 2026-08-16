@@ -80,7 +80,7 @@ export function parseIncludeMaps(jobLines) {
       break;
     }
     const itemStart = line.match(/^(\s+)-\s+([A-Za-z0-9_]+):\s*(.*)$/);
-    if (itemStart && itemStart[1].length === includeIndent + 2) {
+    if (itemStart && itemStart[1].length > includeIndent) {
       if (current) {
         items.push(current);
       }
@@ -159,6 +159,9 @@ function jobProblems(job) {
   if (/cargo\s+build\b/.test(body) || /tauri\s+build\b/.test(body)) {
     problems.push('pre-merge matrix must cargo check, not bundle');
   }
+  if (!/\bmkdir\s+dist\b/.test(body) && !/New-Item[^\n]*\bdist\b/.test(body)) {
+    problems.push('job must create dist so tauri generate_context can see frontendDist');
+  }
   if (!/--manifest-path\s+src-tauri\/Cargo\.toml/.test(body)) {
     problems.push('cargo check must use --manifest-path src-tauri/Cargo.toml');
   }
@@ -183,7 +186,12 @@ function jobProblems(job) {
 
 export function evaluateShippedWindowsCi(text) {
   const jobs = parseTopLevelJobs(text);
-  const checkJobs = jobs.filter((job) => job.lines.some((line) => !line.trim().startsWith('#') && line.includes('cargo check')));
+  // Only the shipped-Windows matrix: a host lint job that happens to run
+  // `cargo check` must not be required to look like this matrix.
+  const checkJobs = jobs.filter((job) => {
+    const body = job.lines.filter((line) => !line.trim().startsWith('#')).join('\n');
+    return /cargo\s+check\b/.test(body) && /matrix\.target/.test(body);
+  });
   const matched = [];
   const jobLevelProblems = [];
 

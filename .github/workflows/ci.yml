@@ -145,4 +145,8 @@ jobs:
             ${{ runner.os }}-cargo-check-${{ matrix.target }}-${{ matrix.features }}-
             ${{ runner.os }}-cargo-check-${{ matrix.target }}-
 
+      # tauri::generate_context! requires frontendDist ("../dist") to exist.
+      # The test job creates it via pnpm build; this matrix only cargo-checks.
+      - run: mkdir dist
+
       - run: cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} --all-targets ${{ matrix.extra_args }}
