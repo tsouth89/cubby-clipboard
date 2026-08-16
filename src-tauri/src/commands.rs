@@ -2227,10 +2227,11 @@ pub struct StorageReclaim {
 
 /// The Cubby history data directory: `cubby.db` (+ its `-wal`/`-shm` sidecars),
 /// the `images/` blob directory, and `storage.key`. It is `image_dir`'s parent
-/// (`image_dir` is `<data_dir>/images`). Logs go to their own directory
-/// (`lib.rs::persistent_log_target`), so everything here is history state. In
-/// portable mode that log directory is `<data_dir>/logs`, a sibling of
-/// `images/` rather than a child, so it is still outside this accounting.
+/// (`image_dir` is `<data_dir>/images`). An installed run keeps its logs under
+/// `%LOCALAPPDATA%`, well outside this directory, but a portable run writes them
+/// to `<data_dir>/logs` (`lib.rs::portable_log_dir`), which is inside it. Callers
+/// that measure this directory must exclude that log folder. See
+/// `history_disk_bytes`.
 fn history_data_dir(db: &Database) -> std::path::PathBuf {
     db.image_dir
         .parent()
@@ -2241,7 +2242,11 @@ fn history_data_dir(db: &Database) -> std::path::PathBuf {
 /// Recursively sum the size of every file under `path`. Missing or unreadable
 /// entries are skipped rather than failing the whole measurement. Runs on a
 /// blocking thread since it stat()s potentially thousands of image files.
-fn directory_size_bytes(path: &std::path::Path) -> i64 {
+///
+/// `exclude` skips one exact directory path and everything under it. It is an
+/// explicit path from the caller, not a name match, so a user folder that
+/// happens to be called `logs` is still measured.
+fn directory_size_bytes(path: &std::path::Path, exclude: Option<&std::path::Path>) -> i64 {
     let mut total: i64 = 0;
     let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -2253,7 +2258,11 @@ fn directory_size_bytes(path: &std::path::Path) -> i64 {
                 continue;
             };
             if metadata.is_dir() {
-                stack.push(entry.path());
+                let path = entry.path();
+                if exclude.is_some_and(|skip| skip == path) {
+                    continue;
+                }
+                stack.push(path);
             } else {
                 total = total.saturating_add(metadata.len() as i64);
             }
@@ -2262,9 +2271,17 @@ fn directory_size_bytes(path: &std::path::Path) -> i64 {
     total
 }
 
+/// Bytes of clipboard history on disk, logs excluded.
+///
+/// A portable run keeps its logs at `<data_dir>/logs`, a child of the directory
+/// measured here, so without this the log file would show up as "Storage used"
+/// and would move the reclaim before/after numbers. The excluded path comes from
+/// `portable_log_dir` itself, so the two cannot drift apart. An installed run has
+/// no such directory and the exclusion matches nothing.
 async fn history_disk_bytes(db: &Database) -> Result<i64, String> {
     let dir = history_data_dir(db);
-    tokio::task::spawn_blocking(move || directory_size_bytes(&dir))
+    let logs = crate::portable_log_dir(Some(dir.clone()));
+    tokio::task::spawn_blocking(move || directory_size_bytes(&dir, logs.as_deref()))
         .await
         .map_err(|error| error.to_string())
 }
@@ -3011,12 +3028,12 @@ mod tests {
         build_ocr_highlights, build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore,
         delete_folder_in_pool, directory_size_bytes, enforce_retention_in_pool,
         get_clip_details_in_database, get_clips_in_database, get_clips_request_log,
-        load_recognized_text, mark_clip_used, migrate_clip_format_model, migrate_encrypted_storage,
-        ocr_text_layout, remove_clip_image_files, remove_duplicate_clips_in_database,
-        restore_hash_material, search_clips_in_database, set_clip_notes_in_database,
-        set_clip_ocr_text_in_database, source_app_filter_log_state, toggle_clip_hidden_in_pool,
-        toggle_clip_pin_in_pool, update_clip_text_in_database, ClipboardContent, NOTE_CHAR_LIMIT,
-        OCR_SNIPPET_CHAR_LIMIT,
+        history_disk_bytes, load_recognized_text, mark_clip_used, migrate_clip_format_model,
+        migrate_encrypted_storage, ocr_text_layout, remove_clip_image_files,
+        remove_duplicate_clips_in_database, restore_hash_material, search_clips_in_database,
+        set_clip_notes_in_database, set_clip_ocr_text_in_database, source_app_filter_log_state,
+        toggle_clip_hidden_in_pool, toggle_clip_pin_in_pool, update_clip_text_in_database,
+        ClipboardContent, NOTE_CHAR_LIMIT, OCR_SNIPPET_CHAR_LIMIT,
     };
     use crate::clipboard::CapturedFormat;
     use crate::database::Database;
@@ -5431,11 +5448,71 @@ mod tests {
         std::fs::write(images.join("b.cubby"), vec![0u8; 24]).expect("image should write");
 
         // Recurses into subdirectories and sums every file.
-        assert_eq!(directory_size_bytes(&root), 1524);
+        assert_eq!(directory_size_bytes(&root, None), 1524);
 
         // A path that does not exist measures as zero rather than erroring.
         let missing = root.join("does-not-exist");
-        assert_eq!(directory_size_bytes(&missing), 0);
+        assert_eq!(directory_size_bytes(&missing, None), 0);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Portable mode writes logs to `<data_dir>/logs`, inside the directory the
+    /// storage readout measures. The log file is not history, so "Storage used"
+    /// and the reclaim before/after must not count it.
+    #[test]
+    fn directory_size_skips_the_portable_log_directory() {
+        let root = std::env::temp_dir().join(format!("cubby-logsize-{}", uuid::Uuid::new_v4()));
+        let images = root.join("images");
+        let logs = crate::portable_log_dir(Some(root.clone())).expect("portable root has logs");
+        std::fs::create_dir_all(&images).expect("temp dirs should create");
+        std::fs::create_dir_all(&logs).expect("log dir should create");
+        std::fs::write(root.join("cubby.db"), vec![0u8; 500]).expect("db file should write");
+        std::fs::write(images.join("a.cubby"), vec![0u8; 24]).expect("image should write");
+        std::fs::write(logs.join("Cubby.log"), vec![0u8; 9000]).expect("log file should write");
+
+        // History bytes only: the 9000-byte log is left out.
+        assert_eq!(directory_size_bytes(&root, Some(&logs)), 524);
+
+        // Without the exclusion the same tree measures the log file too, which is
+        // the inflated number users used to see.
+        assert_eq!(directory_size_bytes(&root, None), 9524);
+
+        // A folder merely *named* logs elsewhere in the tree is still history.
+        let nested = images.join("logs");
+        std::fs::create_dir_all(&nested).expect("nested dir should create");
+        std::fs::write(nested.join("b.cubby"), vec![0u8; 6]).expect("image should write");
+        assert_eq!(directory_size_bytes(&root, Some(&logs)), 530);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The wiring, not just the walker: what `Storage used` and the reclaim
+    /// before/after actually report for a portable layout.
+    #[tokio::test]
+    async fn history_disk_bytes_leaves_out_the_log_file() {
+        let root = std::env::temp_dir().join(format!("cubby-history-{}", uuid::Uuid::new_v4()));
+        let images = root.join("images");
+        let logs = root.join("logs");
+        std::fs::create_dir_all(&images).expect("temp dirs should create");
+        std::fs::create_dir_all(&logs).expect("log dir should create");
+        std::fs::write(root.join("cubby.db"), vec![0u8; 500]).expect("db file should write");
+        std::fs::write(images.join("a.cubby"), vec![0u8; 24]).expect("image should write");
+
+        let mut database = test_database().await;
+        database.image_dir = images;
+
+        let before = history_disk_bytes(&database)
+            .await
+            .expect("measurement should succeed");
+        assert_eq!(before, 524);
+
+        // Writing a log file must not change the reported history size.
+        std::fs::write(logs.join("Cubby.log"), vec![0u8; 9000]).expect("log file should write");
+        let after = history_disk_bytes(&database)
+            .await
+            .expect("measurement should succeed");
+        assert_eq!(after, before);
 
         std::fs::remove_dir_all(&root).ok();
     }

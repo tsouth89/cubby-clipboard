@@ -895,18 +895,6 @@ pub fn animate_window_hide(
     });
 }
 
-/// Portable data directory, or None for a normal installed run.
-///
-/// Cubby runs in portable mode when a `portable.txt` marker sits next to the
-/// executable (the portable download ships one). In that mode every piece of
-/// state (database, images, `storage.key`, settings, and logs) lives in
-/// `<exe_dir>/data`, so nothing is written to AppData or the registry.
-///
-/// History stays encrypted with the Windows account key, so a portable copy is
-/// fully portable on the same PC and account. Carried to a different account it
-/// does *not* start fresh: DPAPI refuses the key, and startup explains the
-/// recovery options rather than deleting anything. See
-/// `report_storage_key_locked`.
 /// Whether this build may run the installed-channel self-update.
 ///
 /// Store builds compile the updater out entirely. Portable builds are a runtime
@@ -933,11 +921,15 @@ fn self_update_supported_for(portable: bool) -> bool {
 /// with them, which is the whole point of the portable build.
 ///
 /// Takes the root as an argument rather than reading it, so the mapping is
-/// testable without an installed executable next to a `portable.txt`.
+/// testable without an installed executable next to a `portable.txt`, and so
+/// `commands::history_disk_bytes` can ask where the logs would sit inside a data
+/// directory it already has in hand. That second caller is why the storage
+/// readout and this mapping cannot drift apart: logs land inside the history
+/// data directory in portable mode, and the size measurement must skip exactly
+/// the folder this function names.
 ///
-/// Its non-test caller is the `LogTarget::LogDir` arm of
-/// `to_plugin_log_target`, which decides between the portable folder and the
-/// OS log directory.
+/// The first caller is the `LogTarget::LogDir` arm of `to_plugin_log_target`,
+/// which decides between the portable folder and the OS log directory.
 pub(crate) fn portable_log_dir(
     portable_root: Option<std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
@@ -993,6 +985,18 @@ fn show_startup_error(title: &str, body: &str) {
 #[cfg(not(target_os = "windows"))]
 fn show_startup_error(_title: &str, _body: &str) {}
 
+/// Portable data directory, or None for a normal installed run.
+///
+/// Cubby runs in portable mode when a `portable.txt` marker sits next to the
+/// executable (the portable download ships one). In that mode every piece of
+/// state (database, images, `storage.key`, settings, and logs) lives in
+/// `<exe_dir>/data`, so nothing is written to AppData or the registry.
+///
+/// History stays encrypted with the Windows account key, so a portable copy is
+/// fully portable on the same PC and account. Carried to a different account it
+/// does *not* start fresh: DPAPI refuses the key, and startup explains the
+/// recovery options rather than deleting anything. See
+/// `report_storage_key_locked`.
 pub fn portable_data_dir() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
