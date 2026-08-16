@@ -99,6 +99,9 @@ struct RecentCapture {
     credential_like: bool,
 }
 
+mod forget_on_clear;
+use forget_on_clear::ForgetClipLookup;
+
 /// Pure helper for SOU-316 unit tests: only empty clears within the window
 /// forget the last clip. A later clear must leave history alone.
 fn should_forget_recent_capture(
@@ -2355,25 +2358,45 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
     let _guard = CLIPBOARD_SYNC.lock().await;
     let pool = &db.pool;
 
-    let row: Option<(i64, i64)> = sqlx::query_as(
-        r#"
-        SELECT is_pinned, is_deleted
-        FROM clips
-        WHERE uuid = ?
-        "#,
-    )
-    .bind(&recent.uuid)
-    .fetch_optional(pool)
-    .await
-    .unwrap_or(None);
+    // A failed SELECT must not be read as "already gone". unwrap_or(None)
+    // dropped the retry marker on a transient lock, so a later clear could
+    // not forget the password that was still in history (SBS-831).
+    let uuid = recent.uuid.clone();
+    let lookup = ForgetClipLookup::from_query(
+        sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT is_pinned, is_deleted
+            FROM clips
+            WHERE uuid = ?
+            "#,
+        )
+        .bind(&uuid)
+        .fetch_optional(pool)
+        .await,
+        recent,
+    );
 
-    let Some((is_pinned, is_deleted)) = row else {
-        log::debug!(
-            "CLIPBOARD: Clear sequence {} — recent capture {} already gone",
-            sequence,
-            recent.uuid
-        );
-        return;
+    let (is_pinned, is_deleted, recent) = match lookup {
+        ForgetClipLookup::Found {
+            row: (is_pinned, is_deleted),
+            taken,
+        } => (is_pinned, is_deleted, taken),
+        ForgetClipLookup::AlreadyGone => {
+            log::debug!(
+                "CLIPBOARD: Clear sequence {} — recent capture {} already gone",
+                sequence,
+                uuid
+            );
+            return;
+        }
+        ForgetClipLookup::Failed { error, taken } => {
+            log::error!(
+                "CLIPBOARD: forget-on-clear skipped for sequence {sequence} (clip {}); lookup failed, so the retry marker was restored: {error}",
+                taken.uuid
+            );
+            restore_marker(taken);
+            return;
+        }
     };
 
     if is_pinned != 0 {
