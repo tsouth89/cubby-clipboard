@@ -24,6 +24,7 @@ import {
   parseImageMetadata,
   sourceLabel,
 } from '../utils/clipDisplay';
+import { shouldRenderClipRowNote } from '../utils/clipRowPresentation';
 
 interface ClipCardProps {
   clip: ClipboardItem;
@@ -53,6 +54,19 @@ interface ClipCardProps {
   /** Toggle multi-selection. The event carries the modifiers, so the caller can
    *  tell a plain toggle from a shift-extend. */
   onToggleSelect?: (event: React.MouseEvent) => void;
+}
+
+function ClipRowNote({ notes }: { notes: string }) {
+  return (
+    <p
+      data-el="clip-note"
+      className="mt-1 flex min-w-0 items-center gap-1 text-[11px] text-primary/85"
+      title={notes}
+    >
+      <StickyNote size={10} className="shrink-0" />
+      <span className="truncate">{notes}</span>
+    </p>
+  );
 }
 
 export const ClipCard = memo(function ClipCard({
@@ -307,6 +321,10 @@ export const ClipCard = memo(function ClipCard({
                   {imageDetails.join(' · ')}
                 </p>
               ) : null}
+              {shouldRenderClipRowNote(clip.notes, {
+                hidden: isHidden,
+                clipType: clip.clip_type,
+              }) && <ClipRowNote notes={clip.notes ?? ''} />}
               <p className="mt-1.5 truncate text-[11px] text-muted-foreground">
                 {label}
                 {age && <span className="px-1.5 text-muted-foreground/40">•</span>}
@@ -325,19 +343,10 @@ export const ClipCard = memo(function ClipCard({
             >
               {preview.slice(0, PREVIEW_CHAR_LIMIT)}
             </p>
-            {/* Explicit emptiness check: a note of "0" is a real note, and a
-                truthiness test would drop it while search and the title still
-                treated it as present. */}
-            {clip.notes != null && clip.notes !== '' && (
-              <p
-                data-el="clip-note"
-                className="mt-1 flex min-w-0 items-center gap-1 text-[11px] text-primary/85"
-                title={clip.notes}
-              >
-                <StickyNote size={10} className="shrink-0" />
-                <span className="truncate">{clip.notes}</span>
-              </p>
-            )}
+            {shouldRenderClipRowNote(clip.notes, {
+              hidden: isHidden,
+              clipType: clip.clip_type,
+            }) && <ClipRowNote notes={clip.notes ?? ''} />}
             <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
               {clip.is_pinned && (
                 <>

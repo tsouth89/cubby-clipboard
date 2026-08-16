@@ -13,6 +13,8 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Pre-merge CI now cargo-checks x64 and ARM64 default and Microsoft Store feature builds, so those configurations fail on the pull request instead of at release (SBS-779)
 
 ### Fixed
+- Screenshot notes now show on the History row, not only in the preview pane (SBS-807)
+- The image window no longer offers Copy image after the original has expired (SBS-807)
 - Backup export, backup import, and Ditto import now only write or read a path chosen in the file dialog, so a compromised Settings page cannot send history to an arbitrary location (SBS-808)
 
 ## v1.3.1

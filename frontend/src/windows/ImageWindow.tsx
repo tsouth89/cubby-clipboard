@@ -6,6 +6,11 @@ import { Toaster, toast } from 'sonner';
 import { ClipDetails } from '../components/ClipPreview';
 import { ImageTextViewer } from '../components/ImageTextViewer';
 import { imageSrcFromContent } from '../utils/clipDisplay';
+import {
+  canCopyFullImage,
+  fullImageCopyState,
+  fullImageCopyTitle,
+} from '../utils/clipRowPresentation';
 import { useSystemAccent } from '../hooks/useSystemAccent';
 import { useTheme } from '../hooks/useTheme';
 import { Settings } from '../types';
@@ -68,8 +73,12 @@ export function ImageWindow() {
     }
   }, []);
 
+  const loadFailed = error != null;
+  const copyState = fullImageCopyState(details?.image_expired, loadFailed);
+  const copyImageEnabled = canCopyFullImage(copyState);
+
   const handleCopyImage = useCallback(async () => {
-    if (!clipId) return;
+    if (!clipId || !canCopyFullImage(fullImageCopyState(details?.image_expired))) return;
     try {
       await invoke('copy_clip', { id: clipId, plainText: false });
       toast.success('Copied');
@@ -77,7 +86,7 @@ export function ImageWindow() {
       console.error('Failed to copy the image:', copyError);
       toast.error('Failed to copy');
     }
-  }, [clipId]);
+  }, [clipId, details?.image_expired]);
 
   const handleCopyAllText = useCallback(async () => {
     if (!clipId) return;
@@ -101,7 +110,7 @@ export function ImageWindow() {
 
   const imageSrc = details ? imageSrcFromContent(details.content) : null;
   const actionClass =
-    'inline-flex items-center gap-1.5 rounded-md border border-white/[0.09] bg-white/[0.05] px-2.5 py-1.5 text-[11px] font-medium text-foreground transition-colors hover:bg-white/[0.1]';
+    'inline-flex items-center gap-1.5 rounded-md border border-white/[0.09] bg-white/[0.05] px-2.5 py-1.5 text-[11px] font-medium text-foreground transition-colors enabled:hover:bg-white/[0.1] disabled:opacity-40';
 
   return (
     <div className="flex h-screen select-none flex-col bg-background text-foreground">
@@ -122,7 +131,14 @@ export function ImageWindow() {
           )}
         </div>
         <div className="flex items-center gap-1.5" onMouseDown={(event) => event.stopPropagation()}>
-          <button type="button" className={actionClass} onClick={handleCopyImage}>
+          <button
+            type="button"
+            className={actionClass}
+            onClick={handleCopyImage}
+            disabled={!copyImageEnabled}
+            title={fullImageCopyTitle(copyState)}
+            aria-label={fullImageCopyTitle(copyState)}
+          >
             <Copy size={13} />
             Copy image
           </button>
