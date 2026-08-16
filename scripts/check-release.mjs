@@ -278,8 +278,10 @@ for (const sensitiveLogFragment of ['Detected self-paste for hash', 'full_path: 
 }
 
 // SBS-837: release builds must not stream Rust logs into the WebView.
-// Prefer an inline `#[cfg(not(debug_assertions))]` targets list when present;
-// otherwise the production arm of `log_targets()` is the source of truth.
+// `log_targets()` is the single source of truth and calling it is mandatory --
+// an inline `#[cfg(not(debug_assertions))]` targets list is not an accepted
+// substitute. The inline scan below only exists to reject a leftover one that
+// still names Webview.
 const inlineReleaseTargets = libSource.match(
   /#\[cfg\(not\(debug_assertions\)\)\][\s\S]*?\.targets\(\[([\s\S]*?)\]\)/,
 )?.[1];
@@ -304,6 +306,49 @@ if (productionLogTargets.includes('Webview')) {
 }
 if (!productionLogTargets.includes('LogDir')) {
   throw new Error('Release log_builder.targets must still include LogDir');
+}
+
+// The enum above is only as good as the mapping onto `tauri_plugin_log`.
+// `to_plugin_log_target` is the one place that can construct
+// `TargetKind::Webview`, so pin each arm to its own TargetKind and refuse any
+// other mention of Webview in lib.rs (for example a target appended after the
+// helper's list).
+const pluginTargetMapper = libSource.match(
+  /fn to_plugin_log_target\([\s\S]*?\n\}/,
+)?.[0];
+if (!pluginTargetMapper) {
+  throw new Error('Could not find to_plugin_log_target() in lib.rs');
+}
+
+const logTargetArms = new Map(
+  [
+    ...pluginTargetMapper.matchAll(
+      /LogTarget::(Stdout|Webview|LogDir)\s*=>([\s\S]*?)(?=LogTarget::(?:Stdout|Webview|LogDir)\s*=>|$)/g,
+    ),
+  ].map(([, variant, body]) => [variant, body]),
+);
+for (const [variant, expectedKind] of [
+  ['Stdout', 'TargetKind::Stdout'],
+  ['Webview', 'TargetKind::Webview'],
+  ['LogDir', 'TargetKind::LogDir'],
+]) {
+  const arm = logTargetArms.get(variant);
+  if (arm === undefined) {
+    throw new Error(`to_plugin_log_target() is missing the LogTarget::${variant} arm`);
+  }
+  if (!arm.includes(expectedKind)) {
+    throw new Error(`LogTarget::${variant} must map to ${expectedKind}`);
+  }
+  if (variant !== 'Webview' && arm.includes('TargetKind::Webview')) {
+    throw new Error(`LogTarget::${variant} must not map to TargetKind::Webview`);
+  }
+}
+
+const countWebviewKind = (source) => source.split('TargetKind::Webview').length - 1;
+if (countWebviewKind(libSource) !== countWebviewKind(logTargetArms.get('Webview'))) {
+  throw new Error(
+    'lib.rs must only name TargetKind::Webview inside the LogTarget::Webview arm of to_plugin_log_target()',
+  );
 }
 
 const secretGates = [
