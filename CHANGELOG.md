@@ -2,7 +2,7 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
-## Unreleased
+## v1.3.2
 
 ### Security
 - The Win+V helper no longer opens the flyout on a bare localhost UDP `activate` datagram; the channel now requires a per-session token, a loopback source, and a rate limit (SBS-809)
