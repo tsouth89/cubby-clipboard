@@ -1075,7 +1075,8 @@ async fn get_clips_in_database(
             if let Some(to) = date_to.as_deref() {
                 query = query.bind(to.to_string());
             }
-            let ordered_ids: Vec<String> = query.fetch_all(pool).await.map_err(|e| e.to_string())?;
+            let ordered_ids: Vec<String> =
+                query.fetch_all(pool).await.map_err(|e| e.to_string())?;
             let matching: Vec<String> = ordered_ids
                 .into_iter()
                 .filter(|id| allowed.contains(id))
@@ -2088,8 +2089,8 @@ async fn search_clips_in_database(
     // An indexed hit can still fail to decrypt here (the index skips the
     // content of an image clip, so a corrupt thumbnail only surfaces now), so
     // the page is filled with readable rows rather than trimmed after the fact.
-    let clips = collect_readable_clips_by_id(db, &matching, requested_offset, requested_limit)
-        .await?;
+    let clips =
+        collect_readable_clips_by_id(db, &matching, requested_offset, requested_limit).await?;
     let sql_ms = sql_started.elapsed().as_millis();
 
     let image_rows = clips
@@ -3216,14 +3217,12 @@ mod tests {
     }
 
     async fn paged_ids(database: &Database, limit: i64, offset: i64) -> Vec<String> {
-        get_clips_in_database(
-            None, limit, offset, None, None, None, None, None, database,
-        )
-        .await
-        .expect("listing must survive an unreadable clip")
-        .into_iter()
-        .map(|clip| clip.id)
-        .collect()
+        get_clips_in_database(None, limit, offset, None, None, None, None, None, database)
+            .await
+            .expect("listing must survive an unreadable clip")
+            .into_iter()
+            .map(|clip| clip.id)
+            .collect()
     }
 
     async fn searched_ids(database: &Database, limit: i64, offset: i64) -> Vec<String> {
@@ -4318,7 +4317,10 @@ mod tests {
             .await
             .expect("the index should build");
         assert!(
-            database.search_index.matches("pageable").contains("page-image"),
+            database
+                .search_index
+                .matches("pageable")
+                .contains("page-image"),
             "the corrupt thumbnail is still a search candidate"
         );
 
