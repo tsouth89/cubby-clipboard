@@ -46,7 +46,7 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 log = "0.4.29"
 window-vibrancy = { git = "https://github.com/XueshiQiao/window-vibrancy.git" }
-dark-light = "2.0.0"
+dark-light = "3.0.0"
 tauri-plugin-dialog = "2"
 clipboard-rs = "0.2"
 clipboard-win = { version = "5.4.1", features = ["monitor"] }
