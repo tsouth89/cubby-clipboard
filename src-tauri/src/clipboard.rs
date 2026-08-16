@@ -1923,10 +1923,20 @@ async fn process_clipboard_snapshot(
 
     // Only accepted content participates in consecutive duplicate suppression.
     // An ignored application must not prevent the same content from being captured later.
+    //
+    // Hash equality alone is not enough for images: retention can expire the
+    // stored original while LAST_STABLE_HASH still holds this hash, and
+    // skipping here would never revive it (SBS-769). Look up the stored row
+    // when the hashes match. Text keeps today's skip.
+    let storage_hash = db.crypto.keyed_hash(&hash_material);
     {
-        let lock = LAST_STABLE_HASH.lock();
-        if let Some(ref last_hash) = *lock {
-            if last_hash == &clip_hash {
+        let consecutive_match = LAST_STABLE_HASH.lock().as_ref() == Some(&clip_hash);
+        if consecutive_match {
+            if clip_type != "image" {
+                return;
+            }
+            let stored = lookup_stored_original(&db.pool, &storage_hash).await;
+            if consecutive_dedup_decision(stored) == ConsecutiveDedupDecision::Skip {
                 return;
             }
         }
@@ -1943,7 +1953,6 @@ async fn process_clipboard_snapshot(
 
     // DB Logic
     let pool = &db.pool;
-    let storage_hash = db.crypto.keyed_hash(&hash_material);
     let encrypted_content = match db.crypto.encrypt(&clip_content) {
         Ok(content) => content,
         Err(error) => {
@@ -2065,6 +2074,15 @@ async fn process_clipboard_snapshot(
                 );
                 return;
             }
+            // No second pass over the same file. `recapture_existing_image`
+            // above already staged the original, upserted `clip_images`, and
+            // cleared `full_image_expired` in one transaction. Writing
+            // `{uuid}.cubby` again here was not just wasted work: it was the
+            // only place the expired flag was cleared, so a failure of that
+            // second write (no room for another temp copy, or Windows refusing
+            // to replace the file recapture had just created) left the original
+            // on disk and indexed while Paste and Copy went on refusing it as
+            // expired (SBS-769).
         } else {
             if let Err(error) = sqlx::query(r#"UPDATE clips SET created_at = CURRENT_TIMESTAMP, is_deleted = 0, source_app = ?, source_icon = ? WHERE uuid = ?"#)
                 .bind(&encrypted_source_app)
@@ -2602,6 +2620,69 @@ async fn recapture_existing_image(
     }
 }
 
+/// How a consecutive-hash match should be treated once we have looked up the
+/// stored row (SBS-769).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConsecutiveDedupDecision {
+    Skip,
+    Capture,
+}
+
+/// Result of looking up the stored clip for a consecutive-hash match.
+///
+/// Three states, not two: a failed lookup is not "no row".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoredOriginalLookup {
+    /// No clip with this hash is stored. Today's skip still applies.
+    Missing,
+    /// Row exists; `true` means retention expired the original.
+    Found { full_image_expired: bool },
+    /// The database could not be read. Treat as unknown: do not skip.
+    Unknown,
+}
+
+/// Decide whether a consecutive-hash match should skip capture.
+///
+/// Today's helper skipped whenever the hashes matched. That drops revival
+/// after retention expires an original: `LAST_STABLE_HASH` still holds the
+/// hash, so the re-copy never reaches the persist path.
+pub(crate) fn consecutive_dedup_decision(stored: StoredOriginalLookup) -> ConsecutiveDedupDecision {
+    match stored {
+        StoredOriginalLookup::Missing => ConsecutiveDedupDecision::Skip,
+        StoredOriginalLookup::Found {
+            full_image_expired: false,
+        } => ConsecutiveDedupDecision::Skip,
+        StoredOriginalLookup::Found {
+            full_image_expired: true,
+        }
+        | StoredOriginalLookup::Unknown => ConsecutiveDedupDecision::Capture,
+    }
+}
+
+pub(crate) async fn lookup_stored_original(
+    pool: &sqlx::SqlitePool,
+    storage_hash: &str,
+) -> StoredOriginalLookup {
+    match sqlx::query_scalar::<_, bool>(
+        "SELECT full_image_expired FROM clips WHERE content_hash = ?",
+    )
+    .bind(storage_hash)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(None) => StoredOriginalLookup::Missing,
+        Ok(Some(full_image_expired)) => StoredOriginalLookup::Found { full_image_expired },
+        Err(error) => {
+            log::warn!(
+                "CLIPBOARD: could not look up stored original for consecutive-dedup: {error}"
+            );
+            StoredOriginalLookup::Unknown
+        }
+    }
+}
+
+/// Why restoring an existing image original failed.
+///
 pub fn read_full_image_file(
     crypto: &crate::crypto::CryptoManager,
     file_path: &str,
@@ -3497,5 +3578,372 @@ mod tests {
         assert_eq!(capture_state_name(CAPTURE_STATE_LISTENING), "listening");
         assert_eq!(capture_state_name(CAPTURE_STATE_RESTARTING), "restarting");
         assert_eq!(capture_state_name(CAPTURE_STATE_STOPPED), "stopped");
+    }
+
+    /// SBS-769: consecutive-hash equality used to skip capture unconditionally.
+    /// After retention expires an original, that skip is the revival miss.
+    #[test]
+    fn consecutive_dedup_does_not_skip_an_expired_or_unknown_original() {
+        use super::{consecutive_dedup_decision, ConsecutiveDedupDecision, StoredOriginalLookup};
+
+        // Today's helper: hash match => skip. Expired must not take that path.
+        assert_eq!(
+            consecutive_dedup_decision(StoredOriginalLookup::Found {
+                full_image_expired: true,
+            }),
+            ConsecutiveDedupDecision::Capture
+        );
+        assert_eq!(
+            consecutive_dedup_decision(StoredOriginalLookup::Unknown),
+            ConsecutiveDedupDecision::Capture
+        );
+        assert_eq!(
+            consecutive_dedup_decision(StoredOriginalLookup::Found {
+                full_image_expired: false,
+            }),
+            ConsecutiveDedupDecision::Skip
+        );
+        assert_eq!(
+            consecutive_dedup_decision(StoredOriginalLookup::Missing),
+            ConsecutiveDedupDecision::Skip
+        );
+    }
+
+    mod revive_expired_original {
+        use super::super::{
+            consecutive_dedup_decision, lookup_stored_original, persist_full_image_file,
+            recapture_existing_image, ConsecutiveDedupDecision, StoredOriginalLookup,
+        };
+        use crate::commands::{load_full_image_content, IMAGE_EXPIRED_ERROR};
+        use crate::database::Database;
+        use crate::image_persist::RecaptureFields;
+        use crate::models::Clip;
+        use sqlx::sqlite::SqlitePoolOptions;
+        use std::sync::Arc;
+
+        const OCR_TEXT: &str = "invoice AK1A9";
+        const OCR_WORDS: &str = r#"{"image_width":10,"image_height":10,"words":[]}"#;
+        const THUMBNAIL: &[u8] = b"thumbnail-bytes";
+        const ORIGINAL: &[u8] = b"full-resolution-png-bytes";
+
+        async fn test_database() -> Database {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .expect("in-memory database should open");
+            sqlx::query("PRAGMA foreign_keys = ON")
+                .execute(&pool)
+                .await
+                .expect("foreign keys should be enabled in tests");
+            let database = Database {
+                pool,
+                crypto: Arc::new(crate::crypto::CryptoManager::ephemeral()),
+                image_dir: std::env::temp_dir()
+                    .join(format!("cubby-sbs-769-{}", uuid::Uuid::new_v4())),
+                search_index: Arc::new(crate::search_index::SearchIndex::default()),
+            };
+            database.migrate().await.expect("migration should succeed");
+            database
+        }
+
+        async fn seed_expired_image(database: &Database, uuid: &str, content_hash: &str) {
+            sqlx::query(
+                r#"
+                INSERT INTO clips (
+                    uuid, clip_type, content, text_preview, content_hash,
+                    ocr_text, ocr_words, ocr_status, full_image_expired, is_thumbnail
+                )
+                VALUES (?, 'image', ?, '[Image]', ?, ?, ?, 'completed', 1, 1)
+                "#,
+            )
+            .bind(uuid)
+            .bind(THUMBNAIL)
+            .bind(content_hash)
+            .bind(OCR_TEXT)
+            .bind(OCR_WORDS)
+            .execute(&database.pool)
+            .await
+            .expect("expired image fixture should insert");
+        }
+
+        async fn expired_flag(database: &Database, uuid: &str) -> i64 {
+            sqlx::query_scalar("SELECT full_image_expired FROM clips WHERE uuid = ?")
+                .bind(uuid)
+                .fetch_one(&database.pool)
+                .await
+                .expect("expired flag should load")
+        }
+
+        async fn ocr_row(database: &Database, uuid: &str) -> (String, String, String) {
+            sqlx::query_as("SELECT ocr_text, ocr_words, ocr_status FROM clips WHERE uuid = ?")
+                .bind(uuid)
+                .fetch_one(&database.pool)
+                .await
+                .expect("ocr columns should load")
+        }
+
+        async fn load_clip(database: &Database, uuid: &str) -> Clip {
+            sqlx::query_as("SELECT * FROM clips WHERE uuid = ?")
+                .bind(uuid)
+                .fetch_one(&database.pool)
+                .await
+                .expect("clip should load")
+        }
+
+        fn cleanup(database: &Database) {
+            let _ = std::fs::remove_dir_all(&database.image_dir);
+        }
+
+        /// The recapture the capture loop performs for an existing image clip:
+        /// stage the original, rewrite the row, index it, then swap the file in.
+        async fn recapture(database: &Database, uuid: &str, bytes: &[u8]) -> Result<(), String> {
+            recapture_existing_image(
+                database,
+                uuid,
+                bytes,
+                RecaptureFields {
+                    source_app: &None,
+                    source_icon: &None,
+                    content: THUMBNAIL,
+                    preview: "[Image]",
+                    metadata: None,
+                },
+            )
+            .await
+        }
+
+        /// SBS-769: re-copying an expired image wrote fresh bytes but left
+        /// `full_image_expired` set, so paste/copy still rejected the original.
+        #[tokio::test]
+        async fn direct_recopy_after_expiry_restores_original_and_keeps_ocr() {
+            let database = test_database().await;
+            seed_expired_image(&database, "shot", "hash-shot").await;
+
+            let mut expired = load_clip(&database, "shot").await;
+            assert_eq!(
+                load_full_image_content(&database, &mut expired)
+                    .await
+                    .unwrap_err(),
+                IMAGE_EXPIRED_ERROR
+            );
+
+            recapture(&database, "shot", ORIGINAL)
+                .await
+                .expect("revival should persist the original");
+
+            assert_eq!(expired_flag(&database, "shot").await, 0);
+            let mut revived = load_clip(&database, "shot").await;
+            let bytes = load_full_image_content(&database, &mut revived)
+                .await
+                .expect("revived original should be loadable");
+            assert_eq!(bytes, ORIGINAL);
+
+            let (ocr_text, ocr_words, ocr_status) = ocr_row(&database, "shot").await;
+            assert_eq!(ocr_text, OCR_TEXT);
+            assert_eq!(ocr_words, OCR_WORDS);
+            assert_eq!(ocr_status, "completed");
+            let thumbnail: Vec<u8> =
+                sqlx::query_scalar("SELECT content FROM clips WHERE uuid = 'shot'")
+                    .fetch_one(&database.pool)
+                    .await
+                    .expect("thumbnail should remain");
+            assert_eq!(thumbnail, THUMBNAIL);
+
+            cleanup(&database);
+        }
+
+        /// SBS-769: LAST_STABLE_HASH matching used to drop the recapture
+        /// entirely after expiry, so a second consecutive copy never revived.
+        #[tokio::test]
+        async fn consecutive_duplicate_after_expiry_does_not_skip_revival() {
+            let database = test_database().await;
+            seed_expired_image(&database, "shot", "hash-shot").await;
+
+            assert_eq!(
+                lookup_stored_original(&database.pool, "hash-shot").await,
+                StoredOriginalLookup::Found {
+                    full_image_expired: true,
+                }
+            );
+            assert_eq!(
+                lookup_stored_original(&database.pool, "no-such-hash").await,
+                StoredOriginalLookup::Missing
+            );
+            // Today's hash-only helper would Skip here and never restore.
+            assert_eq!(
+                consecutive_dedup_decision(StoredOriginalLookup::Found {
+                    full_image_expired: true,
+                }),
+                ConsecutiveDedupDecision::Capture
+            );
+
+            recapture(&database, "shot", ORIGINAL)
+                .await
+                .expect("revival after a consecutive match should persist");
+
+            assert_eq!(expired_flag(&database, "shot").await, 0);
+            assert_eq!(
+                lookup_stored_original(&database.pool, "hash-shot").await,
+                StoredOriginalLookup::Found {
+                    full_image_expired: false,
+                }
+            );
+            let mut revived = load_clip(&database, "shot").await;
+            let bytes = load_full_image_content(&database, &mut revived)
+                .await
+                .expect("consecutive revival should make the original usable");
+            assert_eq!(bytes, ORIGINAL);
+            assert_eq!(
+                consecutive_dedup_decision(StoredOriginalLookup::Found {
+                    full_image_expired: false,
+                }),
+                ConsecutiveDedupDecision::Skip
+            );
+
+            cleanup(&database);
+        }
+
+        /// SBS-769: a failed persist or a failed clip_images index must leave
+        /// `full_image_expired` set so copy/paste do not claim a missing original.
+        #[tokio::test]
+        async fn persist_or_index_failure_does_not_clear_expired_flag() {
+            let persist_fail_db = test_database().await;
+            seed_expired_image(&persist_fail_db, "shot", "hash-shot").await;
+            std::fs::write(&persist_fail_db.image_dir, b"not-a-directory")
+                .expect("image_dir should be a file so persist cannot create it");
+
+            let persist_err = recapture(&persist_fail_db, "shot", ORIGINAL)
+                .await
+                .expect_err("staging must fail when image_dir is a file");
+            assert!(
+                persist_err.contains("persist"),
+                "the error should describe the failed write: {persist_err}"
+            );
+            assert_eq!(expired_flag(&persist_fail_db, "shot").await, 1);
+            let persist_index_rows: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM clip_images WHERE clip_uuid = 'shot'")
+                    .fetch_one(&persist_fail_db.pool)
+                    .await
+                    .expect("clip_images count should load");
+            assert_eq!(persist_index_rows, 0);
+            let _ = std::fs::remove_file(&persist_fail_db.image_dir);
+
+            let index_fail_db = test_database().await;
+            seed_expired_image(&index_fail_db, "shot", "hash-shot").await;
+            sqlx::query("DROP TABLE clip_images")
+                .execute(&index_fail_db.pool)
+                .await
+                .expect("dropping clip_images should force an index failure");
+
+            let index_err = recapture(&index_fail_db, "shot", ORIGINAL)
+                .await
+                .expect_err("index must fail when clip_images is missing");
+            assert!(
+                index_err.contains("index"),
+                "the error should describe the failed index: {index_err}"
+            );
+            assert_eq!(expired_flag(&index_fail_db, "shot").await, 1);
+            // Review finding on PR #214: the write must not leave an orphan
+            // behind. Staging handles that on its own -- the temp file is only
+            // renamed onto `{uuid}.cubby` after the transaction commits, so a
+            // failed index leaves neither an original nor a stray temp.
+            assert!(
+                !index_fail_db.image_dir.join("shot.cubby").exists(),
+                "a failed index must not leave an unindexed original behind"
+            );
+            assert!(
+                !index_fail_db.image_dir.join("shot.cubby.tmp").exists(),
+                "a failed index must not leave the staged temp file behind"
+            );
+
+            cleanup(&index_fail_db);
+        }
+
+        /// Review finding on PR #214: a non-consecutive duplicate re-copy
+        /// reaches the recapture with `full_image_expired` already 0, so the
+        /// path can hold a valid original that a live `clip_images` row points
+        /// at. A failed recapture must leave that file exactly as it was
+        /// rather than stranding the row that describes it.
+        #[tokio::test]
+        async fn a_failed_recapture_does_not_disturb_a_preexisting_original() {
+            let database = test_database().await;
+            seed_expired_image(&database, "shot", "hash-shot").await;
+            // Clear the expired flag to model an original that is already
+            // valid, then write the file this recapture would replace.
+            sqlx::query("UPDATE clips SET full_image_expired = 0 WHERE uuid = 'shot'")
+                .execute(&database.pool)
+                .await
+                .expect("clearing the expired flag should succeed");
+            let existing_path =
+                persist_full_image_file(&database.crypto, &database.image_dir, "shot", ORIGINAL)
+                    .expect("seeding the pre-existing original should succeed");
+            let existing_bytes =
+                std::fs::read(&existing_path).expect("the seeded original should be readable");
+
+            sqlx::query("DROP TABLE clip_images")
+                .execute(&database.pool)
+                .await
+                .expect("dropping clip_images should force an index failure");
+
+            let index_err = recapture(
+                &database,
+                "shot",
+                b"different-bytes-from-a-racing-recapture",
+            )
+            .await
+            .expect_err("index must fail when clip_images is missing");
+            assert!(
+                index_err.contains("index"),
+                "the error should describe the failed index: {index_err}"
+            );
+            assert_eq!(
+                std::fs::read(&existing_path).expect("the original must still be there"),
+                existing_bytes,
+                "a file that already existed must survive a failed recapture untouched"
+            );
+
+            cleanup(&database);
+        }
+
+        /// The whole point of SBS-769, end to end: one recapture is what makes
+        /// an expired clip usable again. Nothing runs after it to clear the
+        /// flag, so the row, the index, and the file must all be correct when
+        /// that single call returns.
+        #[tokio::test]
+        async fn one_recapture_leaves_the_clip_fully_usable() {
+            let database = test_database().await;
+            seed_expired_image(&database, "shot", "hash-shot").await;
+
+            recapture(&database, "shot", ORIGINAL)
+                .await
+                .expect("the recapture should succeed");
+
+            assert_eq!(
+                expired_flag(&database, "shot").await,
+                0,
+                "the recapture transaction must clear the expired flag itself"
+            );
+            let indexed: (String, i64) = sqlx::query_as(
+                "SELECT file_path, file_size FROM clip_images WHERE clip_uuid = 'shot'",
+            )
+            .fetch_one(&database.pool)
+            .await
+            .expect("the recapture should have indexed the original");
+            assert_eq!(indexed.1, ORIGINAL.len() as i64);
+            assert!(
+                std::path::Path::new(&indexed.0).exists(),
+                "clip_images must point at a file that is actually on disk"
+            );
+            let mut revived = load_clip(&database, "shot").await;
+            assert_eq!(
+                load_full_image_content(&database, &mut revived)
+                    .await
+                    .expect("Paste and Copy must work after one recapture"),
+                ORIGINAL
+            );
+
+            cleanup(&database);
+        }
     }
 }

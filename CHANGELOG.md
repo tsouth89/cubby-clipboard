@@ -18,6 +18,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Backup export, backup import, and Ditto import now only write or read a path chosen in the file dialog, so a compromised Settings page cannot send history to an arbitrary location (SBS-808)
 - Refuse an encrypted backup export when any live clip field cannot be fully decrypted, and leave an existing destination file unchanged (SBS-772)
 - Refresh the rolling history backup during long-running sessions, so a machine that stays up past a day still gets a current `cubby.db.bak` without quitting Cubby (SBS-771)
+- Revive an expired screenshot original when that same image is copied again, including a consecutive duplicate that used to be skipped, so Paste and Copy work immediately and recognized text stays (SBS-769)
 
 ## v1.3.1
 
