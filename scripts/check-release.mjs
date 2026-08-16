@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { checkPrivilegedActionPins } from '../.github/scripts/check-privileged-action-pins.mjs';
+import { findFileListHistoryClaims } from './product-page-claims.mjs';
 
 const root = new URL('../', import.meta.url);
 const rootDir = fileURLToPath(root);
@@ -271,10 +272,10 @@ const productPageSources = [
   ['product_pages/privacy.html', await read('product_pages/privacy.html')],
   ['product_pages/support.html', await read('product_pages/support.html')],
 ];
-const fileListHistoryClaim = /file lists|file-list|file list/i;
 for (const [file, source] of productPageSources) {
-  if (fileListHistoryClaim.test(source)) {
-    throw new Error(`${file} still claims file-list clipboard history`);
+  const [claim] = findFileListHistoryClaims(source);
+  if (claim) {
+    throw new Error(`${file} still claims file-list clipboard history: ${claim}`);
   }
 }
 
