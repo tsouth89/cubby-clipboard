@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { checkPrivilegedActionPins } from '../.github/scripts/check-privileged-action-pins.mjs';
+import { findFileListHistoryClaims } from './product-page-claims.mjs';
 
 const root = new URL('../', import.meta.url);
 const rootDir = fileURLToPath(root);
@@ -265,6 +266,17 @@ for (const [source, gate] of secretGates) {
 
 if (!securityDoc.includes('RUSTSEC-2023-0071')) {
   throw new Error('SECURITY.md must document the reviewed RSA advisory waiver');
+}
+
+const productPageSources = [
+  ['product_pages/privacy.html', await read('product_pages/privacy.html')],
+  ['product_pages/support.html', await read('product_pages/support.html')],
+];
+for (const [file, source] of productPageSources) {
+  const [claim] = findFileListHistoryClaims(source);
+  if (claim) {
+    throw new Error(`${file} still claims file-list clipboard history: ${claim}`);
+  }
 }
 
 const reviewed = securityDoc.match(/^- Reviewed:\s*(\d{4}-\d{2}-\d{2})\s*$/m)?.[1];

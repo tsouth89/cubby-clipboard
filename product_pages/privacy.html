@@ -41,14 +41,20 @@
       <p class="eyebrow">Privacy</p>
       <h1>Your clipboard stays yours.</h1>
       <p>Cubby is built to keep clipboard history useful without turning it into a cloud service.</p>
-      <div class="legal-meta">Last updated July 18, 2026</div>
+      <div class="legal-meta">Last updated August 15, 2026</div>
     </header>
     <article class="legal-content">
       <div class="legal-callout"><p><strong>The short version:</strong> Cubby stores clipboard history locally on your Windows PC. The desktop app does not include analytics, advertising, cloud sync, or network-backed AI features. This website collects limited, privacy-preserving visit counts.</p></div>
 
       <h2>What Cubby stores</h2>
-      <p>To provide clipboard history, Cubby records supported content you copy while it is running. That currently includes plain text, HTML, RTF, and images, along with useful context such as the source application, content type, timestamps, and whether an item is pinned. Copying files is not recorded: a copied file is a path, not content, so Cubby ignores file payloads instead of storing paths you copied.</p>
+      <p>To provide clipboard history, Cubby records supported content you copy while it is running. That currently includes plain text, HTML, RTF, and images, along with useful context such as the source application, content type, timestamps, any note you add to a clip, and whether an item is pinned. Copied files are not stored as history; those events have been ignored since v1.2.4.</p>
       <p>History is stored in Cubby’s local application-data directory. Clipboard payloads are kept in a local SQLite database, and image data is kept in local application files.</p>
+
+      <h2>Encrypted local backups</h2>
+      <p>You can export your clip history to a single encrypted file you choose on this PC, and import that file later here or on another machine. The archive holds each clip’s text, your notes, image thumbnails, text recognized in images, and the source app, folder, pin state, and hidden state. It does not hold the HTML and RTF copies of a clip or the full-resolution image files, so those do not come back on import. You choose the passphrase. Cubby does not store it, cannot recover it, and does not upload the file. Export decrypts your local history in memory and re-encrypts it into that portable archive. There is no cloud backup.</p>
+
+      <h2>Remote-session clipboard</h2>
+      <p>When you copy inside a supported remote-control session, Cubby can rewrite that remote-owned clipboard onto the local clipboard so your other remote viewer sessions pick it up. Cubby only writes to the clipboard on this PC; the remote-control app you are using can then carry that content on to its other sessions and to the remote hosts they connect to. Cubby itself is not a cloud clipboard. The relay is on by default and skips a copy only when the remote viewer process itself (mstsc.exe and similar) is on the ignored list, not the application running on the remote host. The sensitive-content and skip-likely-secrets settings do not stop it. Turn it off in Settings under “Sync clipboard between remote sessions.”</p>
 
       <h2>What Cubby does not collect</h2>
       <ul>
@@ -71,7 +77,7 @@
       <div class="legal-callout"><p><strong>Local encryption:</strong> Cubby encrypts stored clipboard payloads and image data with AES-256-GCM. Its encryption key is protected by Windows for the current user. This protects copied content in Cubby’s application-data files at rest, but it cannot protect content from software running as you while Cubby is able to unlock your history.</p></div>
 
       <h2>Your controls</h2>
-      <p>You can delete individual clips, clear unpinned history while preserving pinned clips, or use the confirmed clear-everything action. Uninstalling Cubby may not automatically remove every application-data file; those files can be removed manually if you want to erase all remaining local history.</p>
+      <p>You can hide a clip in the list, add a note to a clip, and review history in the dedicated History window. You can also delete individual clips, clear unpinned history while preserving pinned clips, or use the confirmed clear-everything action. Uninstalling Cubby may not automatically remove every application-data file; those files can be removed manually if you want to erase all remaining local history.</p>
 
       <h2>Third-party services</h2>
       <p>The Cubby website is served by Cloudflare, uses PostHog for the limited aggregate website metrics described above, and links to GitHub for source code, releases, and support. Those services process requests under their own privacy terms. The Cubby desktop app does not send clipboard content to any of them.</p>
