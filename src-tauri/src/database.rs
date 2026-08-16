@@ -807,35 +807,68 @@ async fn perform_rolling_backup_refresh_with(
     let source = db_path.to_path_buf();
     let temporary_for_copy = temporary.clone();
     let taken_at = SystemTime::now();
-    tokio::task::spawn_blocking(move || {
-        std::fs::copy(&source, &temporary_for_copy)?;
-        if let Err(error) = stamp_backup_taken_at(&temporary_for_copy, taken_at) {
-            // Bytes matter more than the timestamp: an unstamped copy is a
-            // valid recovery point, it just looks older than it is.
-            log::warn!("STORAGE: Could not stamp history backup time: {error}");
-        }
-        Ok::<(), std::io::Error>(())
+    let copied = tokio::task::spawn_blocking(move || {
+        copy_backup_snapshot(&source, &temporary_for_copy, taken_at)
     })
-    .await
-    .map_err(|e| format!("backup copy task failed: {e}"))?
-    .map_err(|e| format!("backup copy failed: {e}"))?;
+    .await;
+    match copied {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(format!("backup copy failed: {error}")),
+        Err(error) => {
+            // A panicking copy task leaves whatever it had written.
+            let _ = std::fs::remove_file(&temporary);
+            return Err(format!("backup copy task failed: {error}"));
+        }
+    }
 
     let temporary_for_rename = temporary.clone();
     let backup_for_rename = backup.clone();
-    tokio::task::spawn_blocking(move || {
+    let installed = tokio::task::spawn_blocking(move || {
         install(&temporary_for_rename, &backup_for_rename).inspect_err(|_| {
             let _ = std::fs::remove_file(&temporary_for_rename);
         })
     })
-    .await
-    .map_err(|e| format!("backup install task failed: {e}"))?
-    .map_err(|e| format!("backup install failed: {e}"))?;
+    .await;
+    match installed {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(format!("backup install failed: {error}")),
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(format!("backup install task failed: {error}"));
+        }
+    }
 
     log::info!(
         "STORAGE: Refreshed rolling history backup at {}",
         backup.display()
     );
     Ok(BackupRefreshOutcome::Installed)
+}
+
+/// Copy the checkpointed history file to `temporary` and stamp it with when
+/// the copy ran.
+///
+/// A failed copy cleans up after itself. `std::fs::copy` creates (or
+/// truncates) the destination before it writes, so a failure part-way through
+/// — the disk filling up is the realistic one — leaves a partial
+/// `*.bak.*.tmp` behind. Nothing else would ever remove it, and the refresh
+/// runs hourly, so a persistent I/O failure would pile those up beside the
+/// user's history file.
+fn copy_backup_snapshot(
+    source: &Path,
+    temporary: &Path,
+    taken_at: SystemTime,
+) -> Result<(), std::io::Error> {
+    if let Err(error) = std::fs::copy(source, temporary) {
+        let _ = std::fs::remove_file(temporary);
+        return Err(error);
+    }
+    if let Err(error) = stamp_backup_taken_at(temporary, taken_at) {
+        // Bytes matter more than the timestamp: an unstamped copy is a valid
+        // recovery point, it just looks older than it is.
+        log::warn!("STORAGE: Could not stamp history backup time: {error}");
+    }
+    Ok(())
 }
 
 /// Record when the copy was taken. On Windows `std::fs::copy` is
@@ -1204,11 +1237,11 @@ async fn add_column_if_missing(pool: &SqlitePool, sql: &str) -> Result<(), sqlx:
 mod tests {
     use super::{
         apply_database_health, backup_is_fresh_as_of, classify_sqlite_health_failure,
-        count_clips_in_file, perform_rolling_backup_refresh, prepare_database_file,
-        quarantine_database_files, replace_backup_atomically, rolling_backup_path,
-        sanitize_storage_diagnostic, should_skip_backup_refresh, sqlite_failure_is_corruption,
-        verify_database_quick_check, Database, DatabaseHealth, RollingBackupScheduler,
-        RollingBackupTick,
+        copy_backup_snapshot, count_clips_in_file, perform_rolling_backup_refresh,
+        prepare_database_file, quarantine_database_files, replace_backup_atomically,
+        rolling_backup_path, sanitize_storage_diagnostic, should_skip_backup_refresh,
+        sqlite_failure_is_corruption, verify_database_quick_check, Database, DatabaseHealth,
+        RollingBackupScheduler, RollingBackupTick,
     };
     use crate::crypto::CryptoManager;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -1924,6 +1957,31 @@ mod tests {
             count_clips_in_file(&backup).await,
             Some(200),
             "the installed backup must hold the rebuilt history"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// `std::fs::copy` creates the destination before it writes, so a failure
+    /// part-way through (a full disk) leaves a partial `*.bak.*.tmp`. Nothing
+    /// else removes it and the refresh runs hourly, so a persistent I/O
+    /// failure would pile them up beside the history file (SBS-771).
+    #[test]
+    fn a_failed_backup_copy_removes_the_partial_temporary_file() {
+        let directory = temp_dir();
+        let temporary = directory.join("cubby.bak.1234.tmp");
+        // Stand in for what a part-way copy leaves on disk.
+        std::fs::write(&temporary, b"half a database").unwrap();
+
+        let error = copy_backup_snapshot(
+            &directory.join("no-such-history.db"),
+            &temporary,
+            SystemTime::now(),
+        )
+        .expect_err("copying a missing source must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            !temporary.exists(),
+            "a failed copy must not leave partial backup bytes behind"
         );
         let _ = std::fs::remove_dir_all(directory);
     }
