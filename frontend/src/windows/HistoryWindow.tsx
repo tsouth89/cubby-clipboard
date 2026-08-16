@@ -322,19 +322,24 @@ export function HistoryWindow() {
    * rather than throwing, so callers must check this before announcing success:
    * the rows on screen still describe the state before the bulk change.
    */
-  const afterBulkChange = useCallback(async () => {
-    clearSelection();
-    // The bulk change already invalidated the rows on screen, so a failed
-    // reload must not keep them up the way a plain refresh failure does.
-    visibleFilterKeyRef.current = null;
-    const [reloaded] = await Promise.all([
-      loadClips(false),
-      loadFolders(),
-      refreshTotalCount(),
-      loadSourceApps(),
-    ]);
-    return reloaded;
-  }, [clearSelection, loadClips, loadFolders, refreshTotalCount, loadSourceApps]);
+  const afterBulkChange = useCallback(
+    async (rowsStillApply = false) => {
+      clearSelection();
+      // Delete and move take rows out of this query. Pin does not, so a failed
+      // reload must keep the still-matching list instead of wiping it.
+      if (!rowsStillApply) {
+        visibleFilterKeyRef.current = null;
+      }
+      const [reloaded] = await Promise.all([
+        loadClips(false),
+        loadFolders(),
+        refreshTotalCount(),
+        loadSourceApps(),
+      ]);
+      return reloaded;
+    },
+    [clearSelection, loadClips, loadFolders, refreshTotalCount, loadSourceApps]
+  );
 
   const handleBulkDelete = useCallback(async () => {
     if (selectionCount === 0) return;
@@ -361,7 +366,7 @@ export function HistoryWindow() {
       if (selectionCount === 0) return;
       try {
         await invoke<number>('set_clips_pinned', { ids: selectedIds, pinned });
-        if (!(await afterBulkChange())) {
+        if (!(await afterBulkChange(true))) {
           toast.error('Pin state changed, but the list could not be reloaded');
           return;
         }
@@ -509,12 +514,9 @@ export function HistoryWindow() {
         // Hidden rows still ship empty content after reload; keep the session
         // reveal in sync so leaving this clip and coming back does not revert.
         updateRevealed(clipId, { content: text, preview: text });
-        // The row still holds the pre-edit preview, and the edit may have
-        // changed which clips a filter or search matches. loadClips reports
-        // failure rather than throwing, so the toast has to read its result —
-        // otherwise the list keeps showing the old text under a success message.
+        // Same-filter reload: loadClips already toasts refreshFailed on
+        // failure. A second toast here would talk over it.
         if (!(await loadClips(false))) {
-          toast.error('Clip updated, but the list could not be reloaded');
           return;
         }
         toast.success('Clip updated');

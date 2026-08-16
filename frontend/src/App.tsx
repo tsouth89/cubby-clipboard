@@ -113,6 +113,8 @@ function App() {
   const selectedFolderRef = useRef(selectedFolder);
   selectedFolderRef.current = selectedFolder;
   const loadPerfIdRef = useRef(0);
+  const clipsRef = useRef(clips);
+  clipsRef.current = clips;
   // Which query the rows on screen answer. A failed replace only has to wipe
   // them when this no longer matches the load that failed — a same-filter
   // refresh (clipboard change, post-edit reload, retry) leaves a correct page.
@@ -326,7 +328,7 @@ function App() {
         setIsLoading(true);
         setLoadError(false);
 
-        const currentOffset = append ? clips.length : 0;
+        const currentOffset = append ? clipsRef.current.length : 0;
         // The index lowercases but does not trim, so a leading space matches
         // nothing. History already sends the trimmed form.
         const query = searchQuery.trim();
@@ -438,7 +440,7 @@ function App() {
         const failure = clipLoadFailure({
           append,
           visibleRowsStillApply: visibleFilterKeyRef.current === filterKey,
-          hasVisibleClips: clips.length > 0,
+          hasVisibleClips: clipsRef.current.length > 0,
         });
         if (failure.clearList) {
           setClips([]);
@@ -458,7 +460,7 @@ function App() {
         if (perfId === loadPerfIdRef.current) setIsLoading(false);
       }
     },
-    [clips.length]
+    []
   );
 
   const loadFolders = useCallback(async () => {
@@ -1008,14 +1010,19 @@ function App() {
 
       setSelectedClipId(null);
       setClipListResetToken((token) => token + 1);
-      // The rows on screen are the clips that were just deleted, so a failed
-      // reload must not keep them up the way a plain refresh failure does.
-      visibleFilterKeyRef.current = null;
-      await Promise.all([
+      // Clear-all deletes every visible row. Clear-unpinned leaves pinned
+      // clips, so a failed reload must keep those rather than wiping them.
+      if (mode === 'all') {
+        visibleFilterKeyRef.current = null;
+      }
+      const [reloaded] = await Promise.all([
         loadClips(selectedFolder, false, searchQuery, contentFilter),
         loadFolders(),
         refreshTotalCount(),
       ]);
+      if (!reloaded) {
+        return;
+      }
       toast.success(
         mode === 'unpinned'
           ? t('notifications.clearUnpinnedSuccess', { count: deleted })

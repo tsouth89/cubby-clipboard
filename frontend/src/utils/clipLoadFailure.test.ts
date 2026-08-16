@@ -11,12 +11,21 @@ describe('clipLoadFailure', () => {
   });
 
   it('keeps the list when a refresh with unchanged filters fails', () => {
-    // Clipboard-change, window focus, and post-edit reloads all replace the
-    // list with the same query. The rows are still correct, so a failed refresh
-    // must not swap a good first page for the empty error panel.
+    // Clipboard-change, window focus, post-edit, and pin reloads all replace
+    // the list with the same query. The rows are still correct, so a failed
+    // refresh must not swap a good first page for the empty error panel.
     expect(
       clipLoadFailure({ append: false, visibleRowsStillApply: true, hasVisibleClips: true })
     ).toEqual({ clearList: false, notify: true });
+  });
+
+  it('does not clear the list when a pin reload fails', () => {
+    // Pinning does not remove rows from the current query. afterBulkChange
+    // leaves visibleRowsStillApply true so a failed replace keeps them.
+    expect(
+      clipLoadFailure({ append: false, visibleRowsStillApply: true, hasVisibleClips: true })
+        .clearList
+    ).toBe(false);
   });
 
   it('keeps the list when an append load fails', () => {
