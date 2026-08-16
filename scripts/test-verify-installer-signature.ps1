@@ -57,8 +57,8 @@ function New-FakeSignature {
     }
 }
 
-$expectedSubject = "CN=Brandon South"
-$validSubject = "CN=Brandon South, O=Brandon South, L=Wilmore, S=ky, C=US"
+$expectedSubject = "CN=Brandon South, O=Brandon South, L=Wilmore, S=ky, C=US"
+$validSubject = $expectedSubject
 
 Write-Host "Get-RequiredPackedExecutableNames"
 
@@ -98,6 +98,16 @@ Assert-True "Valid status with no certificate is reject-missing-certificate" (
 $spoofedCn = New-FakeSignature -Status "Valid" -Subject "CN=Brandon South Evil, O=Attacker"
 Assert-True "CN that only contains the expected CN as a substring is reject-subject" (
     (Resolve-EmbeddedSignatureDecision -Signature $spoofedCn -ExpectedSubject $expectedSubject) -eq "reject-subject"
+)
+
+$spoofedOrg = New-FakeSignature -Status "Valid" -Subject "CN=Brandon South, O=Attacker"
+Assert-True "same CN with a different O is reject-subject" (
+    (Resolve-EmbeddedSignatureDecision -Signature $spoofedOrg -ExpectedSubject $expectedSubject) -eq "reject-subject"
+)
+
+$cnOnly = New-FakeSignature -Status "Valid" -Subject "CN=Brandon South"
+Assert-True "CN-only subject is reject-subject when the full DN is required" (
+    (Resolve-EmbeddedSignatureDecision -Signature $cnOnly -ExpectedSubject $expectedSubject) -eq "reject-subject"
 )
 
 Write-Host "Assert-PackedFileSignature / Assert-EmbeddedPackageSignatures"

@@ -281,7 +281,7 @@ jobs:
           # Verify the cubby.exe inside the installer, not the one on disk:
           # Tauri restores the unsigned original to target/release after packing
           # the signed copy, so the file here is NotSigned even on a good build.
-          ./scripts/verify-installer-signature.ps1 -Installer $stagedPath -ExpectedSubject "CN=Brandon South"
+          ./scripts/verify-installer-signature.ps1 -Installer $stagedPath -ExpectedSubject "CN=Brandon South, O=Brandon South, L=Wilmore, S=ky, C=US"
 
           # The dev-harness bins are feature-gated off, so nothing but the app
           # binary should be bundled. Catch any new stray executable that would
@@ -334,7 +334,7 @@ jobs:
           }
           # The Store build is a second `tauri build`, so it runs signCommand
           # again over its own copy of the app binary. Verify it independently.
-          ./scripts/verify-installer-signature.ps1 -Installer $stagedPath -ExpectedSubject "CN=Brandon South"
+          ./scripts/verify-installer-signature.ps1 -Installer $stagedPath -ExpectedSubject "CN=Brandon South, O=Brandon South, L=Wilmore, S=ky, C=US"
           "path=$stagedPath" >> $env:GITHUB_OUTPUT
           "name=$name" >> $env:GITHUB_OUTPUT
 

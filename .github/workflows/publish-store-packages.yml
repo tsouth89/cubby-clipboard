@@ -52,6 +52,9 @@ jobs:
             if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
               throw "$architecture installer has an invalid Authenticode signature: $($signature.StatusMessage)"
             }
+            if (-not $signature.SignerCertificate) {
+              throw "$architecture installer has a Valid Authenticode status but no signer certificate."
+            }
             if ($signature.SignerCertificate.Subject -ne $expectedSignerSubject) {
               throw "$architecture installer signer is unexpected: $($signature.SignerCertificate.Subject)"
             }
@@ -69,7 +72,7 @@ jobs:
             $installerPath = "release-assets/Cubby.Clipboard_${version}_${architecture}-Store-setup.exe"
             ./scripts/verify-installer-signature.ps1 `
               -Installer $installerPath `
-              -ExpectedSubject "CN=Brandon South"
+              -ExpectedSubject "CN=Brandon South, O=Brandon South, L=Wilmore, S=ky, C=US"
           }
 
       - name: Publish x64 installer

@@ -37,8 +37,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Installer,
 
-    # When set, the signer's certificate subject must contain this string. Guards
-    # against a build that is signed, but by the wrong certificate profile.
+    # When set, the signer's certificate subject must equal this string
+    # (case-insensitive). Prefix or substring matches are not enough: a cert
+    # whose CN is ours but whose O is not must still be rejected.
     [string]$ExpectedSubject
 )
 
@@ -77,8 +78,7 @@ function Resolve-EmbeddedSignatureDecision {
         return "reject-missing-certificate"
     }
     if ($ExpectedSubject) {
-        $escaped = [regex]::Escape($ExpectedSubject)
-        if ($subject -notmatch ("^(?i)" + $escaped + "(,|$)")) {
+        if (-not [string]::Equals($subject, $ExpectedSubject, [System.StringComparison]::OrdinalIgnoreCase)) {
             return "reject-subject"
         }
     }
