@@ -318,12 +318,27 @@ impl SearchIndex {
                 encrypted_source_app,
             ) in clips
             {
+                // Payload fields are required to index the clip. One
+                // unreadable neighbor must not abort the rebuild and leave
+                // `state = None` — skip it, same as OCR / notes / source app.
                 let content = if clip_type == "image" {
                     Vec::new()
                 } else {
-                    crypto.decrypt(&encrypted_content)?
+                    match crypto.decrypt(&encrypted_content) {
+                        Ok(content) => content,
+                        Err(error) => {
+                            log::warn!("SEARCH: Ignoring unreadable clip {id}: {error}");
+                            continue;
+                        }
+                    }
                 };
-                let preview = crypto.decrypt_text(&encrypted_preview)?;
+                let preview = match crypto.decrypt_text(&encrypted_preview) {
+                    Ok(preview) => preview,
+                    Err(error) => {
+                        log::warn!("SEARCH: Ignoring unreadable clip {id}: {error}");
+                        continue;
+                    }
+                };
                 let ocr = encrypted_ocr.as_deref().and_then(|value| {
                     crypto
                         .decrypt_text(value)
@@ -812,5 +827,114 @@ mod tests {
         assert!(index.matches("service is unavailable").contains("image"));
         index.remove("image");
         assert!(index.matches("service").is_empty());
+    }
+
+    async fn test_index_pool() -> (SqlitePool, crate::crypto::CryptoManager) {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory database should open");
+        sqlx::query(
+            r#"
+            CREATE TABLE clips (
+                uuid TEXT NOT NULL,
+                clip_type TEXT NOT NULL,
+                content BLOB NOT NULL,
+                text_preview TEXT NOT NULL,
+                ocr_text TEXT,
+                notes TEXT,
+                source_app TEXT,
+                is_deleted INTEGER NOT NULL DEFAULT 0
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        (pool, crate::crypto::CryptoManager::ephemeral())
+    }
+
+    async fn insert_indexed_clip(
+        pool: &SqlitePool,
+        crypto: &crate::crypto::CryptoManager,
+        id: &str,
+        content: &str,
+        source_app: &str,
+    ) {
+        sqlx::query(
+            r#"
+            INSERT INTO clips (uuid, clip_type, content, text_preview, source_app)
+            VALUES (?, 'text', ?, ?, ?)
+            "#,
+        )
+        .bind(id)
+        .bind(crypto.encrypt(content.as_bytes()).unwrap())
+        .bind(crypto.encrypt_text(content).unwrap())
+        .bind(crypto.encrypt_text(source_app).unwrap())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_ready_indexes_decryptable_rows_when_a_neighbor_is_unreadable() {
+        let (pool, crypto) = test_index_pool().await;
+        insert_indexed_clip(
+            &pool,
+            &crypto,
+            "good-content",
+            "alpha readable body",
+            "code.exe",
+        )
+        .await;
+        insert_indexed_clip(
+            &pool,
+            &crypto,
+            "good-preview",
+            "bravo readable body",
+            "code.exe",
+        )
+        .await;
+        insert_indexed_clip(
+            &pool,
+            &crypto,
+            "broken-content",
+            "alpha should vanish",
+            "chrome.exe",
+        )
+        .await;
+        insert_indexed_clip(
+            &pool,
+            &crypto,
+            "broken-preview",
+            "bravo should vanish",
+            "chrome.exe",
+        )
+        .await;
+        sqlx::query("UPDATE clips SET content = ? WHERE uuid = ?")
+            .bind(b"not-cub1".as_slice())
+            .bind("broken-content")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE clips SET text_preview = ? WHERE uuid = ?")
+            .bind("not-cub1")
+            .bind("broken-preview")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let index = SearchIndex::default();
+        index
+            .ensure_ready(&pool, &crypto)
+            .await
+            .expect("a corrupt payload must not leave the index unbuilt");
+
+        assert!(index.matches("readable").contains("good-content"));
+        assert!(index.matches("readable").contains("good-preview"));
+        assert!(!index.matches("vanish").contains("broken-content"));
+        assert!(!index.matches("vanish").contains("broken-preview"));
+        assert_eq!(index.source_app_counts(), vec![("code.exe".to_string(), 2)]);
     }
 }
