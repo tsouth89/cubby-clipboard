@@ -61,6 +61,10 @@ jobs:
       - name: Publish-guard rules
         shell: pwsh
         run: ./scripts/test-publish-guard.ps1
+      # Signed outer installer + unsigned packed cubby.exe/uninstall.exe must fail.
+      - name: Embedded installer signature rules
+        shell: pwsh
+        run: ./scripts/test-verify-installer-signature.ps1
       # Compiling cargo-audit from source took 5m55s of a 9m17s job, to then run
       # for 7 seconds. Cache the built binary instead. The key pins the exact
       # version, so the only way to get a stale tool is to change the pin, which
