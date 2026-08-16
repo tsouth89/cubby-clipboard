@@ -53,8 +53,9 @@ jobs:
       - run: pnpm run build
       - run: node .github/scripts/check-site.mjs
       - run: node .github/scripts/check-privileged-action-pins.mjs
+      - run: node .github/scripts/check-shipped-windows-ci.mjs
       - run: pnpm run test
-      - run: node --test product_pages/worker.test.mjs product_pages/analytics.test.mjs .github/scripts/check-privileged-action-pins.test.mjs
+      - run: node --test product_pages/worker.test.mjs product_pages/analytics.test.mjs .github/scripts/check-privileged-action-pins.test.mjs .github/scripts/check-shipped-windows-ci.test.mjs
       - run: pnpm audit --prod
       # The rule that decides whether a live download URL may be overwritten.
       - name: Publish-guard rules
@@ -95,3 +96,57 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+  # SBS-779: compile every shipped Windows feature/arch pair on the PR, not
+  # only at tag/release. cargo check is enough to catch cfg(feature =
+  # "app-store") and target-specific breakage; the existing `test` job still
+  # owns host x64 tests, clippy, and fmt.
+  check-shipped-windows:
+    name: Check ${{ matrix.arch }} ${{ matrix.features }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+            features: default
+            extra_args: ''
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+            features: app-store
+            extra_args: --features app-store
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+            features: default
+            extra_args: ''
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+            features: app-store
+            extra_args: --features app-store
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Per-target, per-feature cache so the four legs and the `test` job
+      # cannot clobber each other's src-tauri/target.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-check-${{ matrix.target }}-${{ matrix.features }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-${{ matrix.target }}-${{ matrix.features }}-
+            ${{ runner.os }}-cargo-check-${{ matrix.target }}-
+
+      # tauri::generate_context! requires frontendDist ("../dist") to exist.
+      # The test job creates it via pnpm build; this matrix only cargo-checks.
+      - run: mkdir dist
+
+      - run: cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} --all-targets ${{ matrix.extra_args }}
