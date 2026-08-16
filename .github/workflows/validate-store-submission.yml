@@ -75,6 +75,39 @@ jobs:
             Write-Host "Verified immutable R2 installer: $url"
           }
 
+      # Outer Authenticode is a separate check from the SHA-256 loop above and
+      # from the packed-binary verifier below. None of the three waives another.
+      - name: Verify outer installer signatures
+        shell: pwsh
+        env:
+          STORE_VERSION: ${{ inputs.version }}
+        run: |
+          $expectedSignerSubject = "CN=Brandon South, O=Brandon South, L=Wilmore, S=ky, C=US"
+          foreach ($architecture in @("x64", "arm64")) {
+            $name = "Cubby.Clipboard_$env:STORE_VERSION`_$architecture-Store-setup.exe"
+            $installerPath = Join-Path $env:RUNNER_TEMP $name
+            $signature = Get-AuthenticodeSignature -LiteralPath $installerPath
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+              throw "$architecture installer has an invalid Authenticode signature: $($signature.StatusMessage)"
+            }
+            if ($signature.SignerCertificate.Subject -ne $expectedSignerSubject) {
+              throw "$architecture installer signer is unexpected: $($signature.SignerCertificate.Subject)"
+            }
+          }
+
+      - name: Verify embedded cubby and uninstaller signatures
+        shell: pwsh
+        env:
+          STORE_VERSION: ${{ inputs.version }}
+        run: |
+          foreach ($architecture in @("x64", "arm64")) {
+            $name = "Cubby.Clipboard_$env:STORE_VERSION`_$architecture-Store-setup.exe"
+            $installerPath = Join-Path $env:RUNNER_TEMP $name
+            ./scripts/verify-installer-signature.ps1 `
+              -Installer $installerPath `
+              -ExpectedSubject "CN=Brandon South"
+          }
+
       - name: Set up Microsoft Store Developer CLI
         uses: microsoft/microsoft-store-apppublisher@cc9910a8d59f2eb55cbb83df0a3800cf3b5300e0 # v1.4
 
@@ -152,5 +185,5 @@ jobs:
         run: |
           "### Microsoft Store validation passed" |
             Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          "Credentials, product access, both package architectures, and R2 URLs were validated. No submission was changed." |
+          "Credentials, product access, both package architectures, R2 checksums, outer signatures, and embedded cubby/uninstaller signatures were validated. No submission was changed." |
             Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

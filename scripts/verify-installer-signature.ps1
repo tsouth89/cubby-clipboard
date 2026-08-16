@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    Verifies that the cubby.exe packed inside a built NSIS installer is signed.
+    Verifies that the cubby.exe packed inside a built NSIS installer is signed,
+    and that uninstall.exe is signed when 7-Zip actually extracts it.
 
 .DESCRIPTION
     Do not check src-tauri/target/<triple>/release/cubby.exe for a signature
@@ -13,7 +14,20 @@
         after each package_type step.
 
     The only trustworthy check is on the bytes users actually receive, so this
-    extracts the installer and verifies the cubby.exe inside it.
+    extracts the installer and verifies the cubby.exe inside it. That is the
+    installed app binary signCommand signs before packing. Store installers
+    also embed a WebView2 bootstrapper; that file is not ours and is not
+    required here.
+
+    Tauri's NSIS uninstaller is produced at install time by WriteUninstaller
+    and signed during makensis via !uninstfinalize. 7-Zip therefore usually
+    cannot extract uninstall.exe from the container. If it is present, this
+    script verifies it the same way as cubby.exe. If it is absent, that is
+    not treated as "unsigned".
+
+    A valid signature on the outer installer does not waive these checks. The
+    Store publish and validate workflows keep the outer Authenticode / SHA
+    checks as separate steps and call this script for the packed binaries.
 
     Extraction uses 7-Zip, which reads the NSIS container. It is preinstalled on
     GitHub's windows runners.
@@ -28,7 +42,133 @@ param(
     [string]$ExpectedSubject
 )
 
+Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# cubby.exe is packed with NSIS File and is the binary users run.
+# uninstall.exe is optional in the extract: Tauri writes it at install time.
+# SBS-777: do not treat a signed outer container as enough.
+function Get-RequiredPackedExecutableNames {
+    @("cubby.exe")
+}
+
+function Get-OptionalPackedExecutableNames {
+    @("uninstall.exe")
+}
+
+# Pure decision so a test can pin "Valid outer, NotSigned inner" without 7-Zip
+# or a real certificate. Callers still have to run the outer check themselves.
+function Resolve-EmbeddedSignatureDecision {
+    param(
+        [Parameter(Mandatory = $true)]$Signature,
+        [string]$ExpectedSubject
+    )
+
+    $status = [string]$Signature.Status
+    if ($status -ne "Valid") {
+        return "reject-status"
+    }
+
+    $subject = $null
+    if ($Signature.PSObject.Properties["SignerCertificate"] -and $Signature.SignerCertificate) {
+        $subject = [string]$Signature.SignerCertificate.Subject
+    }
+    if ([string]::IsNullOrWhiteSpace($subject)) {
+        return "reject-status"
+    }
+    if ($ExpectedSubject -and $subject -notlike "*$ExpectedSubject*") {
+        return "reject-subject"
+    }
+    return "accept"
+}
+
+function Find-PackedExecutable {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExtractDir,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$InstallerPath
+    )
+
+    $file = Get-ChildItem -LiteralPath $ExtractDir -Filter $Name -Recurse -File |
+        Select-Object -First 1
+    if (-not $file) {
+        $installerName = Split-Path -Leaf $InstallerPath
+        throw "verify-installer-signature: no $Name inside $installerName."
+    }
+    return $file
+}
+
+function Assert-PackedFileSignature {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallerPath,
+        [Parameter(Mandatory = $true)][string]$EmbeddedPath,
+        [string]$ExpectedSubject,
+        [Parameter(Mandatory = $true)]$Signature
+    )
+
+    $embeddedName = Split-Path -Leaf $EmbeddedPath
+    $installerName = Split-Path -Leaf $InstallerPath
+    $decision = Resolve-EmbeddedSignatureDecision -Signature $Signature -ExpectedSubject $ExpectedSubject
+    $status = [string]$Signature.Status
+
+    if ($decision -eq "reject-status") {
+        $detail = ""
+        if ($Signature.PSObject.Properties["StatusMessage"] -and $Signature.StatusMessage) {
+            $detail = " $([string]$Signature.StatusMessage)"
+        }
+        throw "verify-installer-signature: $installerName packed $embeddedName is '$status'.$detail"
+    }
+
+    $subject = [string]$Signature.SignerCertificate.Subject
+    if ($decision -eq "reject-subject") {
+        throw "verify-installer-signature: $installerName packed $embeddedName is signed by '$subject', which does not contain '$ExpectedSubject'."
+    }
+
+    return $subject
+}
+
+function Assert-EmbeddedPackageSignatures {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallerPath,
+        [Parameter(Mandatory = $true)][string]$ExtractDir,
+        [string]$ExpectedSubject,
+        [scriptblock]$GetSignature
+    )
+
+    if (-not $GetSignature) {
+        $GetSignature = {
+            param($Path)
+            Get-AuthenticodeSignature -LiteralPath $Path
+        }
+    }
+
+    foreach ($name in Get-RequiredPackedExecutableNames) {
+        $file = Find-PackedExecutable -ExtractDir $ExtractDir -Name $name -InstallerPath $InstallerPath
+        $signature = & $GetSignature $file.FullName
+        $subject = Assert-PackedFileSignature `
+            -InstallerPath $InstallerPath `
+            -EmbeddedPath $file.FullName `
+            -ExpectedSubject $ExpectedSubject `
+            -Signature $signature
+        Write-Host "verify-installer-signature: packed $name in $(Split-Path -Leaf $InstallerPath) is signed by $subject"
+    }
+
+    foreach ($name in Get-OptionalPackedExecutableNames) {
+        $file = Get-ChildItem -LiteralPath $ExtractDir -Filter $name -Recurse -File |
+            Select-Object -First 1
+        if (-not $file) {
+            Write-Host "verify-installer-signature: no $name inside $(Split-Path -Leaf $InstallerPath); Tauri generates the NSIS uninstaller at install time, so this is expected."
+            continue
+        }
+        $signature = & $GetSignature $file.FullName
+        $subject = Assert-PackedFileSignature `
+            -InstallerPath $InstallerPath `
+            -EmbeddedPath $file.FullName `
+            -ExpectedSubject $ExpectedSubject `
+            -Signature $signature
+        Write-Host "verify-installer-signature: packed $name in $(Split-Path -Leaf $InstallerPath) is signed by $subject"
+    }
+}
 
 if (-not (Test-Path -LiteralPath $Installer)) {
     throw "verify-installer-signature: no installer at $Installer."
@@ -47,31 +187,20 @@ if (-not $sevenZip) {
 }
 
 $resolved = (Resolve-Path -LiteralPath $Installer).Path
-$extractDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cubby-verify-" + [System.IO.Path]::GetFileNameWithoutExtension($resolved))
-if (Test-Path -LiteralPath $extractDir) {
-    Remove-Item -LiteralPath $extractDir -Recurse -Force
+$extractDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cubby-verify-" + [guid]::NewGuid().ToString("N"))
+
+try {
+    New-Item -ItemType Directory -Path $extractDir | Out-Null
+    Write-Host "verify-installer-signature: extracting $resolved"
+    # 7-Zip returns 1 for non-fatal warnings on NSIS containers, so the presence
+    # of the required packed executables is the real success condition rather
+    # than the exit code.
+    & $sevenZip x $resolved "-o$extractDir" -y | Out-Null
+    Assert-EmbeddedPackageSignatures `
+        -InstallerPath $resolved `
+        -ExtractDir $extractDir `
+        -ExpectedSubject $ExpectedSubject
 }
-
-Write-Host "verify-installer-signature: extracting $resolved"
-# 7-Zip returns 1 for non-fatal warnings on NSIS containers, so the presence of
-# cubby.exe below is the real success condition rather than the exit code.
-& $sevenZip x $resolved "-o$extractDir" -y | Out-Null
-
-$app = Get-ChildItem -LiteralPath $extractDir -Filter "cubby.exe" -Recurse -File |
-    Select-Object -First 1
-if (-not $app) {
-    throw "verify-installer-signature: no cubby.exe inside $resolved (7-Zip exit code $LASTEXITCODE)."
+finally {
+    Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
 }
-
-$signature = Get-AuthenticodeSignature -LiteralPath $app.FullName
-if ($signature.Status -ne "Valid") {
-    throw "verify-installer-signature: the packed cubby.exe is '$($signature.Status)' - signCommand did not sign the binary that shipped. $($signature.StatusMessage)"
-}
-
-$subject = $signature.SignerCertificate.Subject
-if ($ExpectedSubject -and $subject -notlike "*$ExpectedSubject*") {
-    throw "verify-installer-signature: the packed cubby.exe is signed by '$subject', which does not contain '$ExpectedSubject'."
-}
-
-Write-Host "verify-installer-signature: packed cubby.exe is signed by $subject"
-Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue

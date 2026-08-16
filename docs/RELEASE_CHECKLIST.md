@@ -25,7 +25,8 @@ been validated. The GitHub `release` environment must also define:
 
 The manual **Validate Microsoft Store submission** workflow uses a separate
 `store-validation` environment containing the same five Partner Center values.
-It verifies both R2 installers and checksums, authenticates to Partner Center,
+It verifies both R2 installers, checksums, outer Authenticode signatures, and
+the signature on the packed `cubby.exe` (and `uninstall.exe` when 7-Zip extracts it), authenticates to Partner Center,
 and maps the existing x64 and ARM64 Store packages to their new versioned URLs
 without changing a submission unless `publish` is explicitly selected.
 

@@ -31,6 +31,9 @@ const [
   supportPageDoc,
   settingsPanelSource,
   settingsLocaleText,
+  publishStoreWorkflow,
+  validateStoreWorkflow,
+  verifyInstallerSignature,
 ] = await Promise.all([
   read('package.json'),
   read('src-tauri/tauri.conf.json'),
@@ -52,6 +55,9 @@ const [
   read('product_pages/support.html'),
   read('frontend/src/components/SettingsPanel.tsx'),
   read('frontend/src/i18n/locales/en.json'),
+  read('.github/workflows/publish-store-packages.yml'),
+  read('.github/workflows/validate-store-submission.yml'),
+  read('scripts/verify-installer-signature.ps1'),
 ]);
 
 const packageVersion = JSON.parse(packageText).version;
@@ -98,6 +104,20 @@ if (!releaseWorkflow.includes('--config src-tauri/tauri.store.conf.json')) {
 
 if (!releaseWorkflow.includes('--features app-store')) {
   throw new Error('Microsoft Store builds must disable Cubby self-update and autostart integration');
+}
+
+// SBS-777: a signed outer Store installer is not enough. Publication and
+// validation must extract and check the packed cubby.exe and uninstall.exe.
+for (const [name, source] of [
+  ['publish-store-packages.yml', publishStoreWorkflow],
+  ['validate-store-submission.yml', validateStoreWorkflow],
+]) {
+  if (!source.includes('verify-installer-signature.ps1')) {
+    throw new Error(`${name} must verify embedded cubby and uninstaller signatures`);
+  }
+}
+if (!verifyInstallerSignature.includes('uninstall.exe')) {
+  throw new Error('verify-installer-signature.ps1 must still inspect uninstall.exe when 7-Zip extracts it');
 }
 
 const csp = tauriConfig.app?.security?.csp;

@@ -59,6 +59,19 @@ jobs:
 
           "version=$version" >> $env:GITHUB_OUTPUT
 
+      # Separate from the outer Authenticode loop above. A signed container can
+      # still pack an unsigned cubby.exe or uninstall.exe (SBS-777).
+      - name: Verify embedded cubby and uninstaller signatures
+        shell: pwsh
+        run: |
+          $version = "${{ steps.release.outputs.version }}"
+          foreach ($architecture in @("x64", "arm64")) {
+            $installerPath = "release-assets/Cubby.Clipboard_${version}_${architecture}-Store-setup.exe"
+            ./scripts/verify-installer-signature.ps1 `
+              -Installer $installerPath `
+              -ExpectedSubject "CN=Brandon South"
+          }
+
       - name: Publish x64 installer
         shell: pwsh
         env:
