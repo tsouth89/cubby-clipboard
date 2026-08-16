@@ -6,19 +6,37 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 
 ### Security
 - The Win+V helper no longer opens the flyout on a bare localhost UDP `activate` datagram; the channel now requires a per-session token, a loopback source, and a rate limit (SBS-809)
+- History list requests no longer ship full decrypted clip text to a window that asked only for previews (SBS-829)
+- Release builds no longer stream Rust logs into the WebView, which had been putting process names, clip identifiers, and filter values in renderer memory (SBS-837)
+- Backup export, backup import, and Ditto import now only write or read a path chosen in the file dialog, so a compromised Settings page cannot send history to an arbitrary location (SBS-808)
 - History source-app filter values are no longer written to the persistent Info log (SBS-773)
-- Pin third-party GitHub Actions in privileged release and Store workflows to immutable commit SHAs, and reject new mutable pins in CI
+- A signed Microsoft Store installer that packs an unsigned `cubby.exe` is now rejected instead of published (SBS-777)
+- Pin third-party GitHub Actions in privileged release and Store workflows to immutable commit SHAs, and reject new mutable pins in CI (SBS-778)
 
 ### Changed
+- Portable mode keeps its promises: logs stay in the folder you carry instead of `%LOCALAPPDATA%`, the installed-channel updater stays out of portable builds, and a `storage.key` this Windows account cannot read is explained at startup instead of failing silently (SBS-774, SBS-775, SBS-776)
+- Startup now records what its storage migrations changed, so a run that edited history says so
 - Pre-merge CI now cargo-checks x64 and ARM64 default and Microsoft Store feature builds, so those configurations fail on the pull request instead of at release (SBS-779)
 
 ### Fixed
-- Screenshot notes now show on the History row, not only in the preview pane (SBS-807)
-- The image window no longer offers Copy image after the original has expired (SBS-807)
-- Backup export, backup import, and Ditto import now only write or read a path chosen in the file dialog, so a compromised Settings page cannot send history to an arbitrary location (SBS-808)
+- Revive an expired screenshot original when that same image is copied again, including a consecutive duplicate that used to be skipped, so Paste and Copy work immediately and recognized text stays (SBS-769)
+- Keep the previous original when a recapture cannot write the full image, instead of losing both (SBS-836)
 - Refuse an encrypted backup export when any live clip field cannot be fully decrypted, and leave an existing destination file unchanged (SBS-772)
 - Refresh the rolling history backup during long-running sessions, so a machine that stays up past a day still gets a current `cubby.db.bak` without quitting Cubby (SBS-771)
-- Revive an expired screenshot original when that same image is copied again, including a consecutive duplicate that used to be skipped, so Paste and Copy work immediately and recognized text stays (SBS-769)
+- Skip an unreadable clip instead of letting it break history listing and search entirely (SBS-830)
+- Restore the forget-on-clear retry marker when the clip lookup fails, so a password manager clearing the clipboard still removes that clip (SBS-831)
+- Screenshot notes now show on the History row, not only in the preview pane (SBS-807)
+- The image window no longer offers Copy image after the original has expired (SBS-807)
+- Keep clip edits, history files, and captures from mixing together or vanishing
+- Stop a failed paste and a failed history reload from reporting success
+- Keep History preview details in sync after a save and after a reveal
+- Keep hidden clips blank in search results, and finish folder and duplicate cleanup
+- Keep the flyout visible while Settings is open, and honor the toggle and always-on-top preferences
+- Let the flyout follow the system theme, and let type-to-search accept IME input
+- Reset the history scroll position when the source or date filter changes
+- Keep the folder dialog open when creating a folder fails, so the name is not lost
+- Relay a remote-session copy so it reaches every session, not only the one that owns the clipboard
+- Say plainly in the docs and product pages that copied files are not kept, that secret heuristics ship off by default, and unblock the Settings links that went nowhere (SBS-832)
 
 ## v1.3.1
 

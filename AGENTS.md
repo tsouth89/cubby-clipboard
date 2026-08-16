@@ -168,7 +168,8 @@ one of them fails the pull request rather than the release:
 1. `package.json` → `"version": "x.y.z"`
 2. `src-tauri/Cargo.toml` → `version = "x.y.z"`
 3. `src-tauri/tauri.conf.json` → `"version": "x.y.z"`
-4. `src-tauri/Cargo.lock` → run `cargo update -p cubby` and commit the hunk.
+4. `src-tauri/Cargo.lock` → run `cargo update -p cubby --manifest-path src-tauri/Cargo.toml`
+   from the repository root and commit the hunk.
    `scripts/audit-rust.ps1` runs `cargo tree --locked`, which refuses to rewrite
    the lockfile, so a stale `cubby` stanza fails the required `test` job.
 
