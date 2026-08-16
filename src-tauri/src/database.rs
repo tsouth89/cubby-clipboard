@@ -1,7 +1,7 @@
 use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use crate::crypto::CryptoManager;
@@ -943,8 +943,11 @@ enum RollingBackupTick {
     Fresh,
     /// Checkpoint + atomic replace ran.
     Refreshed,
-    /// The live history was too small to overwrite the backup with. The pass
-    /// still counts, so the next tick does not checkpoint again.
+    /// The live history was too small to overwrite the backup with. The `.bak`
+    /// keeps both its bytes and its mtime, so the next tick recounts and
+    /// decides again — cheaply, because the count runs before the checkpoint.
+    /// That re-check is the point: a history rebuilt past the skip rule must
+    /// not wait out the max-age window before it can be backed up.
     Refused,
     /// A refresh is already in flight.
     Busy,
@@ -971,10 +974,6 @@ struct RollingBackupScheduler {
     /// Distinct from "backup is fresh": a failed attempt must retry on the
     /// next tick even if a last-attempt timestamp would look current.
     last_refresh_failed: AtomicBool,
-    /// When this session last completed a pass. The `.bak` mtime is the
-    /// cross-session record, but a refused copy legitimately leaves that file
-    /// alone; without this the next tick would re-enter the checkpoint.
-    last_pass_at: Mutex<Option<SystemTime>>,
 }
 
 impl RollingBackupScheduler {
@@ -988,7 +987,6 @@ impl RollingBackupScheduler {
             max_age,
             in_flight: AtomicBool::new(false),
             last_refresh_failed: AtomicBool::new(false),
-            last_pass_at: Mutex::new(None),
         }
     }
 
@@ -1011,16 +1009,24 @@ impl RollingBackupScheduler {
         };
 
         let last_failed = self.last_refresh_failed.load(Ordering::SeqCst);
-        // A failed refresh is not "fresh". Skipping here would wait another
-        // max-age window or a process restart before the next attempt.
-        if !last_failed && self.recovery_point_is_current(now) {
+        // The `.bak` file's own mtime is the only record of freshness, and it
+        // is deliberately the only one. A session-local "last pass" stamp would
+        // also cover the refused passes that leave that mtime alone, but it
+        // would then vouch for a backup that is stale, or deleted, or that a
+        // rebuilt history should now be allowed to replace — for the whole
+        // max-age window, on a session that never quits.
+        //
+        // Re-entering a refused pass costs two clip counts and nothing else:
+        // the count check runs before `PRAGMA wal_checkpoint(TRUNCATE)`, so it
+        // never stalls capture.
+        let backup = rolling_backup_path(&self.db_path);
+        if !last_failed && backup_is_fresh_as_of(&backup, now, self.max_age) {
             return RollingBackupTick::Fresh;
         }
 
         match perform_rolling_backup_refresh_with(&self.db_path, installer).await {
             Ok(outcome) => {
                 self.last_refresh_failed.store(false, Ordering::SeqCst);
-                self.record_pass(now);
                 match outcome {
                     BackupRefreshOutcome::Installed => RollingBackupTick::Refreshed,
                     BackupRefreshOutcome::RefusedNearEmptyDatabase => RollingBackupTick::Refused,
@@ -1031,33 +1037,6 @@ impl RollingBackupScheduler {
                 RollingBackupTick::Failed(error)
             }
         }
-    }
-
-    /// True when a recovery point from inside the max-age window already
-    /// exists. Two records answer that, and both are needed: the `.bak` mtime
-    /// survives a restart, and `last_pass_at` covers the passes that leave
-    /// that mtime untouched on purpose.
-    fn recovery_point_is_current(&self, now: SystemTime) -> bool {
-        let backup = rolling_backup_path(&self.db_path);
-        if backup_is_fresh_as_of(&backup, now, self.max_age) {
-            return true;
-        }
-        self.last_pass()
-            .is_some_and(|at| age_at(now, at) < self.max_age)
-    }
-
-    fn last_pass(&self) -> Option<SystemTime> {
-        *self
-            .last_pass_at
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn record_pass(&self, at: SystemTime) {
-        *self
-            .last_pass_at
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(at);
     }
 }
 
@@ -1225,10 +1204,11 @@ async fn add_column_if_missing(pool: &SqlitePool, sql: &str) -> Result<(), sqlx:
 mod tests {
     use super::{
         apply_database_health, backup_is_fresh_as_of, classify_sqlite_health_failure,
-        perform_rolling_backup_refresh, prepare_database_file, quarantine_database_files,
-        replace_backup_atomically, rolling_backup_path, sanitize_storage_diagnostic,
-        should_skip_backup_refresh, sqlite_failure_is_corruption, verify_database_quick_check,
-        Database, DatabaseHealth, RollingBackupScheduler, RollingBackupTick,
+        count_clips_in_file, perform_rolling_backup_refresh, prepare_database_file,
+        quarantine_database_files, replace_backup_atomically, rolling_backup_path,
+        sanitize_storage_diagnostic, should_skip_backup_refresh, sqlite_failure_is_corruption,
+        verify_database_quick_check, Database, DatabaseHealth, RollingBackupScheduler,
+        RollingBackupTick,
     };
     use crate::crypto::CryptoManager;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -1874,13 +1854,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
-    /// A near-empty history must not clobber a rich backup, and that refusal
-    /// is a completed pass. Reporting it as a refresh while `cubby.db.bak`
-    /// keeps its old mtime makes the next tick re-enter
-    /// `PRAGMA wal_checkpoint(TRUNCATE)` against the live database, every hour
-    /// for the rest of the session (SBS-771).
+    /// A near-empty history must not clobber a rich backup, and the refusal
+    /// must be cheap enough to repeat: the clip counts run before
+    /// `PRAGMA wal_checkpoint(TRUNCATE)`, so a repeated refusal never touches
+    /// the live database (SBS-771).
     #[tokio::test]
-    async fn a_refused_refresh_is_not_re_entered_on_the_next_tick() {
+    async fn a_refused_refresh_never_checkpoints_the_live_database() {
         let directory = temp_dir();
         let database_path = directory.join("cubby.db");
         let backup = rolling_backup_path(&database_path);
@@ -1895,16 +1874,13 @@ mod tests {
         let scheduler = RollingBackupScheduler::with_max_age(database_path.clone(), max_age);
         let stale = backup_modified + max_age + Duration::from_secs(1);
 
-        assert_eq!(
-            scheduler.tick(stale).await,
-            RollingBackupTick::Refused,
-            "a wiped history must not overwrite a 1000-clip backup"
-        );
-        assert_eq!(
-            scheduler.tick(stale + Duration::from_secs(1)).await,
-            RollingBackupTick::Fresh,
-            "a refused refresh must not re-enter the checkpoint on the next tick"
-        );
+        for label in ["the first refusal", "the next hourly tick"] {
+            assert_eq!(
+                scheduler.tick(stale).await,
+                RollingBackupTick::Refused,
+                "a wiped history must not overwrite a 1000-clip backup ({label})"
+            );
+        }
         assert_eq!(
             std::fs::read(&backup).unwrap(),
             backup_before,
@@ -1914,6 +1890,71 @@ mod tests {
             modified_time(&database_path),
             database_modified,
             "a refused refresh must not checkpoint the live history file"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// A refusal must not vouch for the backup. Once the user rebuilds enough
+    /// history to clear the skip rule, the very next tick has to back it up --
+    /// not wait out the max-age window because an earlier pass "completed"
+    /// (SBS-771).
+    #[tokio::test]
+    async fn a_rebuilt_history_is_backed_up_on_the_tick_after_a_refusal() {
+        let directory = temp_dir();
+        let database_path = directory.join("cubby.db");
+        let backup = rolling_backup_path(&database_path);
+        write_clips_file(&backup, 1000).await;
+        write_clips_file(&database_path, 0).await;
+
+        let max_age = Duration::from_secs(60);
+        let scheduler = RollingBackupScheduler::with_max_age(database_path.clone(), max_age);
+        let stale = modified_time(&backup) + max_age + Duration::from_secs(1);
+
+        assert_eq!(scheduler.tick(stale).await, RollingBackupTick::Refused);
+
+        // 200 live clips against a 1000-clip backup clears the skip rule
+        // (200 * 10 is not less than 1000).
+        write_clips_file(&database_path, 200).await;
+        assert_eq!(
+            scheduler.tick(stale + Duration::from_secs(1)).await,
+            RollingBackupTick::Refreshed,
+            "a history rebuilt past the skip rule must be backed up now, not in 24h"
+        );
+        assert_eq!(
+            count_clips_in_file(&backup).await,
+            Some(200),
+            "the installed backup must hold the rebuilt history"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// The `.bak` file is the recovery point. If OneDrive, a cleanup tool, or
+    /// the user deletes it, the next tick has to write a new one -- a session
+    /// that never quits must not be left with no rolling copy at all (SBS-771).
+    #[tokio::test]
+    async fn a_deleted_backup_is_recreated_on_the_next_tick() {
+        let directory = temp_dir();
+        let database_path = directory.join("cubby.db");
+        write_clips_file(&database_path, 5).await;
+        let backup = rolling_backup_path(&database_path);
+
+        let max_age = Duration::from_secs(60);
+        let scheduler = RollingBackupScheduler::with_max_age(database_path.clone(), max_age);
+        assert_eq!(
+            scheduler.tick(SystemTime::now()).await,
+            RollingBackupTick::Refreshed
+        );
+        assert!(backup.exists());
+
+        std::fs::remove_file(&backup).expect("the backup should be removable");
+        assert_eq!(
+            scheduler.tick(SystemTime::now()).await,
+            RollingBackupTick::Refreshed,
+            "a missing backup must be recreated rather than reported fresh"
+        );
+        assert!(
+            backup.exists(),
+            "there must be a rolling recovery copy on disk again"
         );
         let _ = std::fs::remove_dir_all(directory);
     }
