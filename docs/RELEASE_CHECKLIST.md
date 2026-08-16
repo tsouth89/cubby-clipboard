@@ -47,7 +47,7 @@ Run from the repository root on Windows:
 
 That script enforces:
 
-- Release metadata consistency (`pnpm run release:check`), including CSP, scoped Tauri capabilities, encrypted-storage invariants, secret-aware privacy gates, and the no-`dangerouslySetInnerHTML` frontend check.
+- Release metadata consistency (`pnpm run release:check`), including CSP, scoped Tauri capabilities, encrypted-storage invariants, secret-aware privacy gates, the no-`dangerouslySetInnerHTML` frontend check, and the privileged-workflow action pin check.
 - JavaScript production dependency audit (`pnpm audit --prod`).
 - Target-aware Rust advisory audit (`./scripts/audit-rust.ps1`), including the documented RSA waiver.
 - Frontend production build.
@@ -139,3 +139,21 @@ payload. A Settings/About surface for this status is still optional.
 - Do not enable Winget publishing until `SouthForgeAI.CubbyClipboard` is reserved and the installer identity is final.
 - Do not submit to Microsoft Store until Partner Center identity, signing, privacy text, and clean upgrade/uninstall behavior are verified.
 - Keep GPL-3.0 source, `NOTICE.md`, and PastePaw attribution available with every release.
+
+## Privileged GitHub Action pins (SBS-778)
+
+Release, Store, and signing workflows may only consume third-party Actions by
+full commit SHA, with the human-readable version in an adjacent comment. First-party
+`actions/*` refs may stay on a major tag. The release metadata check and CI run
+`.github/scripts/check-privileged-action-pins.mjs` and reject a new mutable
+third-party `uses:` line.
+
+When Dependabot opens an actions pin update:
+
+1. Read the action changelog and the commit range, not only the new SHA.
+2. Confirm the pin is a 40-character commit object (not an annotated-tag SHA).
+3. Confirm the adjacent `# version` comment still names the reviewed release.
+4. Run `node .github/scripts/check-privileged-action-pins.mjs` and
+   `node --test .github/scripts/check-privileged-action-pins.test.mjs`.
+5. Merge the pin update. Do not retarget the `uses:` ref back to a floating
+   tag such as `@v3` or `@stable`.

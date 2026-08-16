@@ -47,6 +47,10 @@ updates:
           - "patch"
     open-pull-requests-limit: 10
 
+  # SHA-pinned third-party actions in privileged workflows (release / Store /
+  # signing) are updated here. Dependabot rewrites both the commit pin and the
+  # adjacent version comment. Review the commit range and
+  # docs/RELEASE_CHECKLIST.md before merging; do not retarget a pin to a tag.
   - package-ecosystem: github-actions
     directory: /
     schedule:
