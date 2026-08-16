@@ -2074,40 +2074,15 @@ async fn process_clipboard_snapshot(
                 );
                 return;
             }
-
-            if let Some(full_bytes) = &full_image_content {
-                // Persist, then index + clear `full_image_expired` only if that
-                // write succeeded. The UPDATE above must not clear the flag:
-                // a failed file write would then claim a usable original (SBS-769).
-                match restore_existing_image_original(
-                    &db.crypto,
-                    pool,
-                    &db.image_dir,
-                    &existing_id,
-                    full_bytes,
-                )
-                .await
-                {
-                    Ok(_) => {}
-                    Err(PersistIndexedImageError::Persist(error)) => {
-                        // SBS-836: keep the thumbnail-only clip. The expired
-                        // flag stays set so paste/copy still refuse.
-                        log::error!(
-                            "Failed to persist full image file for existing clip {}: {}",
-                            existing_id,
-                            error
-                        );
-                    }
-                    Err(PersistIndexedImageError::Index(error)) => {
-                        log::error!(
-                            "CLIPBOARD: Failed to index image file for existing clip {}: {}",
-                            existing_id,
-                            error
-                        );
-                        return;
-                    }
-                }
-            }
+            // No second pass over the same file. `recapture_existing_image`
+            // above already staged the original, upserted `clip_images`, and
+            // cleared `full_image_expired` in one transaction. Writing
+            // `{uuid}.cubby` again here was not just wasted work: it was the
+            // only place the expired flag was cleared, so a failure of that
+            // second write (no room for another temp copy, or Windows refusing
+            // to replace the file recapture had just created) left the original
+            // on disk and indexed while Paste and Copy went on refusing it as
+            // expired (SBS-769).
         } else {
             if let Err(error) = sqlx::query(r#"UPDATE clips SET created_at = CURRENT_TIMESTAMP, is_deleted = 0, source_app = ?, source_icon = ? WHERE uuid = ?"#)
                 .bind(&encrypted_source_app)
@@ -2708,66 +2683,6 @@ pub(crate) async fn lookup_stored_original(
 
 /// Why restoring an existing image original failed.
 ///
-/// Persist failure is SBS-836 (keep the thumbnail-only clip). Index failure
-/// aborts the rest of capture so we do not mark the hash stable after a
-/// half-written revival.
-#[derive(Debug)]
-pub(crate) enum PersistIndexedImageError {
-    Persist(String),
-    Index(String),
-}
-
-impl std::fmt::Display for PersistIndexedImageError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Persist(error) | Self::Index(error) => f.write_str(error),
-        }
-    }
-}
-
-/// Persist original bytes, index `clip_images`, then clear `full_image_expired`
-/// only after both the file write and the index succeed in one transaction.
-///
-/// The clips-row UPDATE that runs before this must not clear the flag: a
-/// failed write would then claim a usable original that is not there (SBS-769).
-pub(crate) async fn restore_existing_image_original(
-    crypto: &crate::crypto::CryptoManager,
-    pool: &sqlx::SqlitePool,
-    image_dir: &std::path::Path,
-    clip_uuid: &str,
-    png_bytes: &[u8],
-) -> Result<String, PersistIndexedImageError> {
-    let file_path = persist_full_image_file(crypto, image_dir, clip_uuid, png_bytes)
-        .map_err(PersistIndexedImageError::Persist)?;
-
-    let mut transaction = pool
-        .begin()
-        .await
-        .map_err(|error| PersistIndexedImageError::Index(error.to_string()))?;
-    sqlx::query(
-        r#"
-        INSERT OR REPLACE INTO clip_images (clip_uuid, full_content, file_path, file_size, storage_kind, mime_type, created_at)
-        VALUES (?, x'', ?, ?, 'file', 'image/png', CURRENT_TIMESTAMP)
-        "#,
-    )
-    .bind(clip_uuid)
-    .bind(&file_path)
-    .bind(png_bytes.len() as i64)
-    .execute(&mut *transaction)
-    .await
-    .map_err(|error| PersistIndexedImageError::Index(error.to_string()))?;
-    sqlx::query("UPDATE clips SET full_image_expired = 0 WHERE uuid = ?")
-        .bind(clip_uuid)
-        .execute(&mut *transaction)
-        .await
-        .map_err(|error| PersistIndexedImageError::Index(error.to_string()))?;
-    transaction
-        .commit()
-        .await
-        .map_err(|error| PersistIndexedImageError::Index(error.to_string()))?;
-    Ok(file_path)
-}
-
 pub fn read_full_image_file(
     crypto: &crate::crypto::CryptoManager,
     file_path: &str,
@@ -3696,11 +3611,12 @@ mod tests {
 
     mod revive_expired_original {
         use super::super::{
-            consecutive_dedup_decision, lookup_stored_original, restore_existing_image_original,
-            ConsecutiveDedupDecision, PersistIndexedImageError, StoredOriginalLookup,
+            consecutive_dedup_decision, lookup_stored_original, persist_full_image_file,
+            recapture_existing_image, ConsecutiveDedupDecision, StoredOriginalLookup,
         };
         use crate::commands::{load_full_image_content, IMAGE_EXPIRED_ERROR};
         use crate::database::Database;
+        use crate::image_persist::RecaptureFields;
         use crate::models::Clip;
         use sqlx::sqlite::SqlitePoolOptions;
         use std::sync::Arc;
@@ -3779,6 +3695,24 @@ mod tests {
             let _ = std::fs::remove_dir_all(&database.image_dir);
         }
 
+        /// The recapture the capture loop performs for an existing image clip:
+        /// stage the original, rewrite the row, index it, then swap the file in.
+        async fn recapture(database: &Database, uuid: &str, bytes: &[u8]) -> Result<(), String> {
+            recapture_existing_image(
+                database,
+                uuid,
+                bytes,
+                RecaptureFields {
+                    source_app: &None,
+                    source_icon: &None,
+                    content: THUMBNAIL,
+                    preview: "[Image]",
+                    metadata: None,
+                },
+            )
+            .await
+        }
+
         /// SBS-769: re-copying an expired image wrote fresh bytes but left
         /// `full_image_expired` set, so paste/copy still rejected the original.
         #[tokio::test]
@@ -3794,15 +3728,9 @@ mod tests {
                 IMAGE_EXPIRED_ERROR
             );
 
-            restore_existing_image_original(
-                &database.crypto,
-                &database.pool,
-                &database.image_dir,
-                "shot",
-                ORIGINAL,
-            )
-            .await
-            .expect("revival should persist the original");
+            recapture(&database, "shot", ORIGINAL)
+                .await
+                .expect("revival should persist the original");
 
             assert_eq!(expired_flag(&database, "shot").await, 0);
             let mut revived = load_clip(&database, "shot").await;
@@ -3850,15 +3778,9 @@ mod tests {
                 ConsecutiveDedupDecision::Capture
             );
 
-            restore_existing_image_original(
-                &database.crypto,
-                &database.pool,
-                &database.image_dir,
-                "shot",
-                ORIGINAL,
-            )
-            .await
-            .expect("revival after a consecutive match should persist");
+            recapture(&database, "shot", ORIGINAL)
+                .await
+                .expect("revival after a consecutive match should persist");
 
             assert_eq!(expired_flag(&database, "shot").await, 0);
             assert_eq!(
@@ -3891,16 +3813,13 @@ mod tests {
             std::fs::write(&persist_fail_db.image_dir, b"not-a-directory")
                 .expect("image_dir should be a file so persist cannot create it");
 
-            let persist_err = restore_existing_image_original(
-                &persist_fail_db.crypto,
-                &persist_fail_db.pool,
-                &persist_fail_db.image_dir,
-                "shot",
-                ORIGINAL,
-            )
-            .await
-            .expect_err("persist must fail when image_dir is a file");
-            assert!(matches!(persist_err, PersistIndexedImageError::Persist(_)));
+            let persist_err = recapture(&persist_fail_db, "shot", ORIGINAL)
+                .await
+                .expect_err("staging must fail when image_dir is a file");
+            assert!(
+                persist_err.contains("persist"),
+                "the error should describe the failed write: {persist_err}"
+            );
             assert_eq!(expired_flag(&persist_fail_db, "shot").await, 1);
             let persist_index_rows: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM clip_images WHERE clip_uuid = 'shot'")
@@ -3917,19 +3836,114 @@ mod tests {
                 .await
                 .expect("dropping clip_images should force an index failure");
 
-            let index_err = restore_existing_image_original(
-                &index_fail_db.crypto,
-                &index_fail_db.pool,
-                &index_fail_db.image_dir,
+            let index_err = recapture(&index_fail_db, "shot", ORIGINAL)
+                .await
+                .expect_err("index must fail when clip_images is missing");
+            assert!(
+                index_err.contains("index"),
+                "the error should describe the failed index: {index_err}"
+            );
+            assert_eq!(expired_flag(&index_fail_db, "shot").await, 1);
+            // Review finding on PR #214: the write must not leave an orphan
+            // behind. Staging handles that on its own -- the temp file is only
+            // renamed onto `{uuid}.cubby` after the transaction commits, so a
+            // failed index leaves neither an original nor a stray temp.
+            assert!(
+                !index_fail_db.image_dir.join("shot.cubby").exists(),
+                "a failed index must not leave an unindexed original behind"
+            );
+            assert!(
+                !index_fail_db.image_dir.join("shot.cubby.tmp").exists(),
+                "a failed index must not leave the staged temp file behind"
+            );
+
+            cleanup(&index_fail_db);
+        }
+
+        /// Review finding on PR #214: a non-consecutive duplicate re-copy
+        /// reaches the recapture with `full_image_expired` already 0, so the
+        /// path can hold a valid original that a live `clip_images` row points
+        /// at. A failed recapture must leave that file exactly as it was
+        /// rather than stranding the row that describes it.
+        #[tokio::test]
+        async fn a_failed_recapture_does_not_disturb_a_preexisting_original() {
+            let database = test_database().await;
+            seed_expired_image(&database, "shot", "hash-shot").await;
+            // Clear the expired flag to model an original that is already
+            // valid, then write the file this recapture would replace.
+            sqlx::query("UPDATE clips SET full_image_expired = 0 WHERE uuid = 'shot'")
+                .execute(&database.pool)
+                .await
+                .expect("clearing the expired flag should succeed");
+            let existing_path =
+                persist_full_image_file(&database.crypto, &database.image_dir, "shot", ORIGINAL)
+                    .expect("seeding the pre-existing original should succeed");
+            let existing_bytes =
+                std::fs::read(&existing_path).expect("the seeded original should be readable");
+
+            sqlx::query("DROP TABLE clip_images")
+                .execute(&database.pool)
+                .await
+                .expect("dropping clip_images should force an index failure");
+
+            let index_err = recapture(
+                &database,
                 "shot",
-                ORIGINAL,
+                b"different-bytes-from-a-racing-recapture",
             )
             .await
             .expect_err("index must fail when clip_images is missing");
-            assert!(matches!(index_err, PersistIndexedImageError::Index(_)));
-            assert_eq!(expired_flag(&index_fail_db, "shot").await, 1);
+            assert!(
+                index_err.contains("index"),
+                "the error should describe the failed index: {index_err}"
+            );
+            assert_eq!(
+                std::fs::read(&existing_path).expect("the original must still be there"),
+                existing_bytes,
+                "a file that already existed must survive a failed recapture untouched"
+            );
 
-            cleanup(&index_fail_db);
+            cleanup(&database);
+        }
+
+        /// The whole point of SBS-769, end to end: one recapture is what makes
+        /// an expired clip usable again. Nothing runs after it to clear the
+        /// flag, so the row, the index, and the file must all be correct when
+        /// that single call returns.
+        #[tokio::test]
+        async fn one_recapture_leaves_the_clip_fully_usable() {
+            let database = test_database().await;
+            seed_expired_image(&database, "shot", "hash-shot").await;
+
+            recapture(&database, "shot", ORIGINAL)
+                .await
+                .expect("the recapture should succeed");
+
+            assert_eq!(
+                expired_flag(&database, "shot").await,
+                0,
+                "the recapture transaction must clear the expired flag itself"
+            );
+            let indexed: (String, i64) = sqlx::query_as(
+                "SELECT file_path, file_size FROM clip_images WHERE clip_uuid = 'shot'",
+            )
+            .fetch_one(&database.pool)
+            .await
+            .expect("the recapture should have indexed the original");
+            assert_eq!(indexed.1, ORIGINAL.len() as i64);
+            assert!(
+                std::path::Path::new(&indexed.0).exists(),
+                "clip_images must point at a file that is actually on disk"
+            );
+            let mut revived = load_clip(&database, "shot").await;
+            assert_eq!(
+                load_full_image_content(&database, &mut revived)
+                    .await
+                    .expect("Paste and Copy must work after one recapture"),
+                ORIGINAL
+            );
+
+            cleanup(&database);
         }
     }
 }

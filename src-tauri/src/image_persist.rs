@@ -123,6 +123,12 @@ pub(crate) struct RecaptureFields<'a> {
 /// original only replaces the live file after that transaction commits. A
 /// failure at any earlier point returns with the staged handle un-committed, so
 /// its `Drop` deletes the temp file and the previous original survives intact.
+///
+/// `full_image_expired = 0` belongs in that same transaction (SBS-769). This is
+/// the one place a recaptured original becomes usable again, and clearing the
+/// flag anywhere else would either claim an original before it is on disk or,
+/// as a second pass after this one, leave a clip whose file and `clip_images`
+/// row are both correct while Paste and Copy still refuse it as expired.
 pub(crate) async fn apply_existing_image_recapture(
     pool: &sqlx::SqlitePool,
     existing_id: &str,
@@ -149,7 +155,8 @@ pub(crate) async fn apply_existing_image_recapture(
             content = ?,
             text_preview = ?,
             metadata = ?,
-            is_thumbnail = 0
+            is_thumbnail = 0,
+            full_image_expired = 0
         WHERE uuid = ?
         "#,
     )
