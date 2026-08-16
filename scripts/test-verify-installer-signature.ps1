@@ -91,8 +91,13 @@ Assert-True "unexpected signer is reject-subject" (
 )
 
 $validNoSubject = New-FakeSignature -Status "Valid" -Subject ""
-Assert-True "Valid status with no certificate is reject-status" (
-    (Resolve-EmbeddedSignatureDecision -Signature $validNoSubject -ExpectedSubject $expectedSubject) -eq "reject-status"
+Assert-True "Valid status with no certificate is reject-missing-certificate" (
+    (Resolve-EmbeddedSignatureDecision -Signature $validNoSubject -ExpectedSubject $expectedSubject) -eq "reject-missing-certificate"
+)
+
+$spoofedCn = New-FakeSignature -Status "Valid" -Subject "CN=Brandon South Evil, O=Attacker"
+Assert-True "CN that only contains the expected CN as a substring is reject-subject" (
+    (Resolve-EmbeddedSignatureDecision -Signature $spoofedCn -ExpectedSubject $expectedSubject) -eq "reject-subject"
 )
 
 Write-Host "Assert-PackedFileSignature / Assert-EmbeddedPackageSignatures"
@@ -228,6 +233,41 @@ try {
     Assert-True "wrong-subject error names the installer and packed file" (
         $wrongSubjectMessage -like "*$installerName*" -and
         ($wrongSubjectMessage -like "*cubby.exe*" -or $wrongSubjectMessage -like "*uninstall.exe*")
+    )
+
+    $missingCubbyDir = Join-Path $scratch "empty-extract"
+    New-Item -ItemType Directory -Path $missingCubbyDir | Out-Null
+    $missingCubbyMessage = ""
+    try {
+        Find-PackedExecutable `
+            -ExtractDir $missingCubbyDir `
+            -Name "cubby.exe" `
+            -InstallerPath $installerPath `
+            -ExtractExitCode 1
+    }
+    catch {
+        $missingCubbyMessage = [string]$_.Exception.Message
+    }
+    Assert-True "missing cubby.exe names the installer" ($missingCubbyMessage -like "*$installerName*")
+    Assert-True "missing cubby.exe includes the 7-Zip exit code" ($missingCubbyMessage -like "*7-Zip exit code 1*")
+
+    $missingCertLookup = {
+        param($Path)
+        New-FakeSignature -Status "Valid" -Subject ""
+    }
+    $missingCertMessage = ""
+    try {
+        Assert-EmbeddedPackageSignatures `
+            -InstallerPath $installerPath `
+            -ExtractDir $extractDir `
+            -ExpectedSubject $expectedSubject `
+            -GetSignature $missingCertLookup
+    }
+    catch {
+        $missingCertMessage = [string]$_.Exception.Message
+    }
+    Assert-True "Valid packed file with no certificate names the missing certificate" (
+        $missingCertMessage -like "*Valid but has no signer certificate*"
     )
 }
 finally {

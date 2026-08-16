@@ -74,10 +74,13 @@ function Resolve-EmbeddedSignatureDecision {
         $subject = [string]$Signature.SignerCertificate.Subject
     }
     if ([string]::IsNullOrWhiteSpace($subject)) {
-        return "reject-status"
+        return "reject-missing-certificate"
     }
-    if ($ExpectedSubject -and $subject -notlike "*$ExpectedSubject*") {
-        return "reject-subject"
+    if ($ExpectedSubject) {
+        $escaped = [regex]::Escape($ExpectedSubject)
+        if ($subject -notmatch ("^(?i)" + $escaped + "(,|$)")) {
+            return "reject-subject"
+        }
     }
     return "accept"
 }
@@ -86,14 +89,19 @@ function Find-PackedExecutable {
     param(
         [Parameter(Mandatory = $true)][string]$ExtractDir,
         [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)][string]$InstallerPath
+        [Parameter(Mandatory = $true)][string]$InstallerPath,
+        [int]$ExtractExitCode
     )
 
     $file = Get-ChildItem -LiteralPath $ExtractDir -Filter $Name -Recurse -File |
         Select-Object -First 1
     if (-not $file) {
         $installerName = Split-Path -Leaf $InstallerPath
-        throw "verify-installer-signature: no $Name inside $installerName."
+        $hint = ""
+        if ($PSBoundParameters.ContainsKey("ExtractExitCode")) {
+            $hint = " (7-Zip exit code $ExtractExitCode)"
+        }
+        throw "verify-installer-signature: no $Name inside $installerName.$hint"
     }
     return $file
 }
@@ -119,9 +127,13 @@ function Assert-PackedFileSignature {
         throw "verify-installer-signature: $installerName packed $embeddedName is '$status'.$detail"
     }
 
+    if ($decision -eq "reject-missing-certificate") {
+        throw "verify-installer-signature: $installerName packed $embeddedName is Valid but has no signer certificate."
+    }
+
     $subject = [string]$Signature.SignerCertificate.Subject
     if ($decision -eq "reject-subject") {
-        throw "verify-installer-signature: $installerName packed $embeddedName is signed by '$subject', which does not contain '$ExpectedSubject'."
+        throw "verify-installer-signature: $installerName packed $embeddedName is signed by '$subject', which is not '$ExpectedSubject'."
     }
 
     return $subject
@@ -132,7 +144,8 @@ function Assert-EmbeddedPackageSignatures {
         [Parameter(Mandatory = $true)][string]$InstallerPath,
         [Parameter(Mandatory = $true)][string]$ExtractDir,
         [string]$ExpectedSubject,
-        [scriptblock]$GetSignature
+        [scriptblock]$GetSignature,
+        [int]$ExtractExitCode
     )
 
     if (-not $GetSignature) {
@@ -142,8 +155,18 @@ function Assert-EmbeddedPackageSignatures {
         }
     }
 
+    $findArgs = @{
+        ExtractDir = $ExtractDir
+        Name = $null
+        InstallerPath = $InstallerPath
+    }
+    if ($PSBoundParameters.ContainsKey("ExtractExitCode")) {
+        $findArgs.ExtractExitCode = $ExtractExitCode
+    }
+
     foreach ($name in Get-RequiredPackedExecutableNames) {
-        $file = Find-PackedExecutable -ExtractDir $ExtractDir -Name $name -InstallerPath $InstallerPath
+        $findArgs.Name = $name
+        $file = Find-PackedExecutable @findArgs
         $signature = & $GetSignature $file.FullName
         $subject = Assert-PackedFileSignature `
             -InstallerPath $InstallerPath `
@@ -194,12 +217,15 @@ try {
     Write-Host "verify-installer-signature: extracting $resolved"
     # 7-Zip returns 1 for non-fatal warnings on NSIS containers, so the presence
     # of the required packed executables is the real success condition rather
-    # than the exit code.
+    # than the exit code. Keep the code in the missing-file error so a corrupt
+    # extract is distinguishable from "extracted, but cubby.exe was not inside".
     & $sevenZip x $resolved "-o$extractDir" -y | Out-Null
+    $extractExit = $LASTEXITCODE
     Assert-EmbeddedPackageSignatures `
         -InstallerPath $resolved `
         -ExtractDir $extractDir `
-        -ExpectedSubject $ExpectedSubject
+        -ExpectedSubject $ExpectedSubject `
+        -ExtractExitCode $extractExit
 }
 finally {
     Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
