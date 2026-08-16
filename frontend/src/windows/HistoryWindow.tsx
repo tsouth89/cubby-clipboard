@@ -14,6 +14,7 @@ import { useSystemAccent } from '../hooks/useSystemAccent';
 import { useRevealedClips } from '../hooks/useRevealedClips';
 import { customRange, DATE_PRESET_LABELS, DatePreset, presetRange } from '../utils/dateRange';
 import { folderSelectionAfterReload } from '../utils/folderSelection';
+import { clipLoadFailure } from '../utils/clipLoadFailure';
 import {
   applySelectionClick,
   EMPTY_SELECTION,
@@ -150,6 +151,9 @@ export function HistoryWindow() {
         console.error('Failed to load clips:', error);
         setLoadError(true);
         setHasMore(false);
+        const failure = clipLoadFailure(append);
+        if (failure.clearList) setClips([]);
+        if (failure.notify) toast.error('Could not load more clips');
         return false;
       } finally {
         if (loadId === loadIdRef.current) setIsLoading(false);

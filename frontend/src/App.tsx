@@ -18,6 +18,7 @@ import { useUpdater } from './hooks/useUpdater';
 import { useRevealedClips } from './hooks/useRevealedClips';
 import { isImeKey, shouldCaptureTypeToSearch } from './utils/flyoutSearch';
 import { folderSelectionAfterReload } from './utils/folderSelection';
+import { clipLoadFailure } from './utils/clipLoadFailure';
 import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
 import { generateDemoClips } from './debug/demoData';
@@ -428,6 +429,9 @@ function App() {
         console.error('Failed to load clips:', error);
         setLoadError(true);
         setHasMore(false);
+        const failure = clipLoadFailure(append);
+        if (failure.clearList) setClips([]);
+        if (failure.notify) toast.error(t('clipList.loadMoreFailed'));
         return false;
       } finally {
         if (perfId === loadPerfIdRef.current) setIsLoading(false);

@@ -24,6 +24,7 @@
     "noTextDesc": "Copy some text or switch back to All.",
     "loadFailed": "Couldn’t load clipboard history",
     "loadFailedDesc": "Cubby kept your data. Try loading it again.",
+    "loadMoreFailed": "Couldn’t load more clips",
     "retry": "Try again"
   },
   "pasteContext": {
