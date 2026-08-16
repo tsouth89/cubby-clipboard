@@ -18,6 +18,7 @@ import { useUpdater } from './hooks/useUpdater';
 import { useRevealedClips } from './hooks/useRevealedClips';
 import { isImeKey, shouldCaptureTypeToSearch } from './utils/flyoutSearch';
 import { folderSelectionAfterReload } from './utils/folderSelection';
+import { clipLoadFailure } from './utils/clipLoadFailure';
 import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
 import { generateDemoClips } from './debug/demoData';
@@ -112,6 +113,12 @@ function App() {
   const selectedFolderRef = useRef(selectedFolder);
   selectedFolderRef.current = selectedFolder;
   const loadPerfIdRef = useRef(0);
+  const clipsRef = useRef(clips);
+  clipsRef.current = clips;
+  // Which query the rows on screen answer. A failed replace only has to wipe
+  // them when this no longer matches the load that failed — a same-filter
+  // refresh (clipboard change, post-edit reload, retry) leaves a correct page.
+  const visibleFilterKeyRef = useRef<string | null>(null);
   const perfLogEnabled =
     typeof window !== 'undefined' &&
     (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
@@ -312,6 +319,7 @@ function App() {
       filter: ContentFilter = 'all'
     ) => {
       const perfId = ++loadPerfIdRef.current;
+      const filterKey = JSON.stringify([folderId, searchQuery.trim(), filter]);
       const loadStart = perfLogEnabled ? performance.now() : 0;
       let invokeStart = 0;
       let invokeEnd = 0;
@@ -320,7 +328,7 @@ function App() {
         setIsLoading(true);
         setLoadError(false);
 
-        const currentOffset = append ? clips.length : 0;
+        const currentOffset = append ? clipsRef.current.length : 0;
         // The index lowercases but does not trim, so a leading space matches
         // nothing. History already sends the trimmed form.
         const query = searchQuery.trim();
@@ -394,6 +402,7 @@ function App() {
         } else {
           setClips(data);
         }
+        visibleFilterKeyRef.current = filterKey;
 
         // If we got fewer than limit, no more clips
         setHasMore(data.length === 20);
@@ -428,12 +437,30 @@ function App() {
         console.error('Failed to load clips:', error);
         setLoadError(true);
         setHasMore(false);
+        const failure = clipLoadFailure({
+          append,
+          visibleRowsStillApply: visibleFilterKeyRef.current === filterKey,
+          hasVisibleClips: clipsRef.current.length > 0,
+        });
+        if (failure.clearList) {
+          setClips([]);
+          // The empty list now stands for this query, so retrying it is a
+          // same-filter refresh rather than another filter change.
+          visibleFilterKeyRef.current = filterKey;
+        }
+        if (failure.notify) {
+          toast.error(t(append ? 'clipList.loadMoreFailed' : 'clipList.refreshFailed'), {
+            // One id, so a backend that keeps failing on every clipboard change
+            // replaces its own message instead of stacking a wall of them.
+            id: 'clip-load-failed',
+          });
+        }
         return false;
       } finally {
         if (perfId === loadPerfIdRef.current) setIsLoading(false);
       }
     },
-    [clips.length]
+    []
   );
 
   const loadFolders = useCallback(async () => {
@@ -983,11 +1010,19 @@ function App() {
 
       setSelectedClipId(null);
       setClipListResetToken((token) => token + 1);
-      await Promise.all([
+      // Clear-all deletes every visible row. Clear-unpinned leaves pinned
+      // clips, so a failed reload must keep those rather than wiping them.
+      if (mode === 'all') {
+        visibleFilterKeyRef.current = null;
+      }
+      const [reloaded] = await Promise.all([
         loadClips(selectedFolder, false, searchQuery, contentFilter),
         loadFolders(),
         refreshTotalCount(),
       ]);
+      if (!reloaded) {
+        return;
+      }
       toast.success(
         mode === 'unpinned'
           ? t('notifications.clearUnpinnedSuccess', { count: deleted })

@@ -12,7 +12,9 @@
   },
   "clipList": {
     "empty": "Noch keine Einträge",
-    "emptyDesc": "Kopieren Sie etwas in Ihre Zwischenablage, dann erscheint es hier."
+    "emptyDesc": "Kopieren Sie etwas in Ihre Zwischenablage, dann erscheint es hier.",
+    "loadMoreFailed": "Couldn’t load more clips",
+    "refreshFailed": "Couldn’t refresh clipboard history"
   },
   "folders": {
     "all": "Alle Einträge",

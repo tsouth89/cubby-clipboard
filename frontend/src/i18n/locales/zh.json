@@ -12,7 +12,9 @@
   },
   "clipList": {
     "empty": "暂无剪贴",
-    "emptyDesc": "复制内容后将显示在这里"
+    "emptyDesc": "复制内容后将显示在这里",
+    "loadMoreFailed": "Couldn’t load more clips",
+    "refreshFailed": "Couldn’t refresh clipboard history"
   },
   "folders": {
     "all": "全部",

@@ -1064,6 +1064,22 @@ fn restore_hash_material(
     )
 }
 
+/// Record that the user actually used this clip, bumping it to the top of
+/// history and restarting its retention clock.
+///
+/// `created_at` doubles as "last used" for both ordering and retention, so this
+/// only applies when the clipboard write landed. An unconditional bump reordered
+/// history and extended the life of a clip after a paste that never happened.
+async fn mark_clip_used(pool: &sqlx::SqlitePool, uuid: &str, write_succeeded: bool) {
+    if !write_succeeded {
+        return;
+    }
+    let _ = sqlx::query(r#"UPDATE clips SET created_at = CURRENT_TIMESTAMP WHERE uuid = ?"#)
+        .bind(uuid)
+        .execute(pool)
+        .await;
+}
+
 async fn restore_clip(
     id: &str,
     plain_text: bool,
@@ -1144,12 +1160,7 @@ async fn restore_clip(
                 crate::clipboard::clear_ignore_hash_if_matches(&content_hash);
             }
 
-            // Manually perform the LRU bump (update created_at)
-            let _ =
-                sqlx::query(r#"UPDATE clips SET created_at = CURRENT_TIMESTAMP WHERE uuid = ?"#)
-                    .bind(&uuid)
-                    .execute(pool)
-                    .await;
+            mark_clip_used(pool, &uuid, final_res.is_ok()).await;
 
             if final_res.is_ok() {
                 let remote_paste_mode = window
@@ -2891,7 +2902,7 @@ mod tests {
         build_ocr_highlights, build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore,
         delete_folder_in_pool, directory_size_bytes, enforce_retention_in_pool,
         get_clip_details_in_database, get_clips_in_database, get_clips_request_log,
-        load_recognized_text, migrate_clip_format_model, migrate_encrypted_storage,
+        load_recognized_text, mark_clip_used, migrate_clip_format_model, migrate_encrypted_storage,
         ocr_text_layout, remove_clip_image_files, remove_duplicate_clips_in_database,
         restore_hash_material, search_clips_in_database, set_clip_notes_in_database,
         set_clip_ocr_text_in_database, source_app_filter_log_state, toggle_clip_hidden_in_pool,
@@ -2989,6 +3000,53 @@ mod tests {
         .execute(&database.pool)
         .await
         .unwrap();
+    }
+
+    async fn created_at_of(database: &Database, uuid: &str) -> String {
+        sqlx::query_scalar("SELECT created_at FROM clips WHERE uuid = ?")
+            .bind(uuid)
+            .fetch_one(&database.pool)
+            .await
+            .expect("clip should exist")
+    }
+
+    /// A failed clipboard write must leave history ordering alone. Bumping
+    /// `created_at` anyway moved the clip to the top and restarted its
+    /// retention clock for a paste the user never received.
+    #[tokio::test]
+    async fn failed_restore_does_not_bump_the_clip() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("stale", "never pasted", "2026-03-01 12:00:00"),
+        )
+        .await;
+
+        mark_clip_used(&database.pool, "stale", false).await;
+
+        assert_eq!(
+            created_at_of(&database, "stale").await,
+            "2026-03-01 12:00:00",
+            "a failed clipboard write must not reorder history"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_restore_bumps_the_clip() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("used", "actually pasted", "2026-03-01 12:00:00"),
+        )
+        .await;
+
+        mark_clip_used(&database.pool, "used", true).await;
+
+        assert_ne!(
+            created_at_of(&database, "used").await,
+            "2026-03-01 12:00:00",
+            "a successful paste must count as recent use"
+        );
     }
 
     /// Three clips over three days from two apps, newest last.

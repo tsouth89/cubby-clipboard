@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { CheckSquare, Copy, History, Pin, PinOff, Search, Trash2, X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
 import { ClipboardItem, FolderItem, Settings } from '../types';
 import { ClipList } from '../components/ClipList';
@@ -14,6 +15,7 @@ import { useSystemAccent } from '../hooks/useSystemAccent';
 import { useRevealedClips } from '../hooks/useRevealedClips';
 import { customRange, DATE_PRESET_LABELS, DatePreset, presetRange } from '../utils/dateRange';
 import { folderSelectionAfterReload } from '../utils/folderSelection';
+import { clipLoadFailure } from '../utils/clipLoadFailure';
 import {
   applySelectionClick,
   EMPTY_SELECTION,
@@ -50,6 +52,7 @@ const CONTENT_FILTERS: ReadonlyArray<readonly [ContentFilter, string]> = [
  * honor, so its primary action is copy rather than paste.
  */
 export function HistoryWindow() {
+  const { t } = useTranslation();
   const [clips, setClips] = useState<ClipboardItem[]>([]);
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
@@ -91,6 +94,11 @@ export function HistoryWindow() {
   // Guards against an older load landing after a newer one and restoring stale
   // results — the same discipline the flyout uses.
   const loadIdRef = useRef(0);
+  // Which query the rows on screen answer. A failed replace only has to wipe
+  // them when this no longer matches the load that failed — a same-filter
+  // refresh (clipboard change, window focus, post-edit reload) leaves a
+  // correct page.
+  const visibleFilterKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     invoke<Settings>('get_settings').then(setSettings).catch(console.error);
@@ -109,6 +117,14 @@ export function HistoryWindow() {
       const loadId = ++loadIdRef.current;
       const offset = append ? clipsRef.current.length : 0;
       const query = searchQuery.trim();
+      const filterKey = JSON.stringify([
+        selectedFolder,
+        query,
+        contentFilter,
+        dateFrom,
+        dateTo,
+        sourceApp,
+      ]);
 
       try {
         setIsLoading(true);
@@ -141,6 +157,7 @@ export function HistoryWindow() {
 
         if (loadId !== loadIdRef.current) return true;
         setClips((previous) => (append ? [...previous, ...data] : data));
+        visibleFilterKeyRef.current = filterKey;
         setHasMore(data.length === PAGE_SIZE);
         return true;
       } catch (error) {
@@ -150,6 +167,24 @@ export function HistoryWindow() {
         console.error('Failed to load clips:', error);
         setLoadError(true);
         setHasMore(false);
+        const failure = clipLoadFailure({
+          append,
+          visibleRowsStillApply: visibleFilterKeyRef.current === filterKey,
+          hasVisibleClips: clipsRef.current.length > 0,
+        });
+        if (failure.clearList) {
+          setClips([]);
+          // The empty list now stands for this query, so retrying it is a
+          // same-filter refresh rather than another filter change.
+          visibleFilterKeyRef.current = filterKey;
+        }
+        if (failure.notify) {
+          toast.error(t(append ? 'clipList.loadMoreFailed' : 'clipList.refreshFailed'), {
+            // One id, so a backend that keeps failing on every clipboard change
+            // replaces its own message instead of stacking a wall of them.
+            id: 'clip-load-failed',
+          });
+        }
         return false;
       } finally {
         if (loadId === loadIdRef.current) setIsLoading(false);
@@ -282,10 +317,29 @@ export function HistoryWindow() {
 
   const clearSelection = useCallback(() => setSelection(EMPTY_SELECTION), []);
 
-  const afterBulkChange = useCallback(async () => {
-    clearSelection();
-    await Promise.all([loadClips(false), loadFolders(), refreshTotalCount(), loadSourceApps()]);
-  }, [clearSelection, loadClips, loadFolders, refreshTotalCount, loadSourceApps]);
+  /**
+   * Returns whether the list actually reloaded. loadClips reports failure
+   * rather than throwing, so callers must check this before announcing success:
+   * the rows on screen still describe the state before the bulk change.
+   */
+  const afterBulkChange = useCallback(
+    async (rowsStillApply = false) => {
+      clearSelection();
+      // Delete and move take rows out of this query. Pin does not, so a failed
+      // reload must keep the still-matching list instead of wiping it.
+      if (!rowsStillApply) {
+        visibleFilterKeyRef.current = null;
+      }
+      const [reloaded] = await Promise.all([
+        loadClips(false),
+        loadFolders(),
+        refreshTotalCount(),
+        loadSourceApps(),
+      ]);
+      return reloaded;
+    },
+    [clearSelection, loadClips, loadFolders, refreshTotalCount, loadSourceApps]
+  );
 
   const handleBulkDelete = useCallback(async () => {
     if (selectionCount === 0) return;
@@ -296,7 +350,10 @@ export function HistoryWindow() {
         ids: selectedIds,
         hardDelete: true,
       });
-      await afterBulkChange();
+      if (!(await afterBulkChange())) {
+        toast.error('Deleted, but the list could not be reloaded');
+        return;
+      }
       toast.success(deleted === 1 ? 'Deleted 1 clip' : `Deleted ${deleted} clips`);
     } catch (error) {
       console.error('Failed to delete clips:', error);
@@ -309,7 +366,10 @@ export function HistoryWindow() {
       if (selectionCount === 0) return;
       try {
         await invoke<number>('set_clips_pinned', { ids: selectedIds, pinned });
-        await afterBulkChange();
+        if (!(await afterBulkChange(true))) {
+          toast.error('Pin state changed, but the list could not be reloaded');
+          return;
+        }
         toast.success(
           pinned ? `Pinned ${selectionCount} clips` : `Unpinned ${selectionCount} clips`
         );
@@ -326,7 +386,10 @@ export function HistoryWindow() {
       if (selectionCount === 0) return;
       try {
         await invoke<number>('move_clips_to_folder', { ids: selectedIds, folderId });
-        await afterBulkChange();
+        if (!(await afterBulkChange())) {
+          toast.error('Moved, but the list could not be reloaded');
+          return;
+        }
         toast.success(
           folderId
             ? `Moved ${selectionCount} clips to ${folders.find((f) => f.id === folderId)?.name ?? 'folder'}`
@@ -451,9 +514,11 @@ export function HistoryWindow() {
         // Hidden rows still ship empty content after reload; keep the session
         // reveal in sync so leaving this clip and coming back does not revert.
         updateRevealed(clipId, { content: text, preview: text });
-        // The row still holds the pre-edit preview, and the edit may have
-        // changed which clips a filter or search matches.
-        await loadClips(false);
+        // Same-filter reload: loadClips already toasts refreshFailed on
+        // failure. A second toast here would talk over it.
+        if (!(await loadClips(false))) {
+          return;
+        }
         toast.success('Clip updated');
       } catch (error) {
         console.error('Failed to update the clip:', error);

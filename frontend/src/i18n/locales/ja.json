@@ -12,7 +12,9 @@
   },
   "clipList": {
     "empty": "まだクリップがありません",
-    "emptyDesc": "何かをクリップボードにコピーすると、ここに表示されます。"
+    "emptyDesc": "何かをクリップボードにコピーすると、ここに表示されます。",
+    "loadMoreFailed": "Couldn’t load more clips",
+    "refreshFailed": "Couldn’t refresh clipboard history"
   },
   "folders": {
     "all": "すべてのクリップ",

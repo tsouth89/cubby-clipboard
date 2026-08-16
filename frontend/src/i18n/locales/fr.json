@@ -12,7 +12,9 @@
   },
   "clipList": {
     "empty": "Aucun élément pour le moment",
-    "emptyDesc": "Copiez quelque chose dans votre presse-papiers et cela apparaîtra ici."
+    "emptyDesc": "Copiez quelque chose dans votre presse-papiers et cela apparaîtra ici.",
+    "loadMoreFailed": "Couldn’t load more clips",
+    "refreshFailed": "Couldn’t refresh clipboard history"
   },
   "folders": {
     "all": "Tous les éléments",
