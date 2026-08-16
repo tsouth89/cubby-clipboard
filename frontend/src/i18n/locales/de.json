@@ -84,7 +84,8 @@
     "removeDuplicates": "Duplikate entfernen",
     "removeDuplicatesSuccess": "{{count}} doppelte Einträge entfernt",
     "newFolderPlaceholder": "Neuer Ordnername",
-    "noFolders": "Keine benutzerdefinierten Ordner erstellt."
+    "noFolders": "Keine benutzerdefinierten Ordner erstellt.",
+    "linkFailed": "Could not open {{url}} in your browser."
   },
   "notifications": {
     "clipDeleted": "Eintrag gelöscht",

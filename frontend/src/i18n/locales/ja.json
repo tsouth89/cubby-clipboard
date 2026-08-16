@@ -84,7 +84,8 @@
     "removeDuplicates": "重複を削除",
     "removeDuplicatesSuccess": "{{count}} 件の重複クリップを削除しました",
     "newFolderPlaceholder": "新しいフォルダー名",
-    "noFolders": "カスタムフォルダーはまだ作成されていません。"
+    "noFolders": "カスタムフォルダーはまだ作成されていません。",
+    "linkFailed": "Could not open {{url}} in your browser."
   },
   "notifications": {
     "clipDeleted": "クリップを削除しました",

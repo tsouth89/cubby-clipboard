@@ -84,7 +84,8 @@
     "removeDuplicates": "移除重复项",
     "removeDuplicatesSuccess": "已移除 {{count}} 个重复剪贴",
     "newFolderPlaceholder": "新文件夹名称",
-    "noFolders": "尚未创建自定义文件夹。"
+    "noFolders": "尚未创建自定义文件夹。",
+    "linkFailed": "Could not open {{url}} in your browser."
   },
   "notifications": {
     "clipDeleted": "剪贴已删除",

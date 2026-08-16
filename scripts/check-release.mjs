@@ -25,6 +25,8 @@ const [
   modelsSource,
   securityDoc,
   readmeDoc,
+  privacyPageDoc,
+  supportPageDoc,
   settingsPanelSource,
 ] = await Promise.all([
   read('package.json'),
@@ -43,6 +45,8 @@ const [
   read('src-tauri/src/models.rs'),
   read('SECURITY.md'),
   read('README.md'),
+  read('product_pages/privacy.html'),
+  read('product_pages/support.html'),
   read('frontend/src/components/SettingsPanel.tsx'),
 ]);
 
@@ -183,11 +187,36 @@ if (`${clipboardSource}\n${commandSource}`.includes('ClipboardContent::Files')) 
 // The gates above encode that copied files are never stored. Public docs claimed
 // the opposite for months because nothing tied the two together. If file capture
 // is ever restored, delete these lines deliberately along with the design work.
-for (const [docName, doc] of [['README.md', readmeDoc], ['SECURITY.md', securityDoc]]) {
-  const fileClaim = doc.match(/^.*\bfile[- ](?:lists?|drop lists?)\b.*$/im)?.[0];
+//
+// A sentence only counts as a claim if it says files are retained or
+// supported (retained|stores|supports|includes|records) without also
+// negating that (not|never|ignore). This lets docs correctly say "Cubby does
+// not store file lists" while still catching restated lies like "Cubby
+// stores copied files" that don't use the literal phrase "file lists".
+// Checked per sentence rather than per line: a paragraph line can carry both
+// an accurate negated claim and a false unnegated one, and a negation later
+// in the same line must not paper over a false claim earlier in it.
+const fileMentionPattern = /\bfiles?\b/i;
+const retentionClaimPattern = /\b(?:retained|stores?|supports?|includes?|records?(?:ed)?)\b/i;
+const negationPattern = /\b(?:not|never|ignor\w*)\b/i;
+for (const [docName, doc] of [
+  ['README.md', readmeDoc],
+  ['SECURITY.md', securityDoc],
+  ['product_pages/privacy.html', privacyPageDoc],
+  ['product_pages/support.html', supportPageDoc],
+]) {
+  const fileClaim = doc
+    .replace(/\r?\n/g, ' ')
+    .split(/(?<=[.!?])\s+/)
+    .find(
+      (sentence) =>
+        fileMentionPattern.test(sentence) &&
+        retentionClaimPattern.test(sentence) &&
+        !negationPattern.test(sentence)
+    );
   if (fileClaim) {
     throw new Error(
-      `${docName} claims file-list clipboard history, which capture policy deliberately ignores: ${fileClaim.trim()}`
+      `${docName} claims file clipboard history is retained or supported, which capture policy deliberately ignores: ${fileClaim.trim()}`
     );
   }
 }
