@@ -53,6 +53,20 @@ test('SHA pin without a version comment fails', () => {
   assert.equal(result.kind, 'missing-version-comment');
 });
 
+test('uses line with a space before the colon is still parsed', () => {
+  const findings = parseWorkflowUses('  uses : evil/action@v1\n', 'sample.yml');
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].spec, 'evil/action@v1');
+  assert.equal(findings[0].ok, false);
+  assert.equal(findings[0].kind, 'mutable-third-party');
+});
+
+test('uppercase 40-character SHA is accepted as a valid pin', () => {
+  const result = classifyUses(`foo/bar@${'A'.repeat(40)}`, '# v1');
+  assert.equal(result.ok, true);
+  assert.equal(result.kind, 'pinned-third-party');
+});
+
 test('commented-out uses lines are ignored', () => {
   const findings = parseWorkflowUses(
     '# uses: evil/action@v1\n      - uses: actions/checkout@v7\n',

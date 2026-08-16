@@ -9,8 +9,8 @@ export const PRIVILEGED_WORKFLOWS = [
 ];
 
 const FIRST_PARTY_OWNERS = new Set(['actions']);
-const SHA_RE = /^[0-9a-f]{40}$/;
-const USES_RE = /^(?:-\s+)?uses:\s*(?:['"]([^'"]+)['"]|(\S+))/;
+const SHA_RE = /^[0-9a-f]{40}$/i;
+const USES_RE = /^(?:-\s+)?uses\s*:\s*(?:['"]([^'"]+)['"]|(\S+))/;
 
 /**
  * SBS-778: third-party actions in privileged workflows must be pinned to a
