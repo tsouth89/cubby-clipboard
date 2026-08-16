@@ -2372,24 +2372,27 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
         .bind(&recent.uuid)
         .fetch_optional(pool)
         .await,
+        recent,
     );
 
-    let (is_pinned, is_deleted) = match lookup {
-        ForgetClipLookup::Found((is_pinned, is_deleted)) => (is_pinned, is_deleted),
+    let (is_pinned, is_deleted, recent) = match lookup {
+        ForgetClipLookup::Found {
+            row: (is_pinned, is_deleted),
+            taken,
+        } => (is_pinned, is_deleted, taken),
         ForgetClipLookup::AlreadyGone => {
             log::debug!(
-                "CLIPBOARD: Clear sequence {} — recent capture {} already gone",
-                sequence,
-                recent.uuid
+                "CLIPBOARD: Clear sequence {} — recent capture already gone",
+                sequence
             );
             return;
         }
-        ForgetClipLookup::Failed(error) => {
-            record_capture_error(format!(
-                "forget-on-clear skipped for sequence {sequence} (clip {}); lookup failed, so the retry marker was restored: {error}",
-                recent.uuid
-            ));
-            restore_marker(recent);
+        ForgetClipLookup::Failed { error, taken } => {
+            log::error!(
+                "CLIPBOARD: forget-on-clear skipped for sequence {sequence} (clip {}); lookup failed, so the retry marker was restored: {error}",
+                taken.uuid
+            );
+            restore_marker(taken);
             return;
         }
     };
