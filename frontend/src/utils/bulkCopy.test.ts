@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { collectBulkCopyText } from './bulkCopy';
+import { BULK_COPY_CONCURRENCY, collectBulkCopyText } from './bulkCopy';
 import { ClipboardItem } from '../types';
 
 /** A row as `get_clips` with `previewOnly: true` ships it: no body, prefix only. */
@@ -81,5 +81,49 @@ describe('collectBulkCopyText', () => {
     });
 
     expect(plan.parts).toEqual(['slow body', 'fast body']);
+  });
+
+  it('never loads an unrevealed hidden clip, so Select All cannot copy a secret', async () => {
+    const secret = { ...previewOnlyRow('secret', ''), is_hidden: true };
+    const rows = [secret, previewOnlyRow('plain', 'a note')];
+    const loadBody = vi.fn(async () => 'plain body');
+
+    const plan = await collectBulkCopyText(rows, loadBody);
+
+    expect(loadBody).not.toHaveBeenCalledWith('secret');
+    expect(plan.parts).toEqual(['plain body']);
+    expect(plan.hidden).toBe(1);
+    expect(plan.skipped).toBe(0);
+    expect(plan.failed).toBe(0);
+  });
+
+  it('copies a hidden clip the user already revealed this session', async () => {
+    const secret = { ...previewOnlyRow('secret', ''), is_hidden: true };
+    const loadBody = vi.fn(async () => 'swordfish');
+
+    const plan = await collectBulkCopyText([secret], loadBody, {
+      revealedIds: new Set(['secret']),
+    });
+
+    expect(plan.parts).toEqual(['swordfish']);
+    expect(plan.hidden).toBe(0);
+  });
+
+  it('caps how many bodies are held in memory at once', async () => {
+    const rows = Array.from({ length: 20 }, (_, index) => previewOnlyRow(`row-${index}`, 'x'));
+    let inFlight = 0;
+    let peak = 0;
+    const plan = await collectBulkCopyText(rows, async (id) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      inFlight -= 1;
+      return `${id} body`;
+    });
+
+    expect(peak).toBeLessThanOrEqual(BULK_COPY_CONCURRENCY);
+    expect(peak).toBeGreaterThan(1);
+    // Bounding the fan-out must not drop or reorder anything.
+    expect(plan.parts).toEqual(rows.map((row) => `${row.id} body`));
   });
 });

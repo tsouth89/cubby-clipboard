@@ -22,19 +22,26 @@ export function fullTextForEdit(
  * Body text for the preview pane: details first, then the reveal payload or the
  * list row, and the stored preview last.
  *
- * Every step tests for *text*, not for `undefined`. A list row loaded with
- * `previewOnly` carries `content: ''`, so `??` would stop on that empty string
- * and leave the pane blank with "0 characters" for as long as the details fetch
- * runs — longest on the large dumps `previewOnly` exists for — and forever if
- * that fetch fails. Showing the stored preview is not a substitute for the
- * body, which is why Edit still refuses to open from it (see `isEditReady`).
+ * Loaded details win outright, empty body included: after the user clears a
+ * clip and saves, `content` really is `''`, and falling through to the row
+ * would redisplay the pre-save prefix (and its character count) as if the save
+ * had not applied.
+ *
+ * Only once `details` is null do the fallbacks test for *text* rather than for
+ * `undefined`. A list row loaded with `previewOnly` carries `content: ''`, so
+ * `??` would stop on that empty string and leave the pane blank with "0
+ * characters" for as long as the details fetch runs — longest on the large
+ * dumps `previewOnly` exists for — and forever if that fetch fails. Showing the
+ * stored preview is not a substitute for the body, which is why Edit still
+ * refuses to open from it (see `isEditReady`).
  */
 export function previewBodyText(
   details: ClipDetails | null,
   sourceContent: string | undefined,
   rowPreview: string | undefined
 ): string {
-  return details?.content || sourceContent || rowPreview || '';
+  if (details) return details.content;
+  return sourceContent || rowPreview || '';
 }
 
 /**

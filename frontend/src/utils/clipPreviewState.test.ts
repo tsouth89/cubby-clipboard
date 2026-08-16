@@ -58,6 +58,13 @@ describe('previewBodyText', () => {
     expect(previewBodyText(null, '', '')).toBe('');
     expect(previewBodyText(null, undefined, undefined)).toBe('');
   });
+
+  it('shows a cleared clip as empty instead of resurrecting the old prefix', () => {
+    // The user emptied the clip and saved; `withSavedText` stored content ''.
+    // Falling through to the row would redisplay the pre-save prefix, and the
+    // character count under it, as if the save had never applied.
+    expect(previewBodyText({ ...details, content: '' }, '', 'old prefix')).toBe('');
+  });
 });
 
 describe('isEditReady', () => {
