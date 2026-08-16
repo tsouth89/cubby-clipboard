@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { checkPrivilegedActionPins } from '../.github/scripts/check-privileged-action-pins.mjs';
 import { findFileListHistoryClaims } from './product-page-claims.mjs';
+import { extractDefaultSkipLikelySecrets, evaluateSecretHeuristicsDoc, saysDefaultOff } from './release-check-helpers.mjs';
 
 const root = new URL('../', import.meta.url);
 const rootDir = fileURLToPath(root);
@@ -29,6 +30,7 @@ const [
   privacyPageDoc,
   supportPageDoc,
   settingsPanelSource,
+  settingsLocaleText,
 ] = await Promise.all([
   read('package.json'),
   read('src-tauri/tauri.conf.json'),
@@ -49,6 +51,7 @@ const [
   read('product_pages/privacy.html'),
   read('product_pages/support.html'),
   read('frontend/src/components/SettingsPanel.tsx'),
+  read('frontend/src/i18n/locales/en.json'),
 ]);
 
 const packageVersion = JSON.parse(packageText).version;
@@ -262,6 +265,45 @@ for (const [source, gate] of secretGates) {
   if (!source.includes(gate)) {
     throw new Error(`Secret-aware privacy release gate is missing: ${gate}`);
   }
+}
+
+// SBS-811: SECURITY.md once said secret heuristics were "default on" while
+// AppSettings::default set skip_likely_secrets: false. Pin the shipped default
+// to the security page and Settings copy so they cannot drift again.
+const defaultSkipLikelySecrets = extractDefaultSkipLikelySecrets(modelsSource);
+if (defaultSkipLikelySecrets !== 'true' && defaultSkipLikelySecrets !== 'false') {
+  throw new Error('Could not read skip_likely_secrets from AppSettings::default');
+}
+
+const {
+  bullets: secretHeuristicBullets,
+  sayOn: securitySaysOn,
+  sayOff: securitySaysOff,
+} = evaluateSecretHeuristicsDoc(securityDoc);
+if (secretHeuristicBullets.length === 0) {
+  throw new Error('SECURITY.md must document high-confidence secret heuristics');
+}
+
+if (defaultSkipLikelySecrets === 'false' && (securitySaysOn || !securitySaysOff)) {
+  throw new Error(
+    `Shipped skip_likely_secrets default is off; SECURITY.md must say off by default / opt-in, not default on: ${secretHeuristicBullets.join(' | ')}`
+  );
+}
+if (defaultSkipLikelySecrets === 'true' && (!securitySaysOn || securitySaysOff)) {
+  throw new Error(
+    `Shipped skip_likely_secrets default is on; SECURITY.md must say default on: ${secretHeuristicBullets.join(' | ')}`
+  );
+}
+
+const skipLikelySecretsDesc = JSON.parse(settingsLocaleText).settings?.skipLikelySecretsDesc;
+if (typeof skipLikelySecretsDesc !== 'string') {
+  throw new Error('Settings locale must describe skipLikelySecrets');
+}
+if (defaultSkipLikelySecrets === 'false' && !saysDefaultOff(skipLikelySecretsDesc)) {
+  throw new Error('Settings copy must say secret heuristics are off by default');
+}
+if (defaultSkipLikelySecrets === 'true' && !/on by default/i.test(skipLikelySecretsDesc)) {
+  throw new Error('Settings copy must say secret heuristics are on by default');
 }
 
 if (!securityDoc.includes('RUSTSEC-2023-0071')) {

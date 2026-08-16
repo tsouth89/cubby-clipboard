@@ -55,7 +55,7 @@ jobs:
       - run: node .github/scripts/check-privileged-action-pins.mjs
       - run: node .github/scripts/check-shipped-windows-ci.mjs
       - run: pnpm run test
-      - run: node --test product_pages/worker.test.mjs product_pages/analytics.test.mjs .github/scripts/check-privileged-action-pins.test.mjs .github/scripts/check-shipped-windows-ci.test.mjs scripts/product-page-claims.test.mjs
+      - run: node --test product_pages/worker.test.mjs product_pages/analytics.test.mjs .github/scripts/check-privileged-action-pins.test.mjs .github/scripts/check-shipped-windows-ci.test.mjs scripts/product-page-claims.test.mjs scripts/release-check-helpers.test.mjs
       - run: pnpm audit --prod
       # The rule that decides whether a live download URL may be overwritten.
       - name: Publish-guard rules
