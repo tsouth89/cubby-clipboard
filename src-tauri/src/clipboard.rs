@@ -2361,6 +2361,7 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
     // A failed SELECT must not be read as "already gone". unwrap_or(None)
     // dropped the retry marker on a transient lock, so a later clear could
     // not forget the password that was still in history (SBS-831).
+    let uuid = recent.uuid.clone();
     let lookup = ForgetClipLookup::from_query(
         sqlx::query_as::<_, (i64, i64)>(
             r#"
@@ -2369,7 +2370,7 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
             WHERE uuid = ?
             "#,
         )
-        .bind(&recent.uuid)
+        .bind(&uuid)
         .fetch_optional(pool)
         .await,
         recent,
@@ -2382,8 +2383,9 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
         } => (is_pinned, is_deleted, taken),
         ForgetClipLookup::AlreadyGone => {
             log::debug!(
-                "CLIPBOARD: Clear sequence {} — recent capture already gone",
-                sequence
+                "CLIPBOARD: Clear sequence {} — recent capture {} already gone",
+                sequence,
+                uuid
             );
             return;
         }
