@@ -31,13 +31,19 @@ export function shouldRenderClipRowNote(
  * - `ready`: full bitmap is present
  * - `expired`: header already says the original is gone; offering Copy image
  *   then failing is the SBS-807 bug. History's preview already disables Copy.
- * - `unknown`: details have not loaded (or failed). That is not "ready" —
- *   enabling the button would collapse "not asked yet" into "copy works".
+ * - `unknown`: details have not loaded yet. That is not "ready" — enabling the
+ *   button would collapse "not asked yet" into "copy works".
+ * - `failed`: the details fetch already rejected. Telling the user to wait for
+ *   a load that will never arrive is worse than saying it failed, so this is a
+ *   separate state from `unknown`.
  */
-export type FullImageCopyState = 'ready' | 'expired' | 'unknown';
+export type FullImageCopyState = 'ready' | 'expired' | 'unknown' | 'failed';
 
-export function fullImageCopyState(imageExpired: boolean | null | undefined): FullImageCopyState {
-  if (imageExpired == null) return 'unknown';
+export function fullImageCopyState(
+  imageExpired: boolean | null | undefined,
+  loadFailed = false
+): FullImageCopyState {
+  if (imageExpired == null) return loadFailed ? 'failed' : 'unknown';
   return imageExpired ? 'expired' : 'ready';
 }
 
@@ -47,6 +53,7 @@ export function canCopyFullImage(state: FullImageCopyState): boolean {
 
 export function fullImageCopyTitle(state: FullImageCopyState): string {
   if (state === 'expired') return 'Full image expired; only the thumbnail remains';
+  if (state === 'failed') return 'Copy image is unavailable; this image could not be loaded';
   if (state === 'unknown') return 'Copy image is unavailable until the image loads';
   return 'Copy image';
 }

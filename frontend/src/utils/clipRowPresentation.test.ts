@@ -48,4 +48,19 @@ describe('fullImageCopyState', () => {
     expect(canCopyFullImage(fullImageCopyState(undefined))).toBe(false);
     expect(fullImageCopyTitle('unknown')).toBe('Copy image is unavailable until the image loads');
   });
+
+  it('stops telling the user to wait once the details fetch has failed', () => {
+    const state = fullImageCopyState(undefined, true);
+    expect(state).toBe('failed');
+    expect(canCopyFullImage(state)).toBe(false);
+    expect(fullImageCopyTitle(state)).not.toBe('Copy image is unavailable until the image loads');
+    expect(fullImageCopyTitle(state)).toBe(
+      'Copy image is unavailable; this image could not be loaded'
+    );
+  });
+
+  it('keeps a known expiry flag authoritative even if a later fetch failed', () => {
+    expect(fullImageCopyState(true, true)).toBe('expired');
+    expect(fullImageCopyState(false, true)).toBe('ready');
+  });
 });

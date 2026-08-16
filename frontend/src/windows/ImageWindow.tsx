@@ -73,7 +73,8 @@ export function ImageWindow() {
     }
   }, []);
 
-  const copyState = fullImageCopyState(details?.image_expired);
+  const loadFailed = error != null;
+  const copyState = fullImageCopyState(details?.image_expired, loadFailed);
   const copyImageEnabled = canCopyFullImage(copyState);
 
   const handleCopyImage = useCallback(async () => {
@@ -109,7 +110,7 @@ export function ImageWindow() {
 
   const imageSrc = details ? imageSrcFromContent(details.content) : null;
   const actionClass =
-    'inline-flex items-center gap-1.5 rounded-md border border-white/[0.09] bg-white/[0.05] px-2.5 py-1.5 text-[11px] font-medium text-foreground transition-colors hover:bg-white/[0.1] disabled:opacity-40';
+    'inline-flex items-center gap-1.5 rounded-md border border-white/[0.09] bg-white/[0.05] px-2.5 py-1.5 text-[11px] font-medium text-foreground transition-colors enabled:hover:bg-white/[0.1] disabled:opacity-40';
 
   return (
     <div className="flex h-screen select-none flex-col bg-background text-foreground">
