@@ -30,7 +30,11 @@ pub struct Database {
 }
 
 impl Database {
-    pub async fn new(db_path: &str) -> Result<Self, String> {
+    /// Errors are `StorageError` rather than `String` so startup can tell a
+    /// DPAPI account mismatch (recoverable, explain it) apart from everything
+    /// else (a bug or a broken disk). `From<String>` keeps the `?` on each
+    /// String-producing step below unchanged.
+    pub async fn new(db_path: &str) -> Result<Self, crate::crypto::StorageError> {
         let path = Path::new(db_path);
         // Fail open for capture: a corrupt history is quarantined and replaced
         // with an empty database rather than blocking the app (SOU-218).
@@ -1706,7 +1710,7 @@ mod tests {
             .await
             .err()
             .expect("missing protected key should stop startup");
-        assert!(error.contains("storage key is missing"));
+        assert!(error.to_string().contains("storage key is missing"));
         assert!(!directory.join("storage.key").exists());
         // SQLx may release the failed constructor's SQLite handle just after the
         // error is returned on Windows, so cleanup is deliberately best effort.

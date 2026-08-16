@@ -67,8 +67,19 @@ fn to_plugin_log_target(target: log_targets::LogTarget) -> tauri_plugin_log::Tar
         log_targets::LogTarget::Webview => {
             tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview)
         }
+        // Where "on disk" is depends on the distribution: a portable run keeps
+        // its logs inside the folder the user carries, an installed run uses
+        // the OS log directory. Resolved here rather than in a helper so the
+        // SBS-837 release gate can still read `TargetKind::LogDir` in this arm
+        // and prove nothing swapped it for `Webview`.
         log_targets::LogTarget::LogDir => {
-            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: None })
+            tauri_plugin_log::Target::new(match portable_log_dir(portable_data_dir()) {
+                Some(path) => tauri_plugin_log::TargetKind::Folder {
+                    path,
+                    file_name: None,
+                },
+                None => tauri_plugin_log::TargetKind::LogDir { file_name: None },
+            })
         }
     }
 }
@@ -82,9 +93,18 @@ pub fn run_app() {
     let rt = get_runtime().expect("Failed to get global tokio runtime");
     let _guard = rt.enter();
 
-    let db = rt
-        .block_on(async { Database::new(&db_path_str).await })
-        .unwrap_or_else(|error| panic!("Cubby storage initialization failed: {error}"));
+    let db = match rt.block_on(async { Database::new(&db_path_str).await }) {
+        Ok(db) => db,
+        // The one storage failure a user can cause without anything being
+        // broken, and the one they can undo. Panicking here produced a silent
+        // launch failure: this runs before the logger exists, so the message
+        // went nowhere and the window never appeared.
+        Err(crypto::StorageError::KeyNotForThisUser { key_path, detail }) => {
+            report_storage_key_locked(&key_path, &detail);
+            std::process::exit(1);
+        }
+        Err(error) => panic!("Cubby storage initialization failed: {error}"),
+    };
 
     // Anything logged in this function is thrown away.
     //
@@ -179,7 +199,13 @@ pub fn run_app() {
             MacosLauncher::LaunchAgent,
             None,
         ));
-        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+        // Not registering the plugin is the enforcement, not just the hiding of
+        // a button: `plugin-updater`'s `check` is invoked straight from the
+        // frontend, so hiding the UI alone would leave the installed-channel
+        // flow one direct call away in a build that must never run it.
+        if self_update_supported() {
+            builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+        }
     }
 
     builder
@@ -869,14 +895,108 @@ pub fn animate_window_hide(
     });
 }
 
+/// Whether this build may run the installed-channel self-update.
+///
+/// Store builds compile the updater out entirely. Portable builds are a runtime
+/// decision, so this is the single source both the plugin registration and the
+/// `self_update_available` capability read: the updater installs an NSIS
+/// package, which would put an installed Cubby beside the portable one and
+/// split the app from the data folder the user carries with it.
+pub(crate) fn self_update_supported() -> bool {
+    self_update_supported_for(portable_data_dir().is_some())
+}
+
+/// The rule itself, split out so both arms are testable. `portable_data_dir`
+/// reads the running executable's folder, which a test process cannot stand in
+/// for without shipping a `portable.txt` beside the test binary.
+fn self_update_supported_for(portable: bool) -> bool {
+    !cfg!(feature = "app-store") && !portable
+}
+
+/// Where a portable build keeps its logs, given its data root.
+///
+/// Portable mode promises no AppData footprint, and `TargetKind::LogDir`
+/// resolves to `%LOCALAPPDATA%\<identifier>\logs` regardless of mode. That left
+/// a persistent record of the user's activity outside the folder they carry
+/// with them, which is the whole point of the portable build.
+///
+/// Takes the root as an argument rather than reading it, so the mapping is
+/// testable without an installed executable next to a `portable.txt`, and so
+/// `commands::excluded_log_dir` can ask where the logs would sit inside a data
+/// directory it already has in hand. That second caller is why the storage
+/// readout and this mapping cannot drift apart: logs land inside the history
+/// data directory in portable mode, and the size measurement must skip exactly
+/// the folder this function names — and only then.
+///
+/// The first caller is the `LogTarget::LogDir` arm of `to_plugin_log_target`,
+/// which decides between the portable folder and the OS log directory.
+pub(crate) fn portable_log_dir(
+    portable_root: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    portable_root.map(|root| root.join("logs"))
+}
+
+/// Explain an unreadable storage key before exiting.
+///
+/// This runs before `tauri_plugin_log` and before any window exists, so a
+/// native message box is the only way to say anything at all. Deliberately does
+/// not delete or rewrite the key or the database: they are intact and the
+/// original Windows account can still read them, so every recovery below is
+/// non-destructive and the user's to choose.
+fn report_storage_key_locked(key_path: &std::path::Path, detail: &str) {
+    let portable = portable_data_dir().is_some();
+    let location = key_path.parent().unwrap_or(key_path).display().to_string();
+    let body = format!(
+        "Cubby's clipboard history here was encrypted by a different Windows account, so this \
+         account cannot open it.\n\n\
+         Windows ties the encryption key to the account that created it. {context}\n\n\
+         Nothing has been deleted or changed. Your history is still readable from the original \
+         account.\n\n\
+         To continue, choose one:\n\n\
+         1. Sign in as the original Windows account and run Cubby there.\n\
+         2. From that account, use Settings, Back up history, then import the backup here.\n\
+         3. Start a separate, empty history for this account by moving or renaming this folder:\n\
+         \x20  {location}\n\
+         \x20  Cubby creates a fresh one on the next launch. Keep the old folder if you ever want \
+         to go back to it.\n\n\
+         Technical detail: {detail}",
+        context = if portable {
+            "This portable folder was carried to another Windows user or PC."
+        } else {
+            "This usually means the data folder was copied from another user profile or machine."
+        },
+    );
+    show_startup_error("Cubby cannot open this clipboard history", &body);
+    eprintln!("STORAGE: {body}");
+}
+
+#[cfg(target_os = "windows")]
+fn show_startup_error(title: &str, body: &str) {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    let title = HSTRING::from(title);
+    let body = HSTRING::from(body);
+    unsafe {
+        MessageBoxW(None, &body, &title, MB_OK | MB_ICONERROR);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_startup_error(_title: &str, _body: &str) {}
+
 /// Portable data directory, or None for a normal installed run.
 ///
 /// Cubby runs in portable mode when a `portable.txt` marker sits next to the
 /// executable (the portable download ships one). In that mode every piece of
-/// state (database, images, `storage.key`, settings) lives in `<exe_dir>/data`,
-/// so nothing is written to AppData or the registry. History stays encrypted
-/// with the machine's Windows account key, so a portable copy is fully portable
-/// on the same PC/account; carried to a different account it starts fresh.
+/// state (database, images, `storage.key`, settings, and logs) lives in
+/// `<exe_dir>/data`, so nothing is written to AppData or the registry.
+///
+/// History stays encrypted with the Windows account key, so a portable copy is
+/// fully portable on the same PC and account. Carried to a different account it
+/// does *not* start fresh: DPAPI refuses the key, and startup explains the
+/// recovery options rather than deleting anything. See
+/// `report_storage_key_locked`.
 pub fn portable_data_dir() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
@@ -1281,6 +1401,60 @@ pub fn update_tray_icon(tray: &TrayIcon, theme: &tauri::Theme) {
     };
     if let Ok(icon) = Image::from_bytes(icon_data) {
         let _ = tray.set_icon(Some(icon));
+    }
+}
+
+#[cfg(test)]
+mod portable_tests {
+    use super::{
+        portable_data_dir, portable_log_dir, self_update_supported, self_update_supported_for,
+    };
+    use std::path::PathBuf;
+
+    /// Portable logs belong beside the portable data, not in AppData. The build
+    /// promises no AppData footprint, and `TargetKind::LogDir` ignores that.
+    #[test]
+    fn portable_logs_live_inside_the_portable_root() {
+        let root = PathBuf::from(r"D:\USB\Cubby\data");
+        assert_eq!(
+            portable_log_dir(Some(root.clone())),
+            Some(root.join("logs"))
+        );
+    }
+
+    /// An installed build must keep using the OS log directory. `None` is what
+    /// tells the `LogTarget::LogDir` mapping to fall back to
+    /// `TargetKind::LogDir`.
+    #[test]
+    fn installed_logs_stay_with_the_os_log_directory() {
+        assert_eq!(portable_log_dir(None), None);
+    }
+
+    /// The wiring from the real environment into the rule. The test binary has
+    /// no `portable.txt` beside it, so this pins the installed path end to end;
+    /// the portable arm is covered directly below.
+    #[test]
+    fn the_running_build_resolves_its_own_update_capability() {
+        assert!(portable_data_dir().is_none(), "test binary is not portable");
+        assert_eq!(self_update_supported(), self_update_supported_for(false));
+    }
+
+    /// The portable arm, which the test binary cannot reach through
+    /// `portable_data_dir`. A portable build must never offer the
+    /// installed-channel update: it downloads an NSIS installer, which would
+    /// install Cubby somewhere else and split the app from the data folder the
+    /// user carries with it.
+    #[test]
+    fn portable_builds_never_self_update() {
+        assert!(!self_update_supported_for(true));
+    }
+
+    #[test]
+    fn installed_builds_self_update_unless_built_for_the_store() {
+        assert_eq!(
+            self_update_supported_for(false),
+            !cfg!(feature = "app-store")
+        );
     }
 }
 
