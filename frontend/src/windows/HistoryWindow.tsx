@@ -13,6 +13,8 @@ import { useTheme } from '../hooks/useTheme';
 import { useLanguage } from '../hooks/useLanguage';
 import { useSystemAccent } from '../hooks/useSystemAccent';
 import { useRevealedClips } from '../hooks/useRevealedClips';
+import { collectBulkCopyText } from '../utils/bulkCopy';
+import { ClipDetails } from '../utils/clipPreviewState';
 import { customRange, DATE_PRESET_LABELS, DatePreset, presetRange } from '../utils/dateRange';
 import { folderSelectionAfterReload } from '../utils/folderSelection';
 import { clipLoadFailure } from '../utils/clipLoadFailure';
@@ -99,6 +101,9 @@ export function HistoryWindow() {
   // refresh (clipboard change, window focus, post-edit reload) leaves a
   // correct page.
   const visibleFilterKeyRef = useRef<string | null>(null);
+  // A bulk Copy holds every selected body in memory while it runs; a second
+  // click must not start a second fan-out over the same ids.
+  const bulkCopyRunning = useRef(false);
 
   useEffect(() => {
     invoke<Settings>('get_settings').then(setSettings).catch(console.error);
@@ -405,34 +410,55 @@ export function HistoryWindow() {
 
   const handleBulkCopy = useCallback(async () => {
     if (selectionCount === 0) return;
-    const chosen = selectedIds
-      .map((id) => clipsRef.current.find((clip) => clip.id === id))
-      .filter((clip): clip is ClipboardItem => Boolean(clip));
-    // Images have no text to concatenate. Take their recognized text where OCR
-    // found some, and say plainly how many contributed nothing.
-    const parts: string[] = [];
-    let skipped = 0;
-    for (const clip of chosen) {
-      const text = clip.clip_type === 'image' ? '' : (clip.content ?? clip.preview ?? '');
-      if (text.trim()) parts.push(text);
-      else skipped += 1;
-    }
-    if (parts.length === 0) {
-      toast.error('Nothing to copy from the selected clips');
-      return;
-    }
+    // One plan at a time. Each body is a full decrypted clip, so a second click
+    // during a large selection would double the fan-out against the same ids.
+    if (bulkCopyRunning.current) return;
+    bulkCopyRunning.current = true;
     try {
+      const chosen = selectedIds
+        .map((id) => clipsRef.current.find((clip) => clip.id === id))
+        .filter((clip): clip is ClipboardItem => Boolean(clip));
+      // Fetch each text clip's body by uuid. This list is loaded with
+      // `previewOnly: true`, so a text row's `content` is empty and its
+      // `preview` is only the stored prefix — copying either would ship the
+      // wrong text under a success toast. Images have no text to concatenate
+      // and are reported as skipped. Hidden rows are only loaded if this
+      // session already revealed them.
+      const { parts, skipped, hidden, failed } = await collectBulkCopyText(
+        chosen,
+        async (id) => {
+          const details = await invoke<ClipDetails>('get_clip_details', { id });
+          return details.content;
+        },
+        { revealedIds: new Set(revealed.keys()) }
+      );
+      if (parts.length === 0) {
+        toast.error(
+          failed > 0
+            ? 'Failed to load the selected clips'
+            : hidden > 0
+              ? 'Reveal the hidden clips before copying them'
+              : 'Nothing to copy from the selected clips'
+        );
+        return;
+      }
       await invoke('copy_selected_text', { text: parts.join('\n\n') });
+      const notes: string[] = [];
+      if (skipped > 0) notes.push(`${skipped} without text skipped`);
+      if (hidden > 0) notes.push(`${hidden} hidden not copied`);
+      if (failed > 0) notes.push(`${failed} failed to load`);
       toast.success(
-        skipped > 0
-          ? `Copied ${parts.length} clips (${skipped} without text skipped)`
+        notes.length > 0
+          ? `Copied ${parts.length} clips (${notes.join(', ')})`
           : `Copied ${parts.length} clips`
       );
     } catch (error) {
       console.error('Failed to copy clips:', error);
       toast.error('Failed to copy');
+    } finally {
+      bulkCopyRunning.current = false;
     }
-  }, [selectedIds, selectionCount]);
+  }, [revealed, selectedIds, selectionCount]);
 
   useEffect(() => {
     if (clips.length === 0) {
