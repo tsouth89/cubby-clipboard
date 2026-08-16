@@ -310,9 +310,12 @@ fn build_ocr_match(ocr_text: &str, query: &str) -> Option<OcrMatch> {
     })
 }
 
-fn clip_to_search_item(clip: &Clip, query: &str) -> ClipboardItem {
-    // Search has no preview_only flag; SBS-829 is the get_clips list path.
-    let mut item = clip_to_list_item(clip, false);
+fn clip_to_search_item(clip: &Clip, query: &str, preview_only: bool) -> ClipboardItem {
+    // Search is a list UI path (flyout and History). SBS-829 fixed get_clips;
+    // SBS-912 applies the same mapping here so a keystroke does not ship the
+    // decrypted body. OCR snippets and highlight boxes still attach below
+    // for a visible image hit; hidden rows return before that.
+    let mut item = clip_to_list_item(clip, preview_only);
     // Hidden list rows already blank content, notes, and OCR snippets.
     // Search must not write those fields back from the decrypted image OCR.
     if clip.is_hidden {
@@ -1975,6 +1978,7 @@ pub async fn search_clips(
     filter_id: Option<String>,
     limit: i64,
     offset: i64,
+    preview_only: Option<bool>,
     content_filter: Option<String>,
     date_from: Option<String>,
     date_to: Option<String>,
@@ -1986,6 +1990,7 @@ pub async fn search_clips(
         filter_id,
         limit,
         offset,
+        preview_only,
         content_filter,
         date_from,
         date_to,
@@ -2001,12 +2006,17 @@ async fn search_clips_in_database(
     filter_id: Option<String>,
     limit: i64,
     offset: i64,
+    preview_only: Option<bool>,
     content_filter: Option<String>,
     date_from: Option<String>,
     date_to: Option<String>,
     source_app: Option<String>,
     db: &Database,
 ) -> Result<Vec<ClipboardItem>, String> {
+    // Flyout and History are the only search callers, and both are list UIs.
+    // Unlike get_clips, omitting the flag withholds the body: a forgotten
+    // previewOnly on a keystroke path must not resurrect the SBS-912 leak.
+    let preview_only = crate::clip_list::resolve_search_preview_only(preview_only);
     let pool = &db.pool;
     let started = Instant::now();
     let requested_offset = offset.max(0) as usize;
@@ -2086,12 +2096,12 @@ async fn search_clips_in_database(
     let map_started = Instant::now();
     let items: Vec<ClipboardItem> = clips
         .iter()
-        .map(|clip| clip_to_search_item(clip, &query))
+        .map(|clip| clip_to_search_item(clip, &query, preview_only))
         .collect();
     let map_ms = map_started.elapsed().as_millis();
     let total_ms = started.elapsed().as_millis();
     log::info!(
-        "[perf][search_clips] index_ms={} sql_ms={} map_ms={} total_ms={} candidates={} rows={} images={} raw_bytes={} filter_id={:?} offset={} limit={}",
+        "[perf][search_clips] index_ms={} sql_ms={} map_ms={} total_ms={} candidates={} rows={} images={} raw_bytes={} preview_only={} filter_id={:?} offset={} limit={}",
         index_ms,
         sql_ms,
         map_ms,
@@ -2100,6 +2110,7 @@ async fn search_clips_in_database(
         clips.len(),
         image_rows,
         raw_bytes,
+        preview_only,
         filter_id,
         requested_offset,
         requested_limit
@@ -3255,6 +3266,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             database,
         )
         .await
@@ -3349,6 +3361,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        None,
                         &database,
                     )
                     .await
@@ -3368,6 +3381,7 @@ mod tests {
                     None,
                     50,
                     0,
+                    None,
                     None,
                     None,
                     None,
@@ -3708,6 +3722,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &database,
         )
         .await
@@ -3811,6 +3826,7 @@ mod tests {
             None,
             10,
             0,
+            None,
             None,
             None,
             None,
@@ -3969,6 +3985,152 @@ mod tests {
         assert!(details.content.contains(secret));
     }
 
+    /// Search path for SBS-912. A >2 KB dump with a unique suffix must not
+    /// appear in `search_clips` content when preview_only is true or omitted.
+    /// Full body stays on get_clip_details. Do not fold this into the
+    /// get_clips test above; that path was SBS-829.
+    #[tokio::test]
+    async fn preview_only_search_withholds_full_text() {
+        let database = test_database().await;
+        let secret = "UNIQUE-SBS-912-SECRET-TOKEN-8821-DO-NOT-SHIP";
+        let full_body = format!("{}{secret}", "copied log line\n".repeat(200));
+        assert!(
+            full_body.len() > 2000,
+            "the fixture must be large enough that preview cannot be the whole body"
+        );
+        insert_search_clip(
+            &database,
+            SearchFixture {
+                id: "dump",
+                clip_type: "text",
+                content: &full_body,
+                preview: "copied log line",
+                ocr: None,
+                folder_id: None,
+                pinned: false,
+                created_at: "2026-08-16 09:00:00",
+                source_app: None,
+            },
+        )
+        .await;
+        insert_search_clip(
+            &database,
+            SearchFixture {
+                id: "shot",
+                clip_type: "image",
+                content: "thumb-png-bytes",
+                preview: "Screenshot",
+                ocr: Some("copied log line on the screenshot"),
+                folder_id: None,
+                pinned: false,
+                created_at: "2026-08-16 08:00:00",
+                source_app: None,
+            },
+        )
+        .await;
+
+        for requested in [Some(true), None] {
+            let found = search_clips_in_database(
+                "copied log line".into(),
+                None,
+                10,
+                0,
+                requested,
+                None,
+                None,
+                None,
+                None,
+                &database,
+            )
+            .await
+            .unwrap();
+            let dump = found
+                .iter()
+                .find(|item| item.id == "dump")
+                .expect("the text dump should be a search hit");
+            assert!(
+                dump.content.is_empty(),
+                "search text rows must not ship the decrypted body when preview_only={requested:?}"
+            );
+            assert_eq!(dump.preview, "copied log line");
+            assert!(
+                !dump.content.contains(secret),
+                "the unique secret must not appear in search content"
+            );
+            assert!(
+                !dump.preview.contains(secret),
+                "the stored preview is the truncated list text, not the full dump"
+            );
+
+            let shot = found
+                .iter()
+                .find(|item| item.id == "shot")
+                .expect("the image should be a search hit");
+            assert_eq!(
+                shot.content,
+                BASE64.encode(b"thumb-png-bytes"),
+                "image search rows still ship the thumbnail"
+            );
+            assert_eq!(shot.preview, "Screenshot");
+            assert!(
+                shot.ocr_match.is_some(),
+                "visible image search still ships the OCR snippet"
+            );
+        }
+
+        let full = search_clips_in_database(
+            "copied log line".into(),
+            None,
+            10,
+            0,
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+            &database,
+        )
+        .await
+        .unwrap();
+        let dump_full = full
+            .iter()
+            .find(|item| item.id == "dump")
+            .expect("the text dump should be a search hit");
+        assert_eq!(dump_full.content, full_body);
+        assert!(dump_full.content.contains(secret));
+
+        toggle_clip_hidden_in_pool(&database.pool, "dump")
+            .await
+            .expect("hide should apply");
+        let hidden = search_clips_in_database(
+            "copied log line".into(),
+            None,
+            10,
+            0,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            &database,
+        )
+        .await
+        .unwrap();
+        let dump_hidden = hidden
+            .iter()
+            .find(|item| item.id == "dump")
+            .expect("a hidden clip is still searchable");
+        assert!(dump_hidden.is_hidden);
+        assert!(dump_hidden.content.is_empty());
+        assert!(dump_hidden.preview.is_empty());
+
+        let details = get_clip_details_in_database(&database, "dump")
+            .await
+            .unwrap();
+        assert_eq!(details.content, full_body);
+        assert!(details.content.contains(secret));
+    }
+
     #[tokio::test]
     async fn hidden_image_search_does_not_leak_ocr_snippets() {
         let database = test_database().await;
@@ -3997,6 +4159,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &database,
         )
         .await
@@ -4016,6 +4179,7 @@ mod tests {
             None,
             10,
             0,
+            None,
             None,
             None,
             None,
@@ -4323,6 +4487,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &database,
         )
         .await
@@ -4617,6 +4782,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &database,
         )
         .await
@@ -4628,6 +4794,7 @@ mod tests {
             None,
             50,
             0,
+            None,
             None,
             Some("2026-03-02 00:00:00".into()),
             None,
@@ -4705,6 +4872,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &database,
         )
         .await
@@ -4726,6 +4894,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &database,
         )
         .await
@@ -4737,6 +4906,7 @@ mod tests {
             Some(folder_id.to_string()),
             10,
             0,
+            None,
             None,
             None,
             None,
@@ -4754,6 +4924,7 @@ mod tests {
             None,
             10,
             0,
+            None,
             Some("images".into()),
             None,
             None,
@@ -4770,6 +4941,7 @@ mod tests {
             None,
             10,
             0,
+            None,
             Some("text".into()),
             None,
             None,

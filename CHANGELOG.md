@@ -11,6 +11,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 ## v1.3.2
 
 ### Security
+- Search no longer ships full decrypted clip bodies on every keystroke; flyout and History search rows use the same preview-only contract as the list (SBS-912)
 - The Win+V helper no longer opens the flyout on a bare localhost UDP `activate` datagram; the channel now requires a per-session token, a loopback source, and a rate limit (SBS-809)
 - History list requests no longer ship full decrypted clip text to a window that asked only for previews (SBS-829)
 - Release builds no longer stream Rust logs into the WebView, which had been putting process names, clip identifiers, and filter values in renderer memory (SBS-837)

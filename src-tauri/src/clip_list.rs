@@ -1,7 +1,8 @@
 //! List-row IPC mapping.
 //!
 //! Isolated so the `preview_only` contract can be unit-tested without compiling
-//! the Windows-only crate. `commands.rs` is the only caller.
+//! the Windows-only crate. `commands.rs` is the only caller. `get_clips` and
+//! `search_clips` both go through these helpers (SBS-829 / SBS-912).
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
@@ -45,6 +46,14 @@ pub fn list_item_notes(notes: Option<&str>, is_hidden: bool) -> Option<String> {
     } else {
         notes.map(str::to_string)
     }
+}
+
+/// Search IPC `preview_only`. Flyout and History are the only callers, and
+/// both are list UIs, so a missing flag withholds the body. `get_clips` still
+/// defaults the other way for back-compat; a forgotten `previewOnly` on a
+/// keystroke path must not resurrect the SBS-912 leak.
+pub fn resolve_search_preview_only(preview_only: Option<bool>) -> bool {
+    preview_only.unwrap_or(true)
 }
 
 /// Details/reveal always ships the full decrypted payload (or the surviving
@@ -129,5 +138,53 @@ mod tests {
 
         let thumb = b"thumb-png-bytes";
         assert_eq!(details_item_content("image", thumb), BASE64.encode(thumb));
+    }
+
+    /// Search path: a >2 KB dump with a unique suffix must not appear in
+    /// `content` when the flag is true or omitted. This is the mapping
+    /// `search_clips` uses (SBS-912). The in-crate `search_clips_in_database`
+    /// test covers the IPC wiring on Windows CI.
+    #[test]
+    fn preview_only_search_withholds_full_text() {
+        let body = dump_body();
+        assert!(body.len() > 2000);
+
+        for requested in [Some(true), None] {
+            let preview_only = resolve_search_preview_only(requested);
+            let content = list_item_content("text", body.as_bytes(), preview_only, false);
+            assert!(
+                content.is_empty(),
+                "search text rows must not ship the decrypted body when preview_only={requested:?}"
+            );
+            assert!(
+                !content.contains(SECRET),
+                "the unique secret must not appear in search content"
+            );
+            let preview = list_item_preview("copied log line", false);
+            assert_eq!(preview, "copied log line");
+            assert!(!preview.contains(SECRET));
+        }
+
+        let full = list_item_content(
+            "text",
+            body.as_bytes(),
+            resolve_search_preview_only(Some(false)),
+            false,
+        );
+        assert_eq!(full, body);
+        assert!(full.contains(SECRET));
+
+        let thumb = b"thumb-png-bytes";
+        let image = list_item_content("image", thumb, resolve_search_preview_only(None), false);
+        assert_eq!(image, BASE64.encode(thumb));
+
+        assert!(list_item_content(
+            "text",
+            body.as_bytes(),
+            resolve_search_preview_only(None),
+            true
+        )
+        .is_empty());
+        assert!(list_item_preview("copied log line", true).is_empty());
     }
 }

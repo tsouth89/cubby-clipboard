@@ -3,7 +3,7 @@ name = "preview-only-harness"
 version = "0.0.0"
 edition = "2021"
 publish = false
-description = "Linux-runnable unit tests for list IPC preview_only mapping (SBS-829)"
+description = "Linux-runnable unit tests for list and search IPC preview_only mapping (SBS-829 / SBS-912)"
 
 [dependencies]
 base64 = "0.22"

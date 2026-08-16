@@ -11,7 +11,10 @@ The search index is built in memory after encrypted storage migration completes:
 - exact substring verification removes trigram false positives;
 - SQLite remains authoritative for deletion state, folder filters, pin order,
   timestamps, and pagination;
-- only the final result page loads and decrypts full clip rows.
+- only the final result page loads and decrypts full clip rows;
+- search IPC then maps those rows the same way as `get_clips`: text rows
+  ship the stored preview (and image OCR snippets/highlights), not the
+  decrypted body. Full text stays on `get_clip_details` and paste-by-uuid.
 
 Capture, OCR completion, and deletion update the live index. Bulk operations and
 imports invalidate it and trigger a generation-safe rebuild. A mutation that

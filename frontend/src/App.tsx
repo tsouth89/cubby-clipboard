@@ -367,6 +367,7 @@ function App() {
             filterId: folderId,
             limit: 20,
             offset: currentOffset,
+            previewOnly: true,
             contentFilter: filter,
           });
           if (perfLogEnabled) invokeEnd = performance.now();
