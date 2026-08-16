@@ -25,6 +25,7 @@
     "loadFailed": "Couldn’t load clipboard history",
     "loadFailedDesc": "Cubby kept your data. Try loading it again.",
     "loadMoreFailed": "Couldn’t load more clips",
+    "refreshFailed": "Couldn’t refresh clipboard history",
     "retry": "Try again"
   },
   "pasteContext": {

@@ -113,6 +113,10 @@ function App() {
   const selectedFolderRef = useRef(selectedFolder);
   selectedFolderRef.current = selectedFolder;
   const loadPerfIdRef = useRef(0);
+  // Which query the rows on screen answer. A failed replace only has to wipe
+  // them when this no longer matches the load that failed — a same-filter
+  // refresh (clipboard change, post-edit reload, retry) leaves a correct page.
+  const visibleFilterKeyRef = useRef<string | null>(null);
   const perfLogEnabled =
     typeof window !== 'undefined' &&
     (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
@@ -313,6 +317,7 @@ function App() {
       filter: ContentFilter = 'all'
     ) => {
       const perfId = ++loadPerfIdRef.current;
+      const filterKey = JSON.stringify([folderId, searchQuery.trim(), filter]);
       const loadStart = perfLogEnabled ? performance.now() : 0;
       let invokeStart = 0;
       let invokeEnd = 0;
@@ -395,6 +400,7 @@ function App() {
         } else {
           setClips(data);
         }
+        visibleFilterKeyRef.current = filterKey;
 
         // If we got fewer than limit, no more clips
         setHasMore(data.length === 20);
@@ -429,9 +435,24 @@ function App() {
         console.error('Failed to load clips:', error);
         setLoadError(true);
         setHasMore(false);
-        const failure = clipLoadFailure(append);
-        if (failure.clearList) setClips([]);
-        if (failure.notify) toast.error(t('clipList.loadMoreFailed'));
+        const failure = clipLoadFailure({
+          append,
+          visibleRowsStillApply: visibleFilterKeyRef.current === filterKey,
+          hasVisibleClips: clips.length > 0,
+        });
+        if (failure.clearList) {
+          setClips([]);
+          // The empty list now stands for this query, so retrying it is a
+          // same-filter refresh rather than another filter change.
+          visibleFilterKeyRef.current = filterKey;
+        }
+        if (failure.notify) {
+          toast.error(t(append ? 'clipList.loadMoreFailed' : 'clipList.refreshFailed'), {
+            // One id, so a backend that keeps failing on every clipboard change
+            // replaces its own message instead of stacking a wall of them.
+            id: 'clip-load-failed',
+          });
+        }
         return false;
       } finally {
         if (perfId === loadPerfIdRef.current) setIsLoading(false);
@@ -987,6 +1008,9 @@ function App() {
 
       setSelectedClipId(null);
       setClipListResetToken((token) => token + 1);
+      // The rows on screen are the clips that were just deleted, so a failed
+      // reload must not keep them up the way a plain refresh failure does.
+      visibleFilterKeyRef.current = null;
       await Promise.all([
         loadClips(selectedFolder, false, searchQuery, contentFilter),
         loadFolders(),
