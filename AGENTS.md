@@ -162,9 +162,15 @@ pnpm run test
 
 ## Version Bumping
 
-Update version in **both**:
-1. `src-tauri/Cargo.toml` → `version = "x.y.z"`
-2. `src-tauri/tauri.conf.json` → `"version": "x.y.z"`
+Update the version in **all four** places. `pnpm run release:check` enforces the
+first three and CI's `--locked` cargo commands enforce the fourth, so missing any
+one of them fails the pull request rather than the release:
+1. `package.json` → `"version": "x.y.z"`
+2. `src-tauri/Cargo.toml` → `version = "x.y.z"`
+3. `src-tauri/tauri.conf.json` → `"version": "x.y.z"`
+4. `src-tauri/Cargo.lock` → run `cargo update -p cubby` and commit the hunk.
+   `scripts/audit-rust.ps1` runs `cargo tree --locked`, which refuses to rewrite
+   the lockfile, so a stale `cubby` stanza fails the required `test` job.
 
 Before writing the CHANGELOG entry, **always** review all commits since the previous tag:
 ```bash
