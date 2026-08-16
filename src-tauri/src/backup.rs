@@ -110,20 +110,32 @@ type ExportRow = (
     Option<String>,                // folder name
 );
 
-/// Counts of clips that could not be fully decrypted, grouped by field.
-/// Field names are storage-column names, never clipboard contents. SBS-772.
+/// How many failing clip ids the refusal message names. A database-wide key
+/// problem fails every row, and a message with thousands of ids in it is a
+/// message nobody can read.
+const MAX_REPORTED_FAILED_CLIPS: usize = 5;
+
+/// Counts of clips that could not be fully decrypted, grouped by field, plus
+/// the ids of the first few offending rows.
+///
+/// Field names are storage-column names and the ids are the `clips.uuid`
+/// diagnostics identifier — never clipboard contents. SBS-772.
 #[derive(Debug, Default)]
 struct ExportDecryptFailures {
     clips: usize,
     fields: BTreeMap<&'static str, usize>,
+    uuids: Vec<String>,
 }
 
 impl ExportDecryptFailures {
-    fn record(&mut self, fields: &[&'static str]) {
+    fn record(&mut self, uuid: &str, fields: &[&'static str]) {
         if fields.is_empty() {
             return;
         }
         self.clips += 1;
+        if self.uuids.len() < MAX_REPORTED_FAILED_CLIPS {
+            self.uuids.push(uuid.to_string());
+        }
         for field in fields {
             *self.fields.entry(*field).or_insert(0) += 1;
         }
@@ -133,6 +145,10 @@ impl ExportDecryptFailures {
         self.clips == 0
     }
 
+    /// Names the offending rows. Without an id the user sees the same list of
+    /// clips as before — `decrypt_clip_fields` drops an unreadable note rather
+    /// than hiding the clip — and has no way to tell which one blocks the
+    /// backup, let alone fix or delete it.
     fn describe(&self) -> String {
         let details = self
             .fields
@@ -141,8 +157,18 @@ impl ExportDecryptFailures {
             .collect::<Vec<_>>()
             .join(", ");
         let clip_word = if self.clips == 1 { "clip" } else { "clips" };
+        let id_word = if self.clips == 1 {
+            "Affected clip id"
+        } else {
+            "Affected clip ids"
+        };
+        let mut ids = self.uuids.join(", ");
+        let unlisted = self.clips.saturating_sub(self.uuids.len());
+        if unlisted > 0 {
+            ids.push_str(&format!(", and {unlisted} more"));
+        }
         format!(
-            "Could not write a complete backup: {} {clip_word} could not be fully decrypted ({details}). The destination file was left unchanged.",
+            "Could not write a complete backup: {} {clip_word} could not be fully decrypted ({details}). {id_word}: {ids}. The destination file was left unchanged.",
             self.clips
         )
     }
@@ -260,7 +286,7 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
             folder,
         ) {
             Ok(clip) => clips.push(clip),
-            Err(fields) => failures.record(&fields),
+            Err(fields) => failures.record(&uuid, &fields),
         }
     }
 
@@ -401,54 +427,120 @@ fn decrypt_optional_export_field(
 /// persist cannot leave a truncated backup in the user's chosen file.
 fn persist_backup_file(path: &str, bytes: &[u8]) -> Result<(), String> {
     let dest = Path::new(path);
-    let file_name = dest.file_name().ok_or_else(|| {
-        "Could not save the backup: the destination path is not a file".to_string()
-    })?;
-    let temp = backup_temp_path(dest, file_name);
-
-    let persist = (|| {
-        std::fs::write(&temp, bytes).map_err(|e| format!("Could not save the backup: {e}"))?;
-        replace_exported_backup(&temp, dest)
-            .map_err(|e| format!("Could not save the backup: {e}"))?;
-        Ok(())
-    })();
-    if persist.is_err() {
-        let _ = std::fs::remove_file(&temp);
+    if dest.file_name().is_none() {
+        return Err("Could not save the backup: the destination path is not a file".to_string());
     }
-    persist
+    let temp = backup_temp_path(dest);
+
+    if let Err(error) = std::fs::write(&temp, bytes) {
+        remove_backup_temp(&temp);
+        return Err(format!("Could not save the backup: {error}"));
+    }
+
+    let Err(error) = replace_exported_backup(&temp, dest) else {
+        return Ok(());
+    };
+
+    // On exFAT/FAT — a realistic place to save a `.cubbybak` — replacing is
+    // delete-the-target-then-rename rather than the atomic rename-over NTFS
+    // gives us. A failure after the destination entry is gone leaves the temp
+    // holding the only copy of the bundle, so deleting it here would destroy
+    // both the old backup and the new one. Try to put it in place instead.
+    if !dest.exists() && temp.exists() && std::fs::rename(&temp, dest).is_ok() {
+        log::warn!(
+            "BACKUP: replacing the destination failed ({error}); the new bundle was renamed into place instead"
+        );
+        return Ok(());
+    }
+
+    remove_backup_temp(&temp);
+    Err(format!("Could not save the backup: {error}"))
 }
 
-fn backup_temp_path(dest: &Path, file_name: &std::ffi::OsStr) -> PathBuf {
-    let temp_name = format!(
-        ".{}.{}.{}.tmp",
-        file_name.to_string_lossy(),
-        std::process::id(),
-        Uuid::new_v4()
-    );
+/// Best-effort removal of the sibling temp, retried briefly.
+///
+/// The temp holds bundle bytes, so leaving one behind leaks history beside the
+/// destination. A virus scanner that is still reading the file makes the first
+/// delete fail with a sharing violation and succeed a moment later.
+fn remove_backup_temp(temp: &Path) {
+    const ATTEMPTS: u32 = 5;
+    for attempt in 1..=ATTEMPTS {
+        match std::fs::remove_file(temp) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) if attempt == ATTEMPTS => {
+                log::error!(
+                    "BACKUP: could not remove the temporary export file {}: {error}",
+                    temp.display()
+                );
+                return;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20 * u64::from(attempt))),
+        }
+    }
+}
+
+/// A short sibling name. It deliberately does **not** embed the destination
+/// file name: `MoveFileExW` is bounded by `MAX_PATH` on the source as well as
+/// the destination, and a name that repeated a long destination pushed a legal
+/// save-dialog path over the limit.
+fn backup_temp_path(dest: &Path) -> PathBuf {
+    let temp_name = format!(".{}.{}.tmp", std::process::id(), Uuid::new_v4());
     match dest.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.join(temp_name),
         _ => PathBuf::from(temp_name),
     }
 }
 
+/// `\\?\`-prefixed wide form of `path`, NUL terminated.
+///
+/// `MoveFileExW` fails above `MAX_PATH` unless the path is verbatim, while
+/// `std::fs` prefixes long paths itself. Without this, a destination that
+/// `std::fs::write` would have accepted is refused here.
+#[cfg(target_os = "windows")]
+fn verbatim_wide(path: &Path) -> Result<Vec<u16>, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Component, Prefix};
+
+    // `\\?\` requires a fully-qualified path with no `.` or `..` components.
+    let absolute = std::path::absolute(path)
+        .map_err(|error| format!("could not resolve {}: {error}", path.display()))?;
+    let raw = absolute
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+
+    let prefix = match absolute.components().next() {
+        Some(Component::Prefix(prefix)) => prefix.kind(),
+        // No prefix at all is not something GetFullPathNameW produces; pass it
+        // through rather than inventing a shape for it.
+        _ => return Ok(raw),
+    };
+    // Already verbatim, and `\\.\` device paths must not be rewritten.
+    if prefix.is_verbatim() || matches!(prefix, Prefix::DeviceNS(_)) {
+        return Ok(raw);
+    }
+    // `\\server\share\...` becomes `\\?\UNC\server\share\...`.
+    if matches!(prefix, Prefix::UNC(..)) {
+        let mut wide = r"\\?\UNC".encode_utf16().collect::<Vec<_>>();
+        wide.extend_from_slice(&raw[1..]);
+        return Ok(wide);
+    }
+    let mut wide = r"\\?\".encode_utf16().collect::<Vec<_>>();
+    wide.extend_from_slice(&raw);
+    Ok(wide)
+}
+
 #[cfg(target_os = "windows")]
 fn replace_exported_backup(source: &Path, destination: &Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
 
-    let source_wide = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination_wide = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
+    let source_wide = verbatim_wide(source)?;
+    let destination_wide = verbatim_wide(destination)?;
 
     unsafe {
         MoveFileExW(
@@ -667,8 +759,13 @@ async fn ensure_folder(db: &Database, name: &str) -> Result<i64, String> {
 mod tests {
     use super::*;
 
+    /// Every export gets its own directory. The sibling temp no longer embeds
+    /// the destination file name, so "did this export leave a temp behind?" is
+    /// only answerable by looking at a directory nothing else writes to.
     fn temp_path(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("cubby-backup-{label}-{}.cubbybak", Uuid::new_v4()))
+        let dir = std::env::temp_dir().join(format!("cubby-backup-{label}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("the test directory should be creatable");
+        dir.join("history.cubbybak")
     }
 
     async fn test_database() -> Database {
@@ -1074,8 +1171,7 @@ mod tests {
         assert_eq!(affected, 1, "the clip to corrupt should exist");
     }
 
-    fn leftover_backup_temps(dir: &Path, dest_name: &str) -> Vec<PathBuf> {
-        let prefix = format!(".{dest_name}");
+    fn leftover_backup_temps(dir: &Path) -> Vec<PathBuf> {
         std::fs::read_dir(dir)
             .unwrap()
             .filter_map(|entry| entry.ok())
@@ -1083,9 +1179,17 @@ mod tests {
             .filter(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".tmp"))
+                    .is_some_and(|name| name.starts_with('.') && name.ends_with(".tmp"))
             })
             .collect()
+    }
+
+    async fn uuid_of(db: &Database, text: &str) -> String {
+        sqlx::query_scalar("SELECT uuid FROM clips WHERE content_hash = ?")
+            .bind(clip_hash(db, text))
+            .fetch_one(&db.pool)
+            .await
+            .expect("the clip should exist")
     }
 
     /// SBS-772: a clip whose payload cannot be decrypted must refuse the export
@@ -1119,11 +1223,7 @@ mod tests {
             "a refused export must not create the destination file"
         );
         assert!(
-            leftover_backup_temps(
-                path.parent().unwrap(),
-                path.file_name().unwrap().to_str().unwrap()
-            )
-            .is_empty(),
+            leftover_backup_temps(path.parent().unwrap()).is_empty(),
             "a refused export must not leave temporary output"
         );
     }
@@ -1222,11 +1322,7 @@ mod tests {
             "the existing destination must be byte-for-byte unchanged"
         );
         assert!(
-            leftover_backup_temps(
-                path.parent().unwrap(),
-                path.file_name().unwrap().to_str().unwrap()
-            )
-            .is_empty(),
+            leftover_backup_temps(path.parent().unwrap()).is_empty(),
             "failure must clean up temporary output"
         );
         let _ = std::fs::remove_file(&path);
@@ -1245,10 +1341,103 @@ mod tests {
             .expect_err("replacing a directory with a file must fail");
         assert!(error.contains("Could not save the backup"));
         assert!(
-            leftover_backup_temps(&dir, "not-a-file").is_empty(),
+            leftover_backup_temps(&dir).is_empty(),
             "a failed persist must remove its temporary file"
         );
         assert!(dest.is_dir(), "the existing destination must remain");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SBS-772: an unreadable field blocks the whole backup, but the clip list
+    /// still shows every clip, so a message that only counts field types tells
+    /// the user nothing they can act on. Name the row.
+    #[tokio::test]
+    async fn export_names_the_unreadable_clip_and_not_its_neighbor() {
+        let source = test_database().await;
+        insert_rich_clip(&source, "sbs-772-named-bad").await;
+        insert_rich_clip(&source, "sbs-772-named-good").await;
+        corrupt_text_column(&source, "sbs-772-named-bad", "notes").await;
+
+        let bad = uuid_of(&source, "sbs-772-named-bad").await;
+        let good = uuid_of(&source, "sbs-772-named-good").await;
+
+        let path = temp_path("named-clip");
+        let error = export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .expect_err("a corrupt note must fail the export");
+
+        assert!(
+            error.contains(&bad),
+            "the error should name the unreadable clip {bad}: {error}"
+        );
+        assert!(
+            !error.contains(&good),
+            "the error must not name the readable neighbor {good}: {error}"
+        );
+        assert!(
+            !error.contains("sbs-772-named-bad"),
+            "the error must not expose clipboard contents: {error}"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A storage key that stopped working fails every row. Listing thousands of
+    /// ids in a toast helps nobody, so the list is capped and the rest counted.
+    #[tokio::test]
+    async fn export_caps_how_many_clip_ids_it_names() {
+        let source = test_database().await;
+        let total = MAX_REPORTED_FAILED_CLIPS + 3;
+        for index in 0..total {
+            let text = format!("sbs-772-mass-{index}");
+            insert_rich_clip(&source, &text).await;
+            corrupt_text_column(&source, &text, "notes").await;
+        }
+
+        let path = temp_path("mass-corruption");
+        let error = export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .expect_err("every clip being unreadable must fail the export");
+
+        let mut named = 0;
+        for index in 0..total {
+            if error.contains(&uuid_of(&source, &format!("sbs-772-mass-{index}")).await) {
+                named += 1;
+            }
+        }
+        assert_eq!(
+            named, MAX_REPORTED_FAILED_CLIPS,
+            "only the capped number of ids should appear: {error}"
+        );
+        assert!(
+            error.contains("and 3 more"),
+            "the rest should be counted, not listed: {error}"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// `MoveFileExW` refuses paths above `MAX_PATH` unless they are `\\?\`
+    /// prefixed, while `std::fs::write` prefixes them itself. A save-dialog name
+    /// this long is legal, so persisting to it must still work.
+    #[test]
+    fn persist_writes_a_destination_longer_than_the_legacy_path_limit() {
+        let dir = std::env::temp_dir().join(format!("cubby-backup-long-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 239 characters: legal as a file name (the limit is 255), long enough
+        // that the full path clears MAX_PATH on any plausible temp directory.
+        let dest = dir.join(format!("{}.cubbybak", "n".repeat(230)));
+        assert!(
+            dest.as_os_str().len() > 260,
+            "the test destination must exceed MAX_PATH to be meaningful"
+        );
+
+        persist_backup_file(dest.to_str().unwrap(), b"complete-bundle-bytes")
+            .expect("a long but legal destination must still be written");
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"complete-bundle-bytes");
+        assert!(
+            leftover_backup_temps(&dir).is_empty(),
+            "a successful persist must leave no temporary file"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
