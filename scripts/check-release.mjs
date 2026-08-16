@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { checkPrivilegedActionPins } from '../.github/scripts/check-privileged-action-pins.mjs';
 import { findFileListHistoryClaims } from './product-page-claims.mjs';
-import { extractDefaultSkipLikelySecrets, evaluateSecretHeuristicsDoc } from './release-check-helpers.mjs';
+import { extractDefaultSkipLikelySecrets, evaluateSecretHeuristicsDoc, saysDefaultOff } from './release-check-helpers.mjs';
 
 const root = new URL('../', import.meta.url);
 const rootDir = fileURLToPath(root);
@@ -299,7 +299,7 @@ const skipLikelySecretsDesc = JSON.parse(settingsLocaleText).settings?.skipLikel
 if (typeof skipLikelySecretsDesc !== 'string') {
   throw new Error('Settings locale must describe skipLikelySecrets');
 }
-if (defaultSkipLikelySecrets === 'false' && !/off by default/i.test(skipLikelySecretsDesc)) {
+if (defaultSkipLikelySecrets === 'false' && !saysDefaultOff(skipLikelySecretsDesc)) {
   throw new Error('Settings copy must say secret heuristics are off by default');
 }
 if (defaultSkipLikelySecrets === 'true' && !/on by default/i.test(skipLikelySecretsDesc)) {

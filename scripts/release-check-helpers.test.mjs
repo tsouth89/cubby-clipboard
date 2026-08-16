@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import {
   evaluateSecretHeuristicsDoc,
   extractDefaultSkipLikelySecrets,
+  extractMarkdownBullets,
+  saysDefaultOff,
 } from './release-check-helpers.mjs';
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 test('reads the live default when a stale commented-out value sits above it', () => {
   const modelsSource = `
@@ -74,4 +81,38 @@ test("accepts 'disabled by default' as a deliberate off-by-default phrasing", ()
   const securityDoc = '- Secret heuristics scanning is disabled by default.';
   const { sayOff } = evaluateSecretHeuristicsDoc(securityDoc);
   assert.equal(sayOff, true);
+});
+
+test('does not glue a following heading or paragraph onto the previous bullet', () => {
+  const securityDoc = `
+- Text that matches high-confidence secret heuristics such as private keys and cloud API tokens (off by default, enable in Settings).
+## Later
+A later paragraph mentions secret heuristics and says they are default on.
+`;
+  const { sayOn, sayOff } = evaluateSecretHeuristicsDoc(securityDoc);
+  assert.equal(sayOff, true);
+  assert.equal(sayOn, false);
+  const bullets = extractMarkdownBullets(securityDoc);
+  assert.equal(bullets.length, 1);
+  assert.equal(/Later/.test(bullets[0]), false);
+});
+
+test('locale helper accepts the same off-phrasings as the security-doc gate', () => {
+  assert.equal(saysDefaultOff('Off by default. Turn it on in Settings.'), true);
+  assert.equal(saysDefaultOff('Disabled by default.'), true);
+  assert.equal(saysDefaultOff('This is opt-in.'), true);
+  assert.equal(saysDefaultOff('Always on.'), false);
+});
+
+test('live models.rs, SECURITY.md, and en.json agree the default is off', async () => {
+  const models = await readFile(path.join(repoRoot, 'src-tauri/src/models.rs'), 'utf8');
+  const security = await readFile(path.join(repoRoot, 'SECURITY.md'), 'utf8');
+  const en = JSON.parse(
+    await readFile(path.join(repoRoot, 'frontend/src/i18n/locales/en.json'), 'utf8'),
+  );
+  assert.equal(extractDefaultSkipLikelySecrets(models), 'false');
+  const { sayOn, sayOff } = evaluateSecretHeuristicsDoc(security);
+  assert.equal(sayOn, false);
+  assert.equal(sayOff, true);
+  assert.equal(saysDefaultOff(en.settings.skipLikelySecretsDesc), true);
 });

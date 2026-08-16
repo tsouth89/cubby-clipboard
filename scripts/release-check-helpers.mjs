@@ -40,11 +40,21 @@ export function extractDefaultSkipLikelySecrets(modelsSource) {
 export function extractMarkdownBullets(markdown) {
   const bullets = [];
   for (const rawLine of markdown.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (/^-\s/.test(line)) {
-      bullets.push(line);
-    } else if (bullets.length > 0 && line !== '') {
-      bullets[bullets.length - 1] += ` ${line}`;
+    const trimmed = rawLine.trim();
+    if (/^-\s/.test(trimmed)) {
+      bullets.push(trimmed);
+      continue;
+    }
+    // Only wrapped continuations of the current dash item. Headings, later
+    // paragraphs, and other list markers stay out of the previous bullet.
+    const isContinuation =
+      bullets.length > 0 &&
+      /^\s+\S/.test(rawLine) &&
+      !/^#{1,6}\s/.test(trimmed) &&
+      !/^[-*+]\s/.test(trimmed) &&
+      !/^\d+\.\s/.test(trimmed);
+    if (isContinuation) {
+      bullets[bullets.length - 1] += ` ${trimmed}`;
     }
   }
   return bullets;
@@ -54,7 +64,15 @@ export function extractMarkdownBullets(markdown) {
 // "not opt-in" does not read as saying the default is off. "disabled by
 // default" is accepted deliberately alongside "off by default" / "opt-in".
 const DEFAULT_ON_PATTERN = /(?<!\bnot )\bdefault on\b/i;
-const DEFAULT_OFF_PATTERN = /(?<!\bnot )\b(off by default|opt-in|disabled by default)\b/i;
+export const DEFAULT_OFF_PATTERN = /(?<!\bnot )\b(off by default|opt-in|disabled by default)\b/i;
+
+export function saysDefaultOff(text) {
+  return DEFAULT_OFF_PATTERN.test(text);
+}
+
+export function saysDefaultOn(text) {
+  return DEFAULT_ON_PATTERN.test(text);
+}
 
 /**
  * Find every bullet documenting the secret-heuristics gate and report
