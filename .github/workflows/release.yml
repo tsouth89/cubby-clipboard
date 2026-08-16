@@ -45,7 +45,7 @@ jobs:
 
       # Install a prebuilt cargo-audit binary instead of compiling it from source
       # (cargo install cargo-audit) on every run.
-      - uses: taiki-e/install-action@v2.85.10
+      - uses: taiki-e/install-action@v2.85.12
         with:
           tool: cargo-audit
 
