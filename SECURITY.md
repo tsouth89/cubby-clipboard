@@ -27,7 +27,7 @@ Third-party actions in privileged release, Store, and signing workflows must be 
 In addition to AES-256-GCM at rest, Cubby skips:
 
 - Clipboard items tagged with Windows `ExcludeClipboardContentFromMonitorProcessing` (default on).
-- Text that matches high-confidence secret heuristics such as private keys, cloud API tokens, and grouped payment-card numbers (default on; category logged, never content).
+- Text that matches high-confidence secret heuristics such as private keys, cloud API tokens, and grouped payment-card numbers (off by default, enable in Settings; category logged, never content). This one is opt-in because a wrong guess silently drops a clip the user wanted to keep.
 - A one-time seeded ignore list of major password-manager executables, editable in Settings.
 
 ## Clipboard history at rest
@@ -36,4 +36,6 @@ Cubby encrypts clipboard payloads, previews, source attribution, metadata, and i
 
 Existing plaintext history is migrated before the clipboard listener starts. Cubby fails closed if the key cannot be unlocked or migration cannot complete, preventing new history from being mixed into an unreadable or partially encrypted store.
 
-Core Windows clipboard representations are retained together: Unicode text, HTML, RTF, file-drop lists, and images. Auxiliary formats are encrypted in the same authenticated store. Cubby intentionally does not persist arbitrary private application formats because some contain process-specific handles or unsafe opaque data that cannot be replayed reliably.
+Core Windows clipboard representations are retained together: Unicode text, HTML, RTF, and images. Auxiliary formats are encrypted in the same authenticated store. Cubby intentionally does not persist arbitrary private application formats because some contain process-specific handles or unsafe opaque data that cannot be replayed reliably.
+
+Copying files is intentionally not recorded. A file payload is a reference to a path, not durable content, so a history entry for it can silently stop working after a move, a disconnect, or a target-app mismatch. Cubby ignores both physical (`CF_HDROP`) and virtual file payloads before reading any text they advertise, and a migration removes file rows written by earlier versions. The one exception is a screenshot tool that publishes a real bitmap alongside a file reference: Cubby keeps that as an image, never as a path.

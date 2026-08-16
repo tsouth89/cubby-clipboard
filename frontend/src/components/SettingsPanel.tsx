@@ -451,6 +451,16 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     }
   };
 
+  // A URL missing from the opener allowlist rejects at the Tauri boundary with
+  // no visible effect, so a swallowed console.error looked exactly like a dead
+  // button. Say so instead: the user can still reach the page in a browser.
+  const handleOpenUrl = (url: string) => {
+    openUrl(url).catch((error) => {
+      console.error(`Could not open ${url}:`, error);
+      toast.error(t('settings.linkFailed', { url }));
+    });
+  };
+
   const handleCheckUpdates = async () => {
     setCheckingUpdate(true);
     try {
@@ -1691,7 +1701,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         )}
                       </div>
                       <button
-                        onClick={() => openUrl(GITHUB_URL).catch(console.error)}
+                        onClick={() => handleOpenUrl(GITHUB_URL)}
                         className="flex w-full items-center gap-3 px-4 py-3 text-sm transition-colors hover:bg-accent/40"
                       >
                         <Github size={16} className="text-muted-foreground" />
@@ -1699,7 +1709,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         <ExternalLink size={14} className="text-muted-foreground" />
                       </button>
                       <button
-                        onClick={() => openUrl(WEBSITE_URL).catch(console.error)}
+                        onClick={() => handleOpenUrl(WEBSITE_URL)}
                         className="flex w-full items-center gap-3 px-4 py-3 text-sm transition-colors hover:bg-accent/40"
                       >
                         <Globe size={16} className="text-muted-foreground" />
@@ -1707,7 +1717,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         <ExternalLink size={14} className="text-muted-foreground" />
                       </button>
                       <button
-                        onClick={() => openUrl(PRIVACY_URL).catch(console.error)}
+                        onClick={() => handleOpenUrl(PRIVACY_URL)}
                         className="flex w-full items-center gap-3 px-4 py-3 text-sm transition-colors hover:bg-accent/40"
                       >
                         <ShieldCheck size={16} className="text-muted-foreground" />

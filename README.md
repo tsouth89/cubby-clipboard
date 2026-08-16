@@ -30,7 +30,7 @@ Copy a screenshot and Cubby reads the text inside it using the built-in Windows 
 | Built for everyday use | Private by design |
 | --- | --- |
 | Search your history by text, including words inside copied screenshots (offline OCR) | No account, cloud sync, ads, or desktop analytics |
-| Text, HTML, RTF, images, and file lists | AES-256-GCM encryption for stored clipboard payloads |
+| Text, HTML, RTF, and images | AES-256-GCM encryption for stored clipboard payloads |
 | Pinning, folders, filters, and per-app context | Encryption key protected for the current Windows user |
 | Keyboard-first navigation and paste | Ignored-app and sensitive-content controls |
 | Windows 11 flyout, tray, themes, and startup options | Open-source GPL-3.0 code |
@@ -63,6 +63,8 @@ The app checks for signed updates at startup and every 30 minutes while it is ru
 ## Privacy
 
 Clipboard data stays on your PC. Cubby encrypts stored clipboard payloads and image data with AES-256-GCM, with the key protected by Windows for your user account. The desktop app contains no analytics or usage telemetry.
+
+Copying files is not recorded. A copied file is a path, not content, so a saved entry for it would break as soon as the file moves. Cubby ignores file payloads instead of storing paths you copied. Screenshots are unaffected: a tool that copies a real image alongside a file reference is kept as the image.
 
 The app contacts GitHub to check for signed updates and opens links you request. The website uses limited, cookie-free first-party analytics; it does not receive clipboard content. Read the full [privacy policy](https://cubbyclipboard.com/privacy.html).
 

@@ -24,6 +24,10 @@ const [
   secretsSource,
   modelsSource,
   securityDoc,
+  readmeDoc,
+  privacyPageDoc,
+  supportPageDoc,
+  settingsPanelSource,
 ] = await Promise.all([
   read('package.json'),
   read('src-tauri/tauri.conf.json'),
@@ -40,6 +44,10 @@ const [
   read('src-tauri/src/secrets.rs'),
   read('src-tauri/src/models.rs'),
   read('SECURITY.md'),
+  read('README.md'),
+  read('product_pages/privacy.html'),
+  read('product_pages/support.html'),
+  read('frontend/src/components/SettingsPanel.tsx'),
 ]);
 
 const packageVersion = JSON.parse(packageText).version;
@@ -174,6 +182,65 @@ if (`${clipboardSource}\n${commandSource}`.includes('ClipboardContent::Files')) 
   throw new Error(
     'Release product code must not restore external file references as durable history'
   );
+}
+
+// The gates above encode that copied files are never stored. Public docs claimed
+// the opposite for months because nothing tied the two together. If file capture
+// is ever restored, delete these lines deliberately along with the design work.
+//
+// A sentence only counts as a claim if it says files are retained or
+// supported (retained|stores|supports|includes|records) without also
+// negating that (not|never|ignore). This lets docs correctly say "Cubby does
+// not store file lists" while still catching restated lies like "Cubby
+// stores copied files" that don't use the literal phrase "file lists".
+// Checked per sentence rather than per line: a paragraph line can carry both
+// an accurate negated claim and a false unnegated one, and a negation later
+// in the same line must not paper over a false claim earlier in it.
+const fileMentionPattern = /\bfiles?\b/i;
+const retentionClaimPattern = /\b(?:retained|stores?|supports?|includes?|records?(?:ed)?)\b/i;
+const negationPattern = /\b(?:not|never|ignor\w*)\b/i;
+for (const [docName, doc] of [
+  ['README.md', readmeDoc],
+  ['SECURITY.md', securityDoc],
+  ['product_pages/privacy.html', privacyPageDoc],
+  ['product_pages/support.html', supportPageDoc],
+]) {
+  const fileClaim = doc
+    .replace(/\r?\n/g, ' ')
+    .split(/(?<=[.!?])\s+/)
+    .find(
+      (sentence) =>
+        fileMentionPattern.test(sentence) &&
+        retentionClaimPattern.test(sentence) &&
+        !negationPattern.test(sentence)
+    );
+  if (fileClaim) {
+    throw new Error(
+      `${docName} claims file clipboard history is retained or supported, which capture policy deliberately ignores: ${fileClaim.trim()}`
+    );
+  }
+}
+
+// A URL the frontend opens but the capability does not allow is rejected at the
+// Tauri boundary, which reads to the user as a button that does nothing.
+const openerScope = capability.permissions.find(
+  (permission) => permission?.identifier === 'opener:allow-open-url'
+);
+// No `$` anchor: these sources are CRLF, so a trailing `\r` would leave the
+// pattern matching nothing and the gate passing on an empty set.
+const allowedUrls = new Set((openerScope?.allow ?? []).map((entry) => entry.url));
+const openedUrls = [...settingsPanelSource.matchAll(/^const \w*URL = '([^']+)';/gm)].map(
+  ([, url]) => url
+);
+if (openedUrls.length === 0) {
+  throw new Error('Could not find the Settings link URL constants to check against the allowlist');
+}
+for (const openedUrl of openedUrls) {
+  if (!allowedUrls.has(openedUrl)) {
+    throw new Error(
+      `Settings opens ${openedUrl}, but src-tauri/capabilities/default.json does not allow it`
+    );
+  }
 }
 
 for (const sensitiveLogFragment of ['Detected self-paste for hash', 'full_path: {:?}', 'path match): {}']) {

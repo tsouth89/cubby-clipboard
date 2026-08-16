@@ -47,7 +47,7 @@
       <div class="legal-callout"><p><strong>The short version:</strong> Cubby stores clipboard history locally on your Windows PC. The desktop app does not include analytics, advertising, cloud sync, or network-backed AI features. This website collects limited, privacy-preserving visit counts.</p></div>
 
       <h2>What Cubby stores</h2>
-      <p>To provide clipboard history, Cubby records supported content you copy while it is running. That currently includes plain text, HTML, RTF, images, and file lists, along with useful context such as the source application, content type, timestamps, and whether an item is pinned.</p>
+      <p>To provide clipboard history, Cubby records supported content you copy while it is running. That currently includes plain text, HTML, RTF, and images, along with useful context such as the source application, content type, timestamps, and whether an item is pinned. Copying files is not recorded: a copied file is a path, not content, so Cubby ignores file payloads instead of storing paths you copied.</p>
       <p>History is stored in Cubby’s local application-data directory. Clipboard payloads are kept in a local SQLite database, and image data is kept in local application files.</p>
 
       <h2>What Cubby does not collect</h2>
