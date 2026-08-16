@@ -2011,19 +2011,21 @@ async fn process_clipboard_snapshot(
         was_existing = true;
         if clip_type == "image" {
             if let Some(full_bytes) = &full_image_content {
-                // Persist the new original first (temp file, then rename) so a
-                // failed write never commits this recapture and never truncates
-                // the previous `{uuid}.cubby`. A persist error is a capture
-                // miss: keep the prior row and do not enqueue OCR.
+                // Stage the new original to a temp file, commit the row change,
+                // and only then move it over the previous `{uuid}.cubby`. A
+                // failure at any step is a capture miss: keep the prior row and
+                // the prior original, and do not enqueue OCR.
                 if recapture_existing_image(
                     &db,
                     &existing_id,
                     full_bytes,
-                    &encrypted_source_app,
-                    &encrypted_source_icon,
-                    &encrypted_content,
-                    &encrypted_preview,
-                    encrypted_metadata.clone(),
+                    crate::image_persist::RecaptureFields {
+                        source_app: &encrypted_source_app,
+                        source_icon: &encrypted_source_icon,
+                        content: &encrypted_content,
+                        preview: &encrypted_preview,
+                        metadata: encrypted_metadata.clone(),
+                    },
                 )
                 .await
                 .is_err()
@@ -2545,29 +2547,27 @@ pub fn create_image_preview(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
 
 pub use crate::image_persist::persist_full_image_file;
 
-/// Persist a recaptured full-resolution original, then update the existing
-/// image row. The write happens first so a persist failure never commits the
-/// recapture `UPDATE` and never queues OCR against a missing file.
+/// Stage a recaptured full-resolution original, update the existing image row
+/// inside one transaction, and replace the previous original only after that
+/// transaction commits. Any failure leaves the prior row and the prior file
+/// intact and never queues OCR against a file that was never written.
 async fn recapture_existing_image(
     db: &Database,
     existing_id: &str,
     full_bytes: &[u8],
-    encrypted_source_app: &Option<String>,
-    encrypted_source_icon: &Option<String>,
-    encrypted_content: &[u8],
-    encrypted_preview: &str,
-    encrypted_metadata: Option<String>,
+    fields: crate::image_persist::RecaptureFields<'_>,
 ) -> Result<(), String> {
     match crate::image_persist::apply_existing_image_recapture(
         &db.pool,
         existing_id,
-        persist_full_image_file(&db.crypto, &db.image_dir, existing_id, full_bytes),
+        crate::image_persist::stage_full_image_file(
+            &db.crypto,
+            &db.image_dir,
+            existing_id,
+            full_bytes,
+        ),
         full_bytes.len() as i64,
-        encrypted_source_app,
-        encrypted_source_icon,
-        encrypted_content,
-        encrypted_preview,
-        encrypted_metadata,
+        fields,
     )
     .await
     {

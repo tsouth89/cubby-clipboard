@@ -1,25 +1,73 @@
 use crate::crypto::CryptoManager;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+/// A full-resolution original that is already written and encrypted on disk as
+/// `{uuid}.cubby.tmp` but has not yet taken the place of the live
+/// `{uuid}.cubby`. Nothing observes the new bytes until `commit` runs, so every
+/// early return between staging and commit leaves the previous original
+/// byte-identical. Dropping the handle without committing removes the temp file.
+pub(crate) struct StagedImageFile {
+    temp_path: PathBuf,
+    final_path: PathBuf,
+    committed: bool,
+}
+
+impl StagedImageFile {
+    /// The path the original will occupy once `commit` succeeds. This is what
+    /// `clip_images.file_path` must record, because the commit only ever moves
+    /// the staged bytes onto exactly this name.
+    pub(crate) fn final_path(&self) -> String {
+        self.final_path.to_string_lossy().to_string()
+    }
+
+    /// Replace the live original with the staged bytes.
+    pub(crate) fn commit(mut self) -> Result<String, String> {
+        replace_image_file_atomically(&self.temp_path, &self.final_path)?;
+        self.committed = true;
+        Ok(self.final_path.to_string_lossy().to_string())
+    }
+}
+
+impl Drop for StagedImageFile {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.temp_path);
+        }
+    }
+}
+
+/// Encrypt and write the new original to a sibling temp file without touching
+/// the live `{uuid}.cubby`. `std::fs::write` truncates on open, so writing the
+/// live name in place would destroy the previous good file if the write failed
+/// mid-stream.
+pub(crate) fn stage_full_image_file(
+    crypto: &CryptoManager,
+    image_dir: &Path,
+    clip_uuid: &str,
+    png_bytes: &[u8],
+) -> Result<StagedImageFile, String> {
+    std::fs::create_dir_all(image_dir).map_err(|e| e.to_string())?;
+    let final_path = image_dir.join(format!("{}.cubby", clip_uuid));
+    let temp_path = image_dir.join(format!("{}.cubby.tmp", clip_uuid));
+    let encrypted = crypto.encrypt(png_bytes)?;
+    std::fs::write(&temp_path, encrypted).map_err(|e| e.to_string())?;
+    Ok(StagedImageFile {
+        temp_path,
+        final_path,
+        committed: false,
+    })
+}
+
+/// Stage and immediately commit a full original. Used by the paths that write a
+/// brand-new `{uuid}.cubby` (a new clip, the encryption migration), where there
+/// is no previous original that a failed follow-up step could destroy.
 pub fn persist_full_image_file(
     crypto: &CryptoManager,
     image_dir: &Path,
     clip_uuid: &str,
     png_bytes: &[u8],
 ) -> Result<String, String> {
-    std::fs::create_dir_all(image_dir).map_err(|e| e.to_string())?;
-    let file_path = image_dir.join(format!("{}.cubby", clip_uuid));
-    // Write the new original to a sibling temp file first. `std::fs::write`
-    // truncates on open, so replacing the live `{uuid}.cubby` in place would
-    // destroy the previous good file if the write failed mid-stream.
-    let temp_path = image_dir.join(format!("{}.cubby.tmp", clip_uuid));
-    let encrypted = crypto.encrypt(png_bytes)?;
-    std::fs::write(&temp_path, encrypted).map_err(|e| e.to_string())?;
-    if let Err(error) = replace_image_file_atomically(&temp_path, &file_path) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(error);
-    }
-    Ok(file_path.to_string_lossy().to_string())
+    stage_full_image_file(crypto, image_dir, clip_uuid, png_bytes)?.commit()
 }
 
 #[cfg(target_os = "windows")]
@@ -56,22 +104,39 @@ fn replace_image_file_atomically(source: &Path, destination: &Path) -> Result<()
     std::fs::rename(source, destination).map_err(|error| error.to_string())
 }
 
-/// Apply a recapture after (or instead of) a persist attempt. Passing `Err`
+/// The already-encrypted column values a recapture writes back onto the
+/// existing `clips` row. Grouped so the recapture entry points stay under the
+/// argument-count lint instead of threading six loose encrypted blobs through.
+pub(crate) struct RecaptureFields<'a> {
+    pub source_app: &'a Option<String>,
+    pub source_icon: &'a Option<String>,
+    pub content: &'a [u8],
+    pub preview: &'a str,
+    pub metadata: Option<String>,
+}
+
+/// Apply a recapture after (or instead of) a staging attempt. Passing `Err`
 /// leaves the previous `clips` row, `clip_images` index, and on-disk original
-/// untouched so tests can pin the persist-failure path without AppHandle.
+/// untouched so tests can pin the staging-failure path without AppHandle.
+///
+/// Ordering matters: both statements run inside one transaction, and the staged
+/// original only replaces the live file after that transaction commits. A
+/// failure at any earlier point returns with the staged handle un-committed, so
+/// its `Drop` deletes the temp file and the previous original survives intact.
 pub(crate) async fn apply_existing_image_recapture(
     pool: &sqlx::SqlitePool,
     existing_id: &str,
-    persist_result: Result<String, String>,
+    staged: Result<StagedImageFile, String>,
     full_bytes_len: i64,
-    encrypted_source_app: &Option<String>,
-    encrypted_source_icon: &Option<String>,
-    encrypted_content: &[u8],
-    encrypted_preview: &str,
-    encrypted_metadata: Option<String>,
+    fields: RecaptureFields<'_>,
 ) -> Result<(), String> {
-    let file_path = persist_result.map_err(|error| {
+    let staged = staged.map_err(|error| {
         format!("Failed to persist full image file for existing clip {existing_id}: {error}")
+    })?;
+    let file_path = staged.final_path();
+
+    let mut transaction = pool.begin().await.map_err(|error| {
+        format!("CLIPBOARD: Failed to start the recapture transaction for existing clip {existing_id}: {error}")
     })?;
 
     sqlx::query(
@@ -88,13 +153,13 @@ pub(crate) async fn apply_existing_image_recapture(
         WHERE uuid = ?
         "#,
     )
-    .bind(encrypted_source_app)
-    .bind(encrypted_source_icon)
-    .bind(encrypted_content)
-    .bind(encrypted_preview)
-    .bind(encrypted_metadata)
+    .bind(fields.source_app)
+    .bind(fields.source_icon)
+    .bind(fields.content)
+    .bind(fields.preview)
+    .bind(fields.metadata)
     .bind(existing_id)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(|error| {
         format!("CLIPBOARD: Failed to update existing image clip {existing_id}: {error}")
@@ -109,18 +174,35 @@ pub(crate) async fn apply_existing_image_recapture(
     .bind(existing_id)
     .bind(&file_path)
     .bind(full_bytes_len)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(|error| {
         format!("CLIPBOARD: Failed to index image file for existing clip {existing_id}: {error}")
     })?;
 
+    transaction.commit().await.map_err(|error| {
+        format!(
+            "CLIPBOARD: Failed to commit the recapture for existing clip {existing_id}: {error}"
+        )
+    })?;
+
+    // The database now describes the staged bytes, so replacing the previous
+    // original is the last step. If this single rename fails the previous
+    // original is still the one on disk; that leaves the row's thumbnail and
+    // file_size ahead of the file, which is reported as an error rather than
+    // silently losing the original.
+    staged.commit().map_err(|error| {
+        format!("CLIPBOARD: Failed to replace the stored original for existing clip {existing_id}: {error}")
+    })?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_existing_image_recapture, persist_full_image_file};
+    use super::{
+        apply_existing_image_recapture, persist_full_image_file, stage_full_image_file,
+        RecaptureFields, StagedImageFile,
+    };
     use crate::crypto::CryptoManager;
     use sqlx::sqlite::SqlitePoolOptions;
 
@@ -129,6 +211,16 @@ mod tests {
         crypto
             .decrypt(&encrypted)
             .expect("original file should still decrypt")
+    }
+
+    fn new_fields<'a>(content: &'a [u8], preview: &'a str) -> RecaptureFields<'a> {
+        RecaptureFields {
+            source_app: &None,
+            source_icon: &None,
+            content,
+            preview,
+            metadata: None,
+        }
     }
 
     #[test]
@@ -157,6 +249,31 @@ mod tests {
             b"previous-full-res",
             "a failed persist must not truncate or replace the previous original"
         );
+
+        let _ = std::fs::remove_dir_all(&image_dir);
+    }
+
+    #[test]
+    fn dropping_a_staged_file_without_committing_removes_the_temp_and_keeps_the_original() {
+        let crypto = CryptoManager::ephemeral();
+        let image_dir =
+            std::env::temp_dir().join(format!("cubby-image-staged-{}", uuid::Uuid::new_v4()));
+        let uuid = "staged-but-abandoned";
+        let live_path =
+            persist_full_image_file(&crypto, &image_dir, uuid, b"previous-full-res").unwrap();
+
+        let temp_path = image_dir.join(format!("{uuid}.cubby.tmp"));
+        {
+            let staged = stage_full_image_file(&crypto, &image_dir, uuid, b"new-full-res").unwrap();
+            assert!(temp_path.exists(), "staging should write the temp file");
+            assert_eq!(staged.final_path(), live_path);
+        }
+
+        assert!(
+            !temp_path.exists(),
+            "an un-committed staged file must clean up its temp file"
+        );
+        assert_eq!(read_original(&crypto, &live_path), b"previous-full-res");
 
         let _ = std::fs::remove_dir_all(&image_dir);
     }
@@ -316,13 +433,9 @@ mod tests {
         let recapture = apply_existing_image_recapture(
             &pool,
             uuid,
-            Err("disk full".to_string()),
+            Err::<StagedImageFile, String>("disk full".to_string()),
             99,
-            &None,
-            &None,
-            b"new-thumbnail",
-            "new-preview",
-            None,
+            new_fields(b"new-thumbnail", "new-preview"),
         )
         .await;
 
@@ -378,19 +491,15 @@ mod tests {
 
         let temp_path = image_dir.join(format!("{uuid}.cubby.tmp"));
         std::fs::create_dir(&temp_path).unwrap();
-        let persist_result = persist_full_image_file(&crypto, &image_dir, uuid, b"new-full-res");
-        assert!(persist_result.is_err());
+        let staged = stage_full_image_file(&crypto, &image_dir, uuid, b"new-full-res");
+        assert!(staged.is_err());
 
         let recapture = apply_existing_image_recapture(
             &pool,
             uuid,
-            persist_result,
+            staged,
             b"new-full-res".len() as i64,
-            &None,
-            &None,
-            b"new-thumbnail",
-            "new-preview",
-            None,
+            new_fields(b"new-thumbnail", "new-preview"),
         )
         .await;
         assert!(recapture.is_err());
@@ -398,6 +507,78 @@ mod tests {
         let row = load_recapture_row(&pool, uuid).await;
         assert_still_prior_healthy_clip(&row, &old_content, &old_preview);
         assert_eq!(read_original(&crypto, &file_path), b"previous-full-res");
+
+        let _ = std::fs::remove_dir_all(&image_dir);
+    }
+
+    /// The opposite order of the write-failure test: the new original is
+    /// written successfully and only the database write fails. The rename must
+    /// not have happened yet, so the previous original is still on disk and the
+    /// half-applied `UPDATE clips` is rolled back with it.
+    #[tokio::test]
+    async fn a_db_failure_after_a_successful_write_keeps_the_previous_original() {
+        let pool = recapture_pool().await;
+        let crypto = CryptoManager::ephemeral();
+        let image_dir =
+            std::env::temp_dir().join(format!("cubby-recapture-db-fail-{}", uuid::Uuid::new_v4()));
+        let uuid = "existing-image-db-fail";
+        let (old_content, old_preview, file_path) =
+            seed_healthy_image_clip(&pool, &crypto, &image_dir, uuid, b"previous-full-res").await;
+
+        // Fail the second statement only, after `UPDATE clips` has already
+        // succeeded. Without a transaction that leaves the new thumbnail
+        // beside the old file_size.
+        sqlx::query(
+            r#"
+            CREATE TRIGGER block_clip_images_insert BEFORE INSERT ON clip_images
+            BEGIN
+                SELECT RAISE(ABORT, 'injected clip_images failure');
+            END
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let staged = stage_full_image_file(&crypto, &image_dir, uuid, b"new-full-res");
+        assert!(staged.is_ok(), "the file write itself must succeed here");
+
+        let recapture = apply_existing_image_recapture(
+            &pool,
+            uuid,
+            staged,
+            b"new-full-res".len() as i64,
+            new_fields(b"new-thumbnail", "new-preview"),
+        )
+        .await;
+        assert!(
+            recapture.is_err(),
+            "a failed clip_images write must fail the recapture"
+        );
+
+        let row = load_recapture_row(&pool, uuid).await;
+        assert_still_prior_healthy_clip(&row, &old_content, &old_preview);
+
+        let indexed_size: i64 =
+            sqlx::query_scalar("SELECT file_size FROM clip_images WHERE clip_uuid = ?")
+                .bind(uuid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            indexed_size,
+            b"previous-full-res".len() as i64,
+            "clip_images must still describe the file that is actually on disk"
+        );
+        assert_eq!(
+            read_original(&crypto, &file_path),
+            b"previous-full-res",
+            "a failed database write must not have replaced the previous original"
+        );
+        assert!(
+            !image_dir.join(format!("{uuid}.cubby.tmp")).exists(),
+            "the abandoned staged file must be cleaned up"
+        );
 
         let _ = std::fs::remove_dir_all(&image_dir);
     }
@@ -412,17 +593,13 @@ mod tests {
         let (_old_content, _old_preview, file_path) =
             seed_healthy_image_clip(&pool, &crypto, &image_dir, uuid, b"previous-full-res").await;
 
-        let persist_result = persist_full_image_file(&crypto, &image_dir, uuid, b"new-full-res");
+        let staged = stage_full_image_file(&crypto, &image_dir, uuid, b"new-full-res");
         apply_existing_image_recapture(
             &pool,
             uuid,
-            persist_result,
+            staged,
             b"new-full-res".len() as i64,
-            &None,
-            &None,
-            b"new-thumbnail",
-            "new-preview",
-            None,
+            new_fields(b"new-thumbnail", "new-preview"),
         )
         .await
         .expect("successful persist should commit the recapture");
@@ -433,6 +610,18 @@ mod tests {
         assert_eq!(row.2, 0);
         assert_ne!(row.6, "2026-01-15 12:00:00", "timestamp should bump");
         assert_eq!(read_original(&crypto, &file_path), b"new-full-res");
+
+        let indexed_size: i64 =
+            sqlx::query_scalar("SELECT file_size FROM clip_images WHERE clip_uuid = ?")
+                .bind(uuid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(indexed_size, b"new-full-res".len() as i64);
+        assert!(
+            !image_dir.join(format!("{uuid}.cubby.tmp")).exists(),
+            "a committed staged file must leave no temp file behind"
+        );
 
         let _ = std::fs::remove_dir_all(&image_dir);
     }
