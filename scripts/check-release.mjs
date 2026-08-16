@@ -267,6 +267,17 @@ if (!securityDoc.includes('RUSTSEC-2023-0071')) {
   throw new Error('SECURITY.md must document the reviewed RSA advisory waiver');
 }
 
+const productPageSources = [
+  ['product_pages/privacy.html', await read('product_pages/privacy.html')],
+  ['product_pages/support.html', await read('product_pages/support.html')],
+];
+const fileListHistoryClaim = /file lists|file-list|file list/i;
+for (const [file, source] of productPageSources) {
+  if (fileListHistoryClaim.test(source)) {
+    throw new Error(`${file} still claims file-list clipboard history`);
+  }
+}
+
 const reviewed = securityDoc.match(/^- Reviewed:\s*(\d{4}-\d{2}-\d{2})\s*$/m)?.[1];
 const nextReview = securityDoc.match(/^- Next review:\s*(\d{4}-\d{2}-\d{2})\b/m)?.[1];
 const today = new Date().toISOString().slice(0, 10);

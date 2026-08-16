@@ -6,7 +6,7 @@ clipboard and OCR text to disk.
 
 The search index is built in memory after encrypted storage migration completes:
 
-- text, file-list text, previews, and OCR text are decrypted into process memory;
+- text, notes, previews, and OCR text are decrypted into process memory;
 - case-normalized trigrams map to shared in-memory clip identifiers;
 - exact substring verification removes trigram false positives;
 - SQLite remains authoritative for deletion state, folder filters, pin order,
