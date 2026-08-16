@@ -25,6 +25,12 @@ impl<T, E> ForgetClipLookup<T, E> {
 
     /// Transient query failures must put the in-memory marker back. A genuine
     /// missing row must not, or every later clear would keep hunting a gone clip.
+    ///
+    /// Only the unit tests below call this directly; `clipboard.rs` matches on
+    /// the enum variant itself and restores the marker inline in the `Failed`
+    /// arm. Kept `pub(crate)` as the documented, tested source of truth for
+    /// that policy rather than deleting it.
+    #[allow(dead_code)]
     pub(crate) fn restore_retry_marker(&self) -> bool {
         matches!(self, Self::Failed(_))
     }

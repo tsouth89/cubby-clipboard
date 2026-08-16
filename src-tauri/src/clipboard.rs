@@ -2362,7 +2362,7 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
     // dropped the retry marker on a transient lock, so a later clear could
     // not forget the password that was still in history (SBS-831).
     let lookup = ForgetClipLookup::from_query(
-        sqlx::query_as(
+        sqlx::query_as::<_, (i64, i64)>(
             r#"
             SELECT is_pinned, is_deleted
             FROM clips
