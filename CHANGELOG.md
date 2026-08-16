@@ -5,6 +5,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 ## Unreleased
 
 ### Security
+- History source-app filter values are no longer written to the persistent Info log (SBS-773)
 - Pin third-party GitHub Actions in privileged release and Store workflows to immutable commit SHAs, and reject new mutable pins in CI
 
 ### Fixed

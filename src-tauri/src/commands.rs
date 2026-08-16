@@ -850,6 +850,38 @@ pub async fn get_clips(
     .await
 }
 
+/// Release builds persist Info logs under LogDir. The History source-app
+/// filter is a record of which applications the user copied from, and the
+/// value itself is user-controlled, so Info must not print it. SBS-773.
+///
+/// Three states: not asked is not blank, and neither is a real selection.
+fn source_app_filter_log_state(source_app: Option<&str>) -> &'static str {
+    match source_app {
+        None => "none",
+        Some(app) if app.trim().is_empty() => "blank",
+        Some(_) => "set",
+    }
+}
+
+fn get_clips_request_log(
+    filter_id: Option<&str>,
+    preview_only: bool,
+    content_filter: Option<&str>,
+    date_from: Option<&str>,
+    date_to: Option<&str>,
+    source_app: Option<&str>,
+) -> String {
+    format!(
+        "get_clips called with filter_id: {:?}, preview_only: {}, content_filter: {:?}, date: {:?}..{:?}, source_app: {}",
+        filter_id,
+        preview_only,
+        content_filter,
+        date_from,
+        date_to,
+        source_app_filter_log_state(source_app)
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn get_clips_in_database(
     filter_id: Option<String>,
@@ -867,13 +899,22 @@ async fn get_clips_in_database(
     let started = Instant::now();
 
     log::info!(
-        "get_clips called with filter_id: {:?}, preview_only: {}, content_filter: {:?}, date: {:?}..{:?}, source_app: {:?}",
-        filter_id,
-        preview_only,
-        content_filter,
-        date_from,
-        date_to,
-        source_app
+        "{}",
+        get_clips_request_log(
+            filter_id.as_deref(),
+            preview_only,
+            content_filter.as_deref(),
+            date_from.as_deref(),
+            date_to.as_deref(),
+            source_app.as_deref(),
+        )
+    );
+    // Debug-only structured fields: state and length, never the raw value.
+    // Release LogDir is Info, so this does not persist. SBS-773.
+    log::debug!(
+        "get_clips source_app filter state={} byte_len={}",
+        source_app_filter_log_state(source_app.as_deref()),
+        source_app.as_deref().map(str::len).unwrap_or(0)
     );
 
     let folder_id = match filter_id.as_deref() {
@@ -2849,12 +2890,13 @@ mod tests {
     use super::{
         build_ocr_highlights, build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore,
         delete_folder_in_pool, directory_size_bytes, enforce_retention_in_pool,
-        get_clip_details_in_database, get_clips_in_database, load_recognized_text,
-        migrate_clip_format_model, migrate_encrypted_storage, ocr_text_layout,
-        remove_clip_image_files, remove_duplicate_clips_in_database, restore_hash_material,
-        search_clips_in_database, set_clip_notes_in_database, set_clip_ocr_text_in_database,
-        toggle_clip_hidden_in_pool, toggle_clip_pin_in_pool, update_clip_text_in_database,
-        ClipboardContent, NOTE_CHAR_LIMIT, OCR_SNIPPET_CHAR_LIMIT,
+        get_clip_details_in_database, get_clips_in_database, get_clips_request_log,
+        load_recognized_text, migrate_clip_format_model, migrate_encrypted_storage,
+        ocr_text_layout, remove_clip_image_files, remove_duplicate_clips_in_database,
+        restore_hash_material, search_clips_in_database, set_clip_notes_in_database,
+        set_clip_ocr_text_in_database, source_app_filter_log_state, toggle_clip_hidden_in_pool,
+        toggle_clip_pin_in_pool, update_clip_text_in_database, ClipboardContent, NOTE_CHAR_LIMIT,
+        OCR_SNIPPET_CHAR_LIMIT,
     };
     use crate::clipboard::CapturedFormat;
     use crate::database::Database;
@@ -3748,6 +3790,50 @@ mod tests {
         .unwrap();
         assert_eq!(page_two.len(), 1);
         assert_eq!(page_two[0].id, "day-one");
+    }
+
+    /// Pins SBS-773: the Info request log that release builds persist must
+    /// not contain the selected source-app filter value.
+    #[test]
+    fn get_clips_request_log_omits_raw_source_app_filter() {
+        let marker = "UniqueBankingApp.exe";
+        let line = get_clips_request_log(
+            Some("12"),
+            true,
+            Some("text"),
+            Some("2026-03-01 00:00:00"),
+            Some("2026-03-02 00:00:00"),
+            Some(marker),
+        );
+        assert!(
+            !line.contains(marker),
+            "release Info log must not contain the selected source app: {line}"
+        );
+        assert!(
+            line.contains("source_app: set"),
+            "a real selection should be categorical, got {line}"
+        );
+        assert!(
+            line.contains("filter_id: Some(\"12\")"),
+            "folder id is not source-app metadata and stays in the line: {line}"
+        );
+    }
+
+    /// Pins SBS-773: not asked, blank, and set stay distinct so a missing
+    /// filter cannot be read as "the user chose an empty app".
+    #[test]
+    fn source_app_filter_log_state_keeps_none_blank_and_set_apart() {
+        assert_eq!(source_app_filter_log_state(None), "none");
+        assert_eq!(source_app_filter_log_state(Some("")), "blank");
+        assert_eq!(source_app_filter_log_state(Some("   ")), "blank");
+        assert_eq!(source_app_filter_log_state(Some("code.exe")), "set");
+        assert!(
+            get_clips_request_log(None, false, None, None, None, None).contains("source_app: none")
+        );
+        assert!(
+            get_clips_request_log(None, false, None, None, None, Some(""))
+                .contains("source_app: blank")
+        );
     }
 
     #[tokio::test]
