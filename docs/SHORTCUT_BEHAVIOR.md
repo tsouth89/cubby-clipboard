@@ -18,9 +18,17 @@ process.
 The helper is a second instance of Cubby's own executable launched before the
 normal application startup path. No separate runtime or remapping application is
 required. The helper intercepts only an exact physical `Win+V` chord and signals
-the main Cubby process through a loopback-only activation channel. It ignores its
-own injected events, restores the physical Windows-key state before unrelated
-input continues, and exits independently if Cubby disables replacement mode.
+the main Cubby process through a loopback-only activation channel. The channel
+accepts only a per-session token that Cubby hands the helper it spawned, from a
+loopback source, and only at a human-scale rate. A bare `activate` datagram is
+ignored. The token travels on the helper command line, so a same-user process
+that can read Cubby's arguments can still forge an activation; that is weaker
+than an attacker who can decrypt `storage.key`, but it is no longer an
+unauthenticated display path.
+
+The helper ignores its own injected events, restores the physical Windows-key
+state before unrelated input continues, and exits independently if Cubby
+disables replacement mode.
 
 Cubby monitors the helper and restarts it after an unexpected exit. The helper
 also monitors its parent process, so a Cubby crash cannot leave the hook behind.

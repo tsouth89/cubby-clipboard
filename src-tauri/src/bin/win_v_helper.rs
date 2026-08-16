@@ -1,5 +1,6 @@
 #[cfg(target_os = "windows")]
 mod windows_helper {
+    use cubby::win_v_activation;
     use serde::Serialize;
     use std::env;
     use std::net::UdpSocket;
@@ -31,6 +32,7 @@ mod windows_helper {
     static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
     static ACCEPT_TEST_INPUT: AtomicBool = AtomicBool::new(false);
     static ACTIVATION_PORT: AtomicU16 = AtomicU16::new(0);
+    static ACTIVATION_TOKEN: OnceLock<String> = OnceLock::new();
     /// The user's configured Cubby hotkey, parsed into a physical chord. When a
     /// remote client is focused this chord is caught here, below the remote
     /// client's key forwarding, so the same hotkey that opens Cubby locally also
@@ -387,12 +389,19 @@ mod windows_helper {
                 .map_err(|error| format!("shortcut fallback injection failed: {error:?}"));
         }
 
+        let token = ACTIVATION_TOKEN.get().ok_or_else(|| {
+            "activation token missing; refusing to send an unauthenticated datagram".to_string()
+        })?;
+        let payload = win_v_activation::encode_activate(token).ok_or_else(|| {
+            "activation token is malformed; refusing to send an unauthenticated datagram"
+                .to_string()
+        })?;
         let socket = UdpSocket::bind(("127.0.0.1", 0))
             .map_err(|error| format!("could not create activation socket: {error}"))?;
         let sent = socket
-            .send_to(b"activate", ("127.0.0.1", activation_port))
+            .send_to(&payload, ("127.0.0.1", activation_port))
             .map_err(|error| format!("could not signal Cubby: {error}"))?;
-        if sent != b"activate".len() {
+        if sent != payload.len() {
             return Err(format!("activation message was truncated to {sent} bytes"));
         }
         Ok(())
@@ -529,10 +538,15 @@ mod windows_helper {
                     return LRESULT(1);
                 }
                 match activate_cubby(None, false) {
-                    Ok(()) => emit("configured_hotkey", Some("activated Cubby directly")),
-                    Err(error) => emit("activation_failed", Some(&error)),
+                    Ok(()) => {
+                        emit("configured_hotkey", Some("activated Cubby directly"));
+                        return LRESULT(1);
+                    }
+                    Err(error) => {
+                        emit("activation_failed", Some(&error));
+                        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+                    }
                 }
-                return LRESULT(1);
             }
         }
 
@@ -611,6 +625,29 @@ mod windows_helper {
             .and_then(|pair| pair[1].parse::<u16>().ok())
     }
 
+    fn parse_activation_token() -> Option<String> {
+        let args: Vec<String> = env::args().collect();
+        win_v_activation::token_from_args(args.iter().map(String::as_str))
+    }
+
+    /// UDP activation needs a well-formed token before the hook is installed.
+    /// Otherwise Win+V is swallowed with nowhere authenticated to send it.
+    /// Port 0 is the shortcut-injection fallback and does not use the token.
+    fn activation_token_for_port(
+        port: u16,
+        token: Option<String>,
+    ) -> Result<Option<String>, String> {
+        if port == 0 {
+            return Ok(None);
+        }
+        token
+            .ok_or_else(|| {
+                "Win+V helper requires a well-formed --activation-token when --activation-port is set"
+                    .to_string()
+            })
+            .map(Some)
+    }
+
     fn parse_activation_hotkey() -> Option<TriggerChord> {
         let args: Vec<String> = env::args().collect();
         args.windows(2)
@@ -642,7 +679,11 @@ mod windows_helper {
     pub fn run() -> Result<(), String> {
         let timeout_seconds = parse_timeout_seconds();
         let parent_pid = parse_parent_pid();
-        ACTIVATION_PORT.store(parse_activation_port().unwrap_or(0), Ordering::SeqCst);
+        let activation_port = parse_activation_port().unwrap_or(0);
+        ACTIVATION_PORT.store(activation_port, Ordering::SeqCst);
+        if let Some(token) = activation_token_for_port(activation_port, parse_activation_token())? {
+            let _ = ACTIVATION_TOKEN.set(token);
+        }
         ACCEPT_TEST_INPUT.store(
             env::args().any(|arg| arg == "--accept-injected-test-events"),
             Ordering::SeqCst,
@@ -699,7 +740,8 @@ mod windows_helper {
     #[cfg(test)]
     mod tests {
         use super::{
-            is_supported_remote_process, parse_hotkey, Decision, RemapState, TriggerChord,
+            activation_token_for_port, is_supported_remote_process, parse_hotkey, Decision,
+            RemapState, TriggerChord,
         };
         use windows::Win32::UI::Input::KeyboardAndMouse::{VK_E, VK_LWIN, VK_V};
 
@@ -815,6 +857,26 @@ mod windows_helper {
             assert_eq!(parse_hotkey("Ctrl+Shift+A+B"), None); // two main keys
             assert_eq!(parse_hotkey("Ctrl+Nonsense"), None); // unknown key
             assert_eq!(parse_hotkey(""), None);
+        }
+
+        #[test]
+        fn udp_port_without_a_token_fails_before_the_hook_is_installed() {
+            let err = activation_token_for_port(9_001, None).expect_err("missing token");
+            assert!(
+                err.contains("--activation-token"),
+                "startup must name the missing flag so a manual launch is diagnosable: {err}"
+            );
+        }
+
+        #[test]
+        fn udp_port_with_a_token_keeps_it() {
+            let token = activation_token_for_port(9_001, Some("abc".into())).expect("token");
+            assert_eq!(token.as_deref(), Some("abc"));
+        }
+
+        #[test]
+        fn shortcut_fallback_does_not_require_a_token() {
+            assert_eq!(activation_token_for_port(0, None).expect("port 0"), None);
         }
 
         #[test]

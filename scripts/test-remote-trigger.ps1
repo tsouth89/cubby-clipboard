@@ -52,6 +52,9 @@ $backquote = [byte]0xC0
 $keyUp = 0x0002
 $testMarker = [UIntPtr]0x43554254
 $activationHotkey = "Ctrl+Backquote"
+$tokenBytes = New-Object byte[] 16
+[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($tokenBytes)
+$activationToken = -join ($tokenBytes | ForEach-Object { $_.ToString("x2") })
 $listener = [System.Net.Sockets.UdpClient]::new(0)
 $listener.Client.ReceiveTimeout = 3000
 $activationPort = ([System.Net.IPEndPoint]$listener.Client.LocalEndPoint).Port
@@ -90,6 +93,7 @@ try {
             "--timeout-seconds", $TimeoutSeconds,
             "--accept-injected-test-events",
             "--activation-port", $activationPort,
+            "--activation-token", $activationToken,
             "--activation-hotkey", $activationHotkey
         ) `
         -WindowStyle Hidden `
@@ -116,8 +120,8 @@ try {
     $remoteEndpoint = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
     $message = $listener.Receive([ref]$remoteEndpoint)
     $messageText = [System.Text.Encoding]::UTF8.GetString($message)
-    if ($messageText -ne "activate") {
-        throw "Expected direct activation message, received '$messageText'"
+    if ($messageText -ne "activate $activationToken") {
+        throw "Expected authorized activation message, received '$messageText'"
     }
 
     Start-Sleep -Milliseconds 150

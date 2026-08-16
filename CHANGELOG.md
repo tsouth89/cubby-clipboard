@@ -5,6 +5,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 ## Unreleased
 
 ### Security
+- The Win+V helper no longer opens the flyout on a bare localhost UDP `activate` datagram; the channel now requires a per-session token, a loopback source, and a rate limit (SBS-809)
 - History source-app filter values are no longer written to the persistent Info log (SBS-773)
 - Pin third-party GitHub Actions in privileged release and Store workflows to immutable commit SHAs, and reject new mutable pins in CI
 

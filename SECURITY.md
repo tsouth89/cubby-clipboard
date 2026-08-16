@@ -18,6 +18,15 @@ Cubby release candidates must pass the JavaScript production dependency audit, t
 - Next review: 2026-10-19 (or immediately if SQLx or the lockfile graph changes)
 
 
+## Win+V helper channel
+
+When Win+V replacement is enabled, the helper signals the main process over
+loopback UDP. The datagram must carry a per-session token Cubby generated for
+that helper, arrive from a loopback address, and stay under a short rate limit.
+A packet whose body is only `activate` is ignored. The token is passed as a
+helper argument, so a same-user process that can read Cubby's command line can
+still forge an activation.
+
 ## Privileged GitHub Actions pins
 
 Third-party actions in privileged release, Store, and signing workflows must be pinned to a 40-character commit SHA with a version comment. See docs/RELEASE_CHECKLIST.md for reviewing Dependabot action pin updates.
