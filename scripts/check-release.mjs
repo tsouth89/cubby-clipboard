@@ -351,6 +351,39 @@ if (countWebviewKind(libSource) !== countWebviewKind(logTargetArms.get('Webview'
   );
 }
 
+// The mapper being clean is still not enough. A release build compiles
+// `to_plugin_log_target(LogTarget::Webview)`, so the *call site* could hand it
+// an extra variant -- `.chain(std::iter::once(LogTarget::Webview))` before the
+// `.map`, or a second `.targets()` -- and every check above would stay green
+// while fern installed the Webview target anyway. Pin the argument exactly, and
+// refuse `LogTarget::Webview` anywhere in lib.rs outside the mapper's own arm.
+const countLogTargetWebview = (source) => source.split('LogTarget::Webview').length - 1;
+if (countLogTargetWebview(libSource) !== countLogTargetWebview(pluginTargetMapper)) {
+  throw new Error(
+    'lib.rs must only name LogTarget::Webview inside to_plugin_log_target(); the log_builder call site must not select it',
+  );
+}
+
+const targetsCallCount = libSource.split('.targets(').length - 1;
+if (targetsCallCount !== 1) {
+  throw new Error(
+    `lib.rs must call log_builder.targets() exactly once, found ${targetsCallCount}`,
+  );
+}
+const targetsArgument = libSource.match(/\.targets\(([\s\S]*?)\n\s*\);/)?.[1];
+if (targetsArgument === undefined) {
+  throw new Error('Could not find the log_builder.targets(...) call in lib.rs');
+}
+const expectedTargetsArgument =
+  'log_targets::log_targets(cfg!(debug_assertions)).iter().copied().map(to_plugin_log_target)';
+// Whitespace-insensitive, and a trailing comma from rustfmt is not a combinator.
+const normalizedTargetsArgument = targetsArgument.replace(/\s+/g, '').replace(/,$/, '');
+if (normalizedTargetsArgument !== expectedTargetsArgument) {
+  throw new Error(
+    `log_builder.targets() must be exactly \`${expectedTargetsArgument}\`, with no extra combinators that could add a destination`,
+  );
+}
+
 const secretGates = [
   [secretsSource, 'classify_secret'],
   [secretsSource, 'DEFAULT_SENSITIVE_APP_EXES'],
