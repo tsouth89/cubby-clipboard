@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 /// same-user process that can read Cubby's arguments can still forge a
 /// packet. That is a weaker attacker than one who can decrypt `storage.key`,
 /// but it is no longer "any datagram whose body is activate".
-
 pub const TOKEN_BYTE_LEN: usize = 16;
 pub const TOKEN_HEX_LEN: usize = TOKEN_BYTE_LEN * 2;
 pub const ACTIVATE_PREFIX: &[u8] = b"activate ";
