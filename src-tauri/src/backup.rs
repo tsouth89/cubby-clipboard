@@ -34,6 +34,8 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const MAGIC: &[u8; 8] = b"CUBBAK01";
@@ -93,6 +95,7 @@ pub struct BackupImportResult {
 
 /// One row of the export query: clip fields plus the joined folder name.
 type ExportRow = (
+    String,                        // uuid (diagnostics only; never clip contents)
     String,                        // clip_type
     Vec<u8>,                       // content (encrypted)
     String,                        // text_preview (encrypted)
@@ -106,6 +109,83 @@ type ExportRow = (
     chrono::DateTime<chrono::Utc>, // created_at
     Option<String>,                // folder name
 );
+
+/// How many failing clip ids the refusal message names. A database-wide key
+/// problem fails every row, and a message with thousands of ids in it is a
+/// message nobody can read.
+const MAX_REPORTED_FAILED_CLIPS: usize = 5;
+
+/// Counts of clips that could not be fully decrypted, grouped by field, plus
+/// the ids of the first few offending rows.
+///
+/// Field names are storage-column names and the ids are the `clips.uuid`
+/// diagnostics identifier — never clipboard contents. SBS-772.
+#[derive(Debug, Default)]
+struct ExportDecryptFailures {
+    clips: usize,
+    fields: BTreeMap<&'static str, usize>,
+    uuids: Vec<String>,
+}
+
+impl ExportDecryptFailures {
+    fn record(&mut self, uuid: &str, fields: &[&'static str]) {
+        if fields.is_empty() {
+            return;
+        }
+        self.clips += 1;
+        if self.uuids.len() < MAX_REPORTED_FAILED_CLIPS {
+            self.uuids.push(uuid.to_string());
+        }
+        for field in fields {
+            *self.fields.entry(*field).or_insert(0) += 1;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.clips == 0
+    }
+
+    /// Names the offending rows. Without an id the user sees the same list of
+    /// clips as before — `decrypt_clip_fields` drops an unreadable note rather
+    /// than hiding the clip — and has no way to tell which one blocks the
+    /// backup, let alone fix or delete it.
+    fn describe(&self) -> String {
+        let details = self
+            .fields
+            .iter()
+            .map(|(field, count)| format!("{count} {}", export_field_label(field)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let clip_word = if self.clips == 1 { "clip" } else { "clips" };
+        let id_word = if self.clips == 1 {
+            "Affected clip id"
+        } else {
+            "Affected clip ids"
+        };
+        let mut ids = self.uuids.join(", ");
+        let unlisted = self.clips.saturating_sub(self.uuids.len());
+        if unlisted > 0 {
+            ids.push_str(&format!(", and {unlisted} more"));
+        }
+        format!(
+            "Could not write a complete backup: {} {clip_word} could not be fully decrypted ({details}). {id_word}: {ids}. The destination file was left unchanged.",
+            self.clips
+        )
+    }
+}
+
+fn export_field_label(field: &str) -> &'static str {
+    match field {
+        "content" => "unreadable clip payload",
+        "text_preview" => "unreadable preview",
+        "notes" => "unreadable notes",
+        "source_app" => "unreadable source app",
+        "source_icon" => "unreadable source icon",
+        "metadata" => "unreadable rich format",
+        "ocr_text" => "unreadable recognized text",
+        _ => "unreadable field",
+    }
+}
 
 /// Argon2id parameters. The defaults are the RustCrypto recommendation; they
 /// are pinned here because changing them silently would make every existing
@@ -132,6 +212,11 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_LEN], String> {
 /// are skipped, and whatever retention has already pruned is simply not there.
 /// Pinned state travels with each clip.
 ///
+/// A successful export is a complete export. Any live clip field that cannot
+/// be fully decrypted fails the whole operation (SBS-772): the destination
+/// file is left unchanged and any temporary output is removed. Partial export
+/// is not offered from this path.
+///
 /// Full-resolution image blobs are deliberately **not** included. They live in
 /// separate files that would multiply the bundle's size, and an imported image
 /// lands in the same "thumbnail and recognized text kept, full image gone"
@@ -140,7 +225,8 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_LEN], String> {
 pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Result<usize, String> {
     let rows: Vec<ExportRow> = sqlx::query_as(
         r#"
-        SELECT clips.clip_type,
+        SELECT clips.uuid,
+               clips.clip_type,
                clips.content,
                clips.text_preview,
                clips.is_pinned,
@@ -163,7 +249,9 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
     .map_err(|e| format!("Could not read the clip history: {e}"))?;
 
     let mut clips = Vec::with_capacity(rows.len());
+    let mut failures = ExportDecryptFailures::default();
     for (
+        uuid,
         clip_type,
         content,
         text_preview,
@@ -178,38 +266,34 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
         folder,
     ) in rows
     {
-        // Decrypt into memory only. Anything unreadable is skipped rather than
-        // failing the whole export — one bad row should not cost the backup.
-        let content = match db.crypto.decrypt(&content) {
-            Ok(value) => value,
-            Err(error) => {
-                log::warn!("BACKUP: Skipping a clip whose content could not be read: {error}");
-                continue;
-            }
-        };
-        let text_preview = db.crypto.decrypt_text(&text_preview).unwrap_or_default();
-        let decrypt_optional = |value: Option<String>| {
-            value.and_then(|mut inner| {
-                let mut holder = Some(std::mem::take(&mut inner));
-                db.crypto.decrypt_optional_text(&mut holder).ok()?;
-                holder
-            })
-        };
-
-        clips.push(BackupClip {
+        // Decrypt into memory only. A backup that omits an unreadable field
+        // still looks successful to the user, so one bad field fails the export
+        // rather than writing an incomplete bundle. SBS-772.
+        match decrypt_export_clip(
+            &db.crypto,
+            &uuid,
             clip_type,
-            content_b64: BASE64.encode(&content),
+            content,
             text_preview,
             is_pinned,
             is_hidden,
-            notes: decrypt_optional(notes),
-            source_app: decrypt_optional(source_app),
-            source_icon: decrypt_optional(source_icon),
-            metadata: decrypt_optional(metadata),
-            ocr_text: decrypt_optional(ocr_text),
-            created_at: created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+            notes,
+            source_app,
+            source_icon,
+            metadata,
+            ocr_text,
+            created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
             folder,
-        });
+        ) {
+            Ok(clip) => clips.push(clip),
+            Err(fields) => failures.record(&uuid, &fields),
+        }
+    }
+
+    if !failures.is_empty() {
+        let message = failures.describe();
+        log::error!("BACKUP: {message}");
+        return Err(message);
     }
 
     let bundle = BackupBundle {
@@ -245,9 +329,232 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
     file.extend_from_slice(&nonce);
     file.extend_from_slice(&ciphertext);
 
-    std::fs::write(path, &file).map_err(|e| format!("Could not save the backup: {e}"))?;
+    persist_backup_file(path, &file)?;
     log::info!("BACKUP: Exported {count} clips to an encrypted bundle");
     Ok(count)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decrypt_export_clip(
+    crypto: &crate::crypto::CryptoManager,
+    uuid: &str,
+    clip_type: String,
+    content: Vec<u8>,
+    text_preview: String,
+    is_pinned: bool,
+    is_hidden: bool,
+    notes: Option<String>,
+    source_app: Option<String>,
+    source_icon: Option<String>,
+    metadata: Option<String>,
+    ocr_text: Option<String>,
+    created_at: String,
+    folder: Option<String>,
+) -> Result<BackupClip, Vec<&'static str>> {
+    let mut failed_fields = Vec::new();
+
+    let content = match crypto.decrypt(&content) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            log::warn!("BACKUP: clip {uuid} content could not be decrypted: {error}");
+            failed_fields.push("content");
+            None
+        }
+    };
+    let text_preview = match crypto.decrypt_text(&text_preview) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            log::warn!("BACKUP: clip {uuid} text_preview could not be decrypted: {error}");
+            failed_fields.push("text_preview");
+            None
+        }
+    };
+
+    let notes = decrypt_optional_export_field(crypto, uuid, notes, "notes", &mut failed_fields);
+    let source_app =
+        decrypt_optional_export_field(crypto, uuid, source_app, "source_app", &mut failed_fields);
+    let source_icon =
+        decrypt_optional_export_field(crypto, uuid, source_icon, "source_icon", &mut failed_fields);
+    let metadata =
+        decrypt_optional_export_field(crypto, uuid, metadata, "metadata", &mut failed_fields);
+    let ocr_text =
+        decrypt_optional_export_field(crypto, uuid, ocr_text, "ocr_text", &mut failed_fields);
+
+    if !failed_fields.is_empty() {
+        return Err(failed_fields);
+    }
+
+    let (Some(content), Some(text_preview)) = (content, text_preview) else {
+        return Err(vec!["content"]);
+    };
+
+    Ok(BackupClip {
+        clip_type,
+        content_b64: BASE64.encode(&content),
+        text_preview,
+        is_pinned,
+        is_hidden,
+        notes,
+        source_app,
+        source_icon,
+        metadata,
+        ocr_text,
+        created_at,
+        folder,
+    })
+}
+
+fn decrypt_optional_export_field(
+    crypto: &crate::crypto::CryptoManager,
+    uuid: &str,
+    value: Option<String>,
+    field: &'static str,
+    failed_fields: &mut Vec<&'static str>,
+) -> Option<String> {
+    let inner = value?;
+    let mut holder = Some(inner);
+    match crypto.decrypt_optional_text(&mut holder) {
+        Ok(()) => holder,
+        Err(error) => {
+            log::warn!("BACKUP: clip {uuid} {field} could not be decrypted: {error}");
+            failed_fields.push(field);
+            None
+        }
+    }
+}
+
+/// Write `bytes` beside `path`, then replace the destination so a failed
+/// persist cannot leave a truncated backup in the user's chosen file.
+fn persist_backup_file(path: &str, bytes: &[u8]) -> Result<(), String> {
+    let dest = Path::new(path);
+    if dest.file_name().is_none() {
+        return Err("Could not save the backup: the destination path is not a file".to_string());
+    }
+    let temp = backup_temp_path(dest);
+
+    if let Err(error) = std::fs::write(&temp, bytes) {
+        remove_backup_temp(&temp);
+        return Err(format!("Could not save the backup: {error}"));
+    }
+
+    let Err(error) = replace_exported_backup(&temp, dest) else {
+        return Ok(());
+    };
+
+    // On exFAT/FAT — a realistic place to save a `.cubbybak` — replacing is
+    // delete-the-target-then-rename rather than the atomic rename-over NTFS
+    // gives us. A failure after the destination entry is gone leaves the temp
+    // holding the only copy of the bundle, so deleting it here would destroy
+    // both the old backup and the new one. Try to put it in place instead.
+    if !dest.exists() && temp.exists() && std::fs::rename(&temp, dest).is_ok() {
+        log::warn!(
+            "BACKUP: replacing the destination failed ({error}); the new bundle was renamed into place instead"
+        );
+        return Ok(());
+    }
+
+    remove_backup_temp(&temp);
+    Err(format!("Could not save the backup: {error}"))
+}
+
+/// Best-effort removal of the sibling temp, retried briefly.
+///
+/// The temp holds bundle bytes, so leaving one behind leaks history beside the
+/// destination. A virus scanner that is still reading the file makes the first
+/// delete fail with a sharing violation and succeed a moment later.
+fn remove_backup_temp(temp: &Path) {
+    const ATTEMPTS: u32 = 5;
+    for attempt in 1..=ATTEMPTS {
+        match std::fs::remove_file(temp) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) if attempt == ATTEMPTS => {
+                log::error!(
+                    "BACKUP: could not remove the temporary export file {}: {error}",
+                    temp.display()
+                );
+                return;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20 * u64::from(attempt))),
+        }
+    }
+}
+
+/// A short sibling name. It deliberately does **not** embed the destination
+/// file name: `MoveFileExW` is bounded by `MAX_PATH` on the source as well as
+/// the destination, and a name that repeated a long destination pushed a legal
+/// save-dialog path over the limit.
+fn backup_temp_path(dest: &Path) -> PathBuf {
+    let temp_name = format!(".{}.{}.tmp", std::process::id(), Uuid::new_v4());
+    match dest.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(temp_name),
+        _ => PathBuf::from(temp_name),
+    }
+}
+
+/// `\\?\`-prefixed wide form of `path`, NUL terminated.
+///
+/// `MoveFileExW` fails above `MAX_PATH` unless the path is verbatim, while
+/// `std::fs` prefixes long paths itself. Without this, a destination that
+/// `std::fs::write` would have accepted is refused here.
+#[cfg(target_os = "windows")]
+fn verbatim_wide(path: &Path) -> Result<Vec<u16>, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Component, Prefix};
+
+    // `\\?\` requires a fully-qualified path with no `.` or `..` components.
+    let absolute = std::path::absolute(path)
+        .map_err(|error| format!("could not resolve {}: {error}", path.display()))?;
+    let raw = absolute
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+
+    let prefix = match absolute.components().next() {
+        Some(Component::Prefix(prefix)) => prefix.kind(),
+        // No prefix at all is not something GetFullPathNameW produces; pass it
+        // through rather than inventing a shape for it.
+        _ => return Ok(raw),
+    };
+    // Already verbatim, and `\\.\` device paths must not be rewritten.
+    if prefix.is_verbatim() || matches!(prefix, Prefix::DeviceNS(_)) {
+        return Ok(raw);
+    }
+    // `\\server\share\...` becomes `\\?\UNC\server\share\...`.
+    if matches!(prefix, Prefix::UNC(..)) {
+        let mut wide = r"\\?\UNC".encode_utf16().collect::<Vec<_>>();
+        wide.extend_from_slice(&raw[1..]);
+        return Ok(wide);
+    }
+    let mut wide = r"\\?\".encode_utf16().collect::<Vec<_>>();
+    wide.extend_from_slice(&raw);
+    Ok(wide)
+}
+
+#[cfg(target_os = "windows")]
+fn replace_exported_backup(source: &Path, destination: &Path) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source_wide = verbatim_wide(source)?;
+    let destination_wide = verbatim_wide(destination)?;
+
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source_wide.as_ptr()),
+            PCWSTR(destination_wide.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_exported_backup(source: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::rename(source, destination).map_err(|error| error.to_string())
 }
 
 /// Read a bundle back in, skipping anything already present.
@@ -452,8 +759,13 @@ async fn ensure_folder(db: &Database, name: &str) -> Result<i64, String> {
 mod tests {
     use super::*;
 
+    /// Every export gets its own directory. The sibling temp no longer embeds
+    /// the destination file name, so "did this export leave a temp behind?" is
+    /// only answerable by looking at a directory nothing else writes to.
     fn temp_path(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("cubby-backup-{label}-{}.cubbybak", Uuid::new_v4()))
+        let dir = std::env::temp_dir().join(format!("cubby-backup-{label}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("the test directory should be creatable");
+        dir.join("history.cubbybak")
     }
 
     async fn test_database() -> Database {
@@ -780,5 +1092,352 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("does not look like a Cubby backup"));
         std::fs::remove_file(&path).ok();
+    }
+
+    fn clip_hash(db: &Database, text: &str) -> String {
+        let material = crate::clipboard::build_clip_hash_material(
+            "text",
+            text.as_bytes(),
+            std::iter::empty::<(&str, &[u8])>(),
+        );
+        db.crypto.keyed_hash(&material)
+    }
+
+    async fn insert_rich_clip(db: &Database, text: &str) {
+        insert_clip(db, text, false, None).await;
+        let affected = sqlx::query(
+            r#"UPDATE clips SET
+                notes = ?,
+                source_app = ?,
+                source_icon = ?,
+                metadata = ?,
+                ocr_text = ?
+               WHERE content_hash = ?"#,
+        )
+        .bind(
+            db.crypto
+                .encrypt_optional_text(Some("keep this note"))
+                .unwrap(),
+        )
+        .bind(db.crypto.encrypt_optional_text(Some("Notepad")).unwrap())
+        .bind(db.crypto.encrypt_optional_text(Some("icon-bytes")).unwrap())
+        .bind(
+            db.crypto
+                .encrypt_optional_text(Some("<html>rich</html>"))
+                .unwrap(),
+        )
+        .bind(
+            db.crypto
+                .encrypt_optional_text(Some("recognized words"))
+                .unwrap(),
+        )
+        .bind(clip_hash(db, text))
+        .execute(&db.pool)
+        .await
+        .unwrap()
+        .rows_affected();
+        assert_eq!(affected, 1, "the rich clip should exist");
+    }
+
+    async fn corrupt_content(db: &Database, text: &str) {
+        let affected = sqlx::query("UPDATE clips SET content = ? WHERE content_hash = ?")
+            .bind(b"not-an-encrypted-payload".to_vec())
+            .bind(clip_hash(db, text))
+            .execute(&db.pool)
+            .await
+            .unwrap()
+            .rows_affected();
+        assert_eq!(affected, 1, "the clip to corrupt should exist");
+    }
+
+    async fn corrupt_text_column(db: &Database, text: &str, column: &str) {
+        let garbage = "CUB1:not-valid-ciphertext";
+        let query = match column {
+            "text_preview" => "UPDATE clips SET text_preview = ? WHERE content_hash = ?",
+            "notes" => "UPDATE clips SET notes = ? WHERE content_hash = ?",
+            "source_app" => "UPDATE clips SET source_app = ? WHERE content_hash = ?",
+            "source_icon" => "UPDATE clips SET source_icon = ? WHERE content_hash = ?",
+            "metadata" => "UPDATE clips SET metadata = ? WHERE content_hash = ?",
+            "ocr_text" => "UPDATE clips SET ocr_text = ? WHERE content_hash = ?",
+            other => panic!("unknown export column {other}"),
+        };
+        let affected = sqlx::query(query)
+            .bind(garbage)
+            .bind(clip_hash(db, text))
+            .execute(&db.pool)
+            .await
+            .unwrap()
+            .rows_affected();
+        assert_eq!(affected, 1, "the clip to corrupt should exist");
+    }
+
+    fn leftover_backup_temps(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with('.') && name.ends_with(".tmp"))
+            })
+            .collect()
+    }
+
+    async fn uuid_of(db: &Database, text: &str) -> String {
+        sqlx::query_scalar("SELECT uuid FROM clips WHERE content_hash = ?")
+            .bind(clip_hash(db, text))
+            .fetch_one(&db.pool)
+            .await
+            .expect("the clip should exist")
+    }
+
+    /// SBS-772: a clip whose payload cannot be decrypted must refuse the export
+    /// rather than write a bundle that looks complete while omitting that clip.
+    #[tokio::test]
+    async fn export_refuses_a_corrupt_clip_payload_and_does_not_write_the_destination() {
+        let source = test_database().await;
+        insert_clip(&source, "sbs-772-payload-secret", false, None).await;
+        insert_clip(&source, "a readable neighbor", false, None).await;
+        corrupt_content(&source, "sbs-772-payload-secret").await;
+
+        let path = temp_path("corrupt-payload");
+        let error = export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .expect_err("a corrupt payload must fail the export");
+
+        assert!(
+            error.contains("could not be fully decrypted"),
+            "the error should say the backup is incomplete: {error}"
+        );
+        assert!(
+            error.contains("unreadable clip payload"),
+            "the error should name the payload field type: {error}"
+        );
+        assert!(
+            !error.contains("sbs-772-payload-secret"),
+            "the error must not expose clipboard contents: {error}"
+        );
+        assert!(
+            !path.exists(),
+            "a refused export must not create the destination file"
+        );
+        assert!(
+            leftover_backup_temps(path.parent().unwrap()).is_empty(),
+            "a refused export must not leave temporary output"
+        );
+    }
+
+    /// SBS-772: optional rich-format fields are still history. Omitting them
+    /// and succeeding would let the user believe the backup is complete.
+    #[tokio::test]
+    async fn export_refuses_a_corrupt_optional_rich_format_field() {
+        let source = test_database().await;
+        insert_rich_clip(&source, "sbs-772-rich-secret").await;
+        corrupt_text_column(&source, "sbs-772-rich-secret", "metadata").await;
+
+        let path = temp_path("corrupt-rich");
+        let error = export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .expect_err("a corrupt rich-format field must fail the export");
+
+        assert!(
+            error.contains("could not be fully decrypted"),
+            "the error should say the backup is incomplete: {error}"
+        );
+        assert!(
+            error.contains("unreadable rich format"),
+            "the error should name the rich-format field type: {error}"
+        );
+        assert!(
+            !error.contains("sbs-772-rich-secret") && !error.contains("<html>rich</html>"),
+            "the error must not expose clipboard contents: {error}"
+        );
+        assert!(
+            !path.exists(),
+            "a refused export must not create the destination file"
+        );
+    }
+
+    /// SBS-772: notes, recognized text, and preview are clip fields too.
+    /// Defaulting or dropping them is the same silent omission as skipping a row.
+    #[tokio::test]
+    async fn export_refuses_corrupt_notes_preview_and_recognized_text() {
+        for (column, expected_label, marker) in [
+            ("notes", "unreadable notes", "sbs-772-notes-secret"),
+            (
+                "text_preview",
+                "unreadable preview",
+                "sbs-772-preview-secret",
+            ),
+            (
+                "ocr_text",
+                "unreadable recognized text",
+                "sbs-772-ocr-secret",
+            ),
+        ] {
+            let source = test_database().await;
+            insert_rich_clip(&source, marker).await;
+            corrupt_text_column(&source, marker, column).await;
+
+            let path = temp_path(&format!("corrupt-{column}"));
+            let error = export_backup(&source, path.to_str().unwrap(), "correct horse")
+                .await
+                .expect_err(&format!("{column} must fail the export"));
+
+            assert!(
+                error.contains(expected_label),
+                "{column} error should name the field type: {error}"
+            );
+            assert!(
+                !error.contains(marker),
+                "{column} error must not expose clipboard contents: {error}"
+            );
+            assert!(
+                !path.exists(),
+                "{column} refusal must not create the destination"
+            );
+        }
+    }
+
+    /// SBS-772: a failed export must not overwrite a file the user already has,
+    /// and must not leave a sibling temp file behind.
+    #[tokio::test]
+    async fn failed_export_preserves_an_existing_destination_and_removes_temp_output() {
+        let source = test_database().await;
+        insert_rich_clip(&source, "sbs-772-keep-dest").await;
+        corrupt_text_column(&source, "sbs-772-keep-dest", "notes").await;
+
+        let path = temp_path("preserve-dest");
+        let original = b"pre-existing destination must survive";
+        std::fs::write(&path, original).unwrap();
+
+        let error = export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .expect_err("a corrupt notes field must fail the export");
+        assert!(error.contains("destination file was left unchanged"));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "the existing destination must be byte-for-byte unchanged"
+        );
+        assert!(
+            leftover_backup_temps(path.parent().unwrap()).is_empty(),
+            "failure must clean up temporary output"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Persist writes a sibling temp file first; if the destination cannot be
+    /// replaced, that temp file must not remain beside it.
+    #[tokio::test]
+    async fn persist_cleans_up_temp_output_when_the_destination_cannot_be_replaced() {
+        let dir = std::env::temp_dir().join(format!("cubby-backup-dir-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("not-a-file");
+        std::fs::create_dir(&dest).unwrap();
+
+        let error = persist_backup_file(dest.to_str().unwrap(), b"complete-bundle-bytes")
+            .expect_err("replacing a directory with a file must fail");
+        assert!(error.contains("Could not save the backup"));
+        assert!(
+            leftover_backup_temps(&dir).is_empty(),
+            "a failed persist must remove its temporary file"
+        );
+        assert!(dest.is_dir(), "the existing destination must remain");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SBS-772: an unreadable field blocks the whole backup, but the clip list
+    /// still shows every clip, so a message that only counts field types tells
+    /// the user nothing they can act on. Name the row.
+    #[tokio::test]
+    async fn export_names_the_unreadable_clip_and_not_its_neighbor() {
+        let source = test_database().await;
+        insert_rich_clip(&source, "sbs-772-named-bad").await;
+        insert_rich_clip(&source, "sbs-772-named-good").await;
+        corrupt_text_column(&source, "sbs-772-named-bad", "notes").await;
+
+        let bad = uuid_of(&source, "sbs-772-named-bad").await;
+        let good = uuid_of(&source, "sbs-772-named-good").await;
+
+        let path = temp_path("named-clip");
+        let error = export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .expect_err("a corrupt note must fail the export");
+
+        assert!(
+            error.contains(&bad),
+            "the error should name the unreadable clip {bad}: {error}"
+        );
+        assert!(
+            !error.contains(&good),
+            "the error must not name the readable neighbor {good}: {error}"
+        );
+        assert!(
+            !error.contains("sbs-772-named-bad"),
+            "the error must not expose clipboard contents: {error}"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A storage key that stopped working fails every row. Listing thousands of
+    /// ids in a toast helps nobody, so the list is capped and the rest counted.
+    #[tokio::test]
+    async fn export_caps_how_many_clip_ids_it_names() {
+        let source = test_database().await;
+        let total = MAX_REPORTED_FAILED_CLIPS + 3;
+        for index in 0..total {
+            let text = format!("sbs-772-mass-{index}");
+            insert_rich_clip(&source, &text).await;
+            corrupt_text_column(&source, &text, "notes").await;
+        }
+
+        let path = temp_path("mass-corruption");
+        let error = export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .expect_err("every clip being unreadable must fail the export");
+
+        let mut named = 0;
+        for index in 0..total {
+            if error.contains(&uuid_of(&source, &format!("sbs-772-mass-{index}")).await) {
+                named += 1;
+            }
+        }
+        assert_eq!(
+            named, MAX_REPORTED_FAILED_CLIPS,
+            "only the capped number of ids should appear: {error}"
+        );
+        assert!(
+            error.contains("and 3 more"),
+            "the rest should be counted, not listed: {error}"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// `MoveFileExW` refuses paths above `MAX_PATH` unless they are `\\?\`
+    /// prefixed, while `std::fs::write` prefixes them itself. A save-dialog name
+    /// this long is legal, so persisting to it must still work.
+    #[test]
+    fn persist_writes_a_destination_longer_than_the_legacy_path_limit() {
+        let dir = std::env::temp_dir().join(format!("cubby-backup-long-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 239 characters: legal as a file name (the limit is 255), long enough
+        // that the full path clears MAX_PATH on any plausible temp directory.
+        let dest = dir.join(format!("{}.cubbybak", "n".repeat(230)));
+        assert!(
+            dest.as_os_str().len() > 260,
+            "the test destination must exceed MAX_PATH to be meaningful"
+        );
+
+        persist_backup_file(dest.to_str().unwrap(), b"complete-bundle-bytes")
+            .expect("a long but legal destination must still be written");
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"complete-bundle-bytes");
+        assert!(
+            leftover_backup_temps(&dir).is_empty(),
+            "a successful persist must leave no temporary file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
