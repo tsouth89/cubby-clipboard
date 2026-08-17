@@ -5,6 +5,13 @@ import { fileURLToPath } from 'node:url';
 import { checkPrivilegedActionPins } from '../.github/scripts/check-privileged-action-pins.mjs';
 import { findFileListHistoryClaims } from './product-page-claims.mjs';
 import { extractDefaultSkipLikelySecrets, evaluateSecretHeuristicsDoc, saysDefaultOff } from './release-check-helpers.mjs';
+import {
+  assertAllowlistNotWideOpen,
+  extractAllowlistPatterns,
+  extractOpenedUrls,
+  isUrlAllowed,
+  urlSlashVariants,
+} from './opener-allowlist.mjs';
 
 const root = new URL('../', import.meta.url);
 const rootDir = fileURLToPath(root);
@@ -249,25 +256,32 @@ for (const [docName, doc] of [
   }
 }
 
-// A URL the frontend opens but the capability does not allow is rejected at the
-// Tauri boundary, which reads to the user as a button that does nothing.
-const openerScope = capability.permissions.find(
-  (permission) => permission?.identifier === 'opener:allow-open-url'
-);
-// No `$` anchor: these sources are CRLF, so a trailing `\r` would leave the
-// pattern matching nothing and the gate passing on an empty set.
-const allowedUrls = new Set((openerScope?.allow ?? []).map((entry) => entry.url));
-const openedUrls = [...settingsPanelSource.matchAll(/^const \w*URL = '([^']+)';/gm)].map(
-  ([, url]) => url
-);
-if (openedUrls.length === 0) {
+// SBS-810: a URL the frontend opens but the capability does not allow is
+// rejected at the Tauri boundary, which reads as a button that does nothing.
+// Match the way tauri-plugin-opener does (Rust glob), including the
+// trailing-slash homepage the live site actually uses. Exact JSON equality
+// was how cubbyclipboard.com sat in the allowlist and still failed.
+const openerPatterns = extractAllowlistPatterns(capability);
+assertAllowlistNotWideOpen(openerPatterns);
+const settingsOpenedUrls = extractOpenedUrls(settingsPanelSource);
+if (settingsOpenedUrls.length === 0) {
   throw new Error('Could not find the Settings link URL constants to check against the allowlist');
 }
+const frontendFilesForOpener = await collectFrontendSources(path.join(rootDir, 'frontend', 'src'));
+const openedUrls = new Set(settingsOpenedUrls);
+for (const filePath of frontendFilesForOpener) {
+  const source = await readFile(filePath, 'utf8');
+  for (const url of extractOpenedUrls(source)) {
+    openedUrls.add(url);
+  }
+}
 for (const openedUrl of openedUrls) {
-  if (!allowedUrls.has(openedUrl)) {
-    throw new Error(
-      `Settings opens ${openedUrl}, but src-tauri/capabilities/default.json does not allow it`
-    );
+  for (const variant of urlSlashVariants(openedUrl)) {
+    if (!isUrlAllowed(variant, openerPatterns)) {
+      throw new Error(
+        `Settings opens ${variant}, but src-tauri/capabilities/default.json does not allow it`
+      );
+    }
   }
 }
 

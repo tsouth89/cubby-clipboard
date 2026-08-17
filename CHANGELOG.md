@@ -19,6 +19,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Pre-merge CI now cargo-checks x64 and ARM64 default and Microsoft Store feature builds, so those configurations fail on the pull request instead of at release (SBS-779)
 
 ### Fixed
+- Open cubbyclipboard.com and the privacy policy from Settings, including the trailing-slash and www forms the live site uses, without allowing the rest of the web (SBS-810)
 - Revive an expired screenshot original when that same image is copied again, including a consecutive duplicate that used to be skipped, so Paste and Copy work immediately and recognized text stays (SBS-769)
 - Keep the previous original when a recapture cannot write the full image, instead of losing both (SBS-836)
 - Refuse an encrypted backup export when any live clip field cannot be fully decrypted, and leave an existing destination file unchanged (SBS-772)
