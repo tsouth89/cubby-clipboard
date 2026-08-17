@@ -356,6 +356,14 @@ for (const [variant, expectedKind] of [
   if (variant !== 'Webview' && arm.includes('TargetKind::Webview')) {
     throw new Error(`LogTarget::${variant} must not map to TargetKind::Webview`);
   }
+  if (variant === 'LogDir') {
+    if (!arm.includes('TargetKind::Folder')) {
+      throw new Error('LogTarget::LogDir must map portable runs to TargetKind::Folder');
+    }
+    if (!arm.includes('persistent_log_sink')) {
+      throw new Error('LogTarget::LogDir must choose Folder vs LogDir via persistent_log_sink');
+    }
+  }
 }
 
 const countWebviewKind = (source) => source.split('TargetKind::Webview').length - 1;

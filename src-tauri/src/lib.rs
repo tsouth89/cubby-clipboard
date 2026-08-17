@@ -67,20 +67,24 @@ fn to_plugin_log_target(target: log_targets::LogTarget) -> tauri_plugin_log::Tar
         log_targets::LogTarget::Webview => {
             tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview)
         }
-        // Where "on disk" is depends on the distribution: a portable run keeps
-        // its logs inside the folder the user carries, an installed run uses
-        // the OS log directory. Resolved here rather than in a helper so the
-        // SBS-837 release gate can still read `TargetKind::LogDir` in this arm
-        // and prove nothing swapped it for `Webview`.
-        log_targets::LogTarget::LogDir => {
-            tauri_plugin_log::Target::new(match portable_log_dir(portable_data_dir()) {
-                Some(path) => tauri_plugin_log::TargetKind::Folder {
-                    path,
-                    file_name: None,
-                },
-                None => tauri_plugin_log::TargetKind::LogDir { file_name: None },
-            })
-        }
+        // Folder vs LogDir is decided by `persistent_log_sink` so the rule is
+        // unit-tested without a Tauri builder. The arm still names both
+        // TargetKinds so the SBS-837 release gate can prove nothing swapped
+        // LogDir for Webview, and so a portable run cannot silently keep
+        // TargetKind::LogDir (SBS-776).
+        log_targets::LogTarget::LogDir => tauri_plugin_log::Target::new(
+            match log_targets::persistent_log_sink(portable_data_dir()) {
+                log_targets::PersistentLogSink::Folder(path) => {
+                    tauri_plugin_log::TargetKind::Folder {
+                        path,
+                        file_name: None,
+                    }
+                }
+                log_targets::PersistentLogSink::OsLogDir => {
+                    tauri_plugin_log::TargetKind::LogDir { file_name: None }
+                }
+            },
+        ),
     }
 }
 
@@ -913,27 +917,13 @@ fn self_update_supported_for(portable: bool) -> bool {
     !cfg!(feature = "app-store") && !portable
 }
 
-/// Where a portable build keeps its logs, given its data root.
-///
-/// Portable mode promises no AppData footprint, and `TargetKind::LogDir`
-/// resolves to `%LOCALAPPDATA%\<identifier>\logs` regardless of mode. That left
-/// a persistent record of the user's activity outside the folder they carry
-/// with them, which is the whole point of the portable build.
-///
-/// Takes the root as an argument rather than reading it, so the mapping is
-/// testable without an installed executable next to a `portable.txt`, and so
-/// `commands::excluded_log_dir` can ask where the logs would sit inside a data
-/// directory it already has in hand. That second caller is why the storage
-/// readout and this mapping cannot drift apart: logs land inside the history
-/// data directory in portable mode, and the size measurement must skip exactly
-/// the folder this function names — and only then.
-///
-/// The first caller is the `LogTarget::LogDir` arm of `to_plugin_log_target`,
-/// which decides between the portable folder and the OS log directory.
+/// Thin wrapper over `log_targets::portable_log_dir` for
+/// `commands::excluded_log_dir`. The plugin mapper calls
+/// `persistent_log_sink` itself; both share one match.
 pub(crate) fn portable_log_dir(
     portable_root: Option<std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
-    portable_root.map(|root| root.join("logs"))
+    log_targets::portable_log_dir(portable_root)
 }
 
 /// Explain an unreadable storage key before exiting.
@@ -1406,29 +1396,7 @@ pub fn update_tray_icon(tray: &TrayIcon, theme: &tauri::Theme) {
 
 #[cfg(test)]
 mod portable_tests {
-    use super::{
-        portable_data_dir, portable_log_dir, self_update_supported, self_update_supported_for,
-    };
-    use std::path::PathBuf;
-
-    /// Portable logs belong beside the portable data, not in AppData. The build
-    /// promises no AppData footprint, and `TargetKind::LogDir` ignores that.
-    #[test]
-    fn portable_logs_live_inside_the_portable_root() {
-        let root = PathBuf::from(r"D:\USB\Cubby\data");
-        assert_eq!(
-            portable_log_dir(Some(root.clone())),
-            Some(root.join("logs"))
-        );
-    }
-
-    /// An installed build must keep using the OS log directory. `None` is what
-    /// tells the `LogTarget::LogDir` mapping to fall back to
-    /// `TargetKind::LogDir`.
-    #[test]
-    fn installed_logs_stay_with_the_os_log_directory() {
-        assert_eq!(portable_log_dir(None), None);
-    }
+    use super::{portable_data_dir, self_update_supported, self_update_supported_for};
 
     /// The wiring from the real environment into the rule. The test binary has
     /// no `portable.txt` beside it, so this pins the installed path end to end;
