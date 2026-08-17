@@ -32,6 +32,12 @@ The first compatibility baseline covers:
 - PNG and Windows bitmap variants
 - Multiple simultaneous formats representing the same copied item
 
+An empty `CF_UNICODETEXT` payload is not a lock. If HTML or RTF is present,
+that copy is stored (searchable text is derived from the rich payload). Empty
+text plus only private/custom formats is an unsupported copy: mark it handled
+without restarting the listener or recording a lock miss. A clipboard that
+cannot be opened is still diagnosed as contention.
+
 File clipboard payloads are intentionally ignored. Windows file copies are
 references to external paths rather than durable clipboard content, so Cubby
 does not present them as stored history.

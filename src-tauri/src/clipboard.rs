@@ -696,19 +696,24 @@ fn capture_one_bound_sequence(
     let materialized = materialize_with_sequence_guard(
         sequence,
         read_sequence,
-        |attempt| {
-            let content = materialize_clipboard_content_once(attempt);
-            if content.is_none() && attempt + 1 < 10 {
-                std::thread::sleep(clipboard_retry_delay(attempt));
+        |attempt| match materialize_clipboard_content_once(attempt) {
+            MaterializeOnce::Captured(content, formats) => {
+                Some(MaterializeAttempt::Captured(content, formats))
             }
-            content
+            MaterializeOnce::DeterminateMiss => Some(MaterializeAttempt::DeterminateMiss),
+            MaterializeOnce::Transient => {
+                if attempt + 1 < 10 {
+                    std::thread::sleep(clipboard_retry_delay(attempt));
+                }
+                None
+            }
         },
         10,
     )?;
 
     persist_if_sequence_holds(sequence, read_sequence(), ())?;
 
-    if let Some((content, formats)) = materialized {
+    if let Some(MaterializeAttempt::Captured(content, formats)) = materialized {
         note_clipboard_event(sequence);
         let snapshot = ClipboardSnapshot {
             sequence,
@@ -722,6 +727,27 @@ fn capture_one_bound_sequence(
             .send(ClipboardListenerEvent::Content(snapshot))
             .map(|_| CaptureAttempt::Handled)
             .map_err(|_| BoundCaptureFailure::ConsumerGone);
+    }
+
+    if matches!(materialized, Some(MaterializeAttempt::DeterminateMiss)) {
+        // Opened the clipboard and read empty/missing text with no HTML/RTF
+        // and no image. That is not a lock, even when CF_UNICODETEXT is still
+        // advertised (SBS-924).
+        if clipboard_is_cleared() {
+            persist_if_sequence_holds(sequence, read_sequence(), ())?;
+            note_clipboard_event(sequence);
+            return event_tx
+                .send(ClipboardListenerEvent::Cleared { sequence })
+                .map(|_| CaptureAttempt::Handled)
+                .map_err(|_| BoundCaptureFailure::ConsumerGone);
+        }
+        persist_if_sequence_holds(sequence, read_sequence(), ())?;
+        note_clipboard_event(sequence);
+        log::debug!(
+            "CLIPBOARD: Sequence {} contained no supported text or image payload",
+            sequence
+        );
+        return Ok(CaptureAttempt::Handled);
     }
 
     if has_file_payload && has_image_payload {
@@ -794,6 +820,10 @@ fn capture_one_bound_sequence(
 /// True when the clipboard advertises a format `materialize_clipboard_content_once`
 /// can read (text or an image). Used to tell "unsupported payload"
 /// (mark handled) apart from "supported but contended" (defer and retry).
+///
+/// Advertised `CF_UNICODETEXT` is not enough after a determinate empty-text
+/// read: that payload is empty, not locked (SBS-924). Callers that already
+/// opened the clipboard and read empty text must not use this as a lock signal.
 #[cfg(target_os = "windows")]
 fn clipboard_has_supported_format() -> bool {
     use windows::core::PCWSTR;
@@ -948,7 +978,7 @@ fn clipboard_is_cleared() -> bool {
                 return false;
             }
             // Empty plain text must not count as a clear if HTML/RTF still hold
-            // content (materialize can miss those when get_text is empty).
+            // content. Those copies are stored as rich clips (SBS-924).
             if let Ok(html) = ctx.get_html() {
                 if !html.is_empty() {
                     return false;
@@ -1136,9 +1166,11 @@ fn run_native_listener(_event_tx: tokio::sync::mpsc::UnboundedSender<ClipboardLi
 /// One materialize attempt. `attempt` is 0-based so the last try can do a
 /// slower image decode. The sequence-bound capture path checks the clipboard
 /// sequence around each call instead of sleeping across a sequence change.
-fn materialize_clipboard_content_once(
-    attempt: u32,
-) -> Option<(CapturedContent, Vec<CapturedFormat>)> {
+///
+/// Empty Unicode text is a determinate miss, not a retryable lock: if HTML or
+/// RTF has content we store that clip; otherwise the caller marks the sequence
+/// handled (or cleared) without restarting the listener (SBS-924).
+fn materialize_clipboard_content_once(attempt: u32) -> MaterializeOnce {
     const ATTEMPTS: u32 = 10;
     let last_attempt = attempt + 1 == ATTEMPTS;
 
@@ -1148,44 +1180,131 @@ fn materialize_clipboard_content_once(
     // immediately; retry the image for the complete bounded window.
     if clipboard_has_image_format() && clipboard_has_file_payload_format() {
         if let Ok(image) = read_clipboard_image_fast(last_attempt) {
-            return Some((captured_image(image), Vec::new()));
+            return MaterializeOnce::Captured(captured_image(image), Vec::new());
         }
         // The caller records this hybrid update as handled on the last miss.
         // Do not fall through to text, where the path could be captured as a
         // text clip.
-        return None;
+        return MaterializeOnce::Transient;
     }
 
     if let Ok(ctx) = ClipboardContext::new() {
-        if let Ok(text) = ctx.get_text() {
-            if let Some(content) = capture_text(text) {
-                let mut formats = Vec::new();
-                if let Ok(html) = ctx.get_html() {
-                    if !html.is_empty() {
-                        formats.push(CapturedFormat {
-                            name: "html",
-                            content: html.into_bytes(),
-                        });
-                    }
-                }
-                if let Ok(rtf) = ctx.get_rich_text() {
-                    if !rtf.is_empty() {
-                        formats.push(CapturedFormat {
-                            name: "rtf",
-                            content: rtf.into_bytes(),
-                        });
-                    }
-                }
-                return Some((content, formats));
+        let text = ctx.get_text().ok();
+        let html = ctx.get_html().ok();
+        let rtf = ctx.get_rich_text().ok();
+        let text_read = observed_payload(&text, clipboard_has_unicode_text_format());
+        let html_read = observed_payload(&html, clipboard_has_html_format());
+        let rtf_read = observed_payload(&rtf, clipboard_has_rtf_format());
+        if let Some(rich) =
+            crate::clipboard_miss::rich_capture_from_payloads(text_read, html_read, rtf_read)
+        {
+            if let Some(content) = capture_text(rich.searchable_text) {
+                return MaterializeOnce::Captured(
+                    content,
+                    captured_rich_formats(rich.html, rich.rtf),
+                );
             }
         }
+
+        if let Ok(image) = read_clipboard_image_fast(last_attempt) {
+            return MaterializeOnce::Captured(captured_image(image), Vec::new());
+        }
+        // We opened the clipboard and read it. Empty text is not a lock; an
+        // advertised image or delayed HTML/RTF that did not decode yet still is.
+        if clipboard_has_image_format()
+            || matches!(text_read, crate::clipboard_miss::PayloadRead::Unknown)
+            || matches!(html_read, crate::clipboard_miss::PayloadRead::Unknown)
+            || matches!(rtf_read, crate::clipboard_miss::PayloadRead::Unknown)
+        {
+            return MaterializeOnce::Transient;
+        }
+        return MaterializeOnce::DeterminateMiss;
     }
 
     if let Ok(image) = read_clipboard_image_fast(last_attempt) {
-        return Some((captured_image(image), Vec::new()));
+        return MaterializeOnce::Captured(captured_image(image), Vec::new());
     }
+    MaterializeOnce::Transient
+}
 
-    None
+fn observed_payload(
+    value: &Option<String>,
+    advertised: bool,
+) -> crate::clipboard_miss::PayloadRead<'_> {
+    match value {
+        Some(body) => crate::clipboard_miss::PayloadRead::Present(body),
+        None if advertised => crate::clipboard_miss::PayloadRead::Unknown,
+        None => crate::clipboard_miss::PayloadRead::Missing,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn clipboard_has_unicode_text_format() -> bool {
+    const CF_UNICODETEXT: u32 = 13;
+    unsafe { windows::Win32::System::DataExchange::IsClipboardFormatAvailable(CF_UNICODETEXT) }
+        .is_ok()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clipboard_has_unicode_text_format() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn clipboard_has_html_format() -> bool {
+    let format = register_clipboard_format("HTML Format");
+    format != 0
+        && unsafe { windows::Win32::System::DataExchange::IsClipboardFormatAvailable(format) }
+            .is_ok()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clipboard_has_html_format() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn clipboard_has_rtf_format() -> bool {
+    let format = register_clipboard_format("Rich Text Format");
+    format != 0
+        && unsafe { windows::Win32::System::DataExchange::IsClipboardFormatAvailable(format) }
+            .is_ok()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clipboard_has_rtf_format() -> bool {
+    false
+}
+
+fn captured_rich_formats(html: Option<String>, rtf: Option<String>) -> Vec<CapturedFormat> {
+    let mut formats = Vec::new();
+    if let Some(html) = html {
+        formats.push(CapturedFormat {
+            name: "html",
+            content: html.into_bytes(),
+        });
+    }
+    if let Some(rtf) = rtf {
+        formats.push(CapturedFormat {
+            name: "rtf",
+            content: rtf.into_bytes(),
+        });
+    }
+    formats
+}
+
+/// Outcome of one materialize attempt. Transient misses retry; a determinate
+/// miss (opened, empty/missing text, no HTML/RTF, no image) must not.
+enum MaterializeOnce {
+    Captured(CapturedContent, Vec<CapturedFormat>),
+    DeterminateMiss,
+    Transient,
+}
+
+/// Stop retrying once we know the copy is captured or is a determinate miss.
+enum MaterializeAttempt {
+    Captured(CapturedContent, Vec<CapturedFormat>),
+    DeterminateMiss,
 }
 
 fn captured_image(image: ClipboardImageRead) -> CapturedContent {

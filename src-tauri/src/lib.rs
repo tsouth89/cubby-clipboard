@@ -18,6 +18,7 @@ mod backup;
 mod cf_html;
 mod clip_list;
 mod clipboard;
+mod clipboard_miss;
 mod clipboard_policy;
 mod commands;
 // SBS-408 compatibility-matrix model. Compiled under `test` as well as
