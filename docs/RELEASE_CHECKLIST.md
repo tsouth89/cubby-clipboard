@@ -15,11 +15,18 @@ Tag releases upload and verify both signed installers automatically. To backfill
 an existing GitHub release, run the `Publish Microsoft Store packages` workflow
 with its version tag.
 
-Microsoft Store submission is disabled until Partner Center onboarding has
-been validated. The GitHub `release` environment must also define:
+> **Microsoft Store submission is live.** `MICROSOFT_STORE_SUBMISSION_ENABLED`
+> is `true` in the `release` environment as of v1.3.2. Pushing a `v*` tag runs
+> `msstore submission update` **and** `msstore submission publish`, so the tag
+> alone sends a build to Store certification with no further confirmation.
+> There is no draft step to stop at. Check this variable before tagging if you
+> only meant to cut a GitHub release.
+
+The GitHub `release` environment must define:
 
 - variable `PARTNER_CENTER_PRODUCT_ID`;
-- variable `MICROSOFT_STORE_SUBMISSION_ENABLED` (`false` during onboarding);
+- variable `MICROSOFT_STORE_SUBMISSION_ENABLED` (`true` once onboarding is
+  validated; set it to `false` to tag without touching the Store);
 - secrets `PARTNER_CENTER_TENANT_ID`, `PARTNER_CENTER_SELLER_ID`,
   `PARTNER_CENTER_CLIENT_ID`, and `PARTNER_CENTER_CLIENT_SECRET`.
 
@@ -30,13 +37,29 @@ the signature on the packed `cubby.exe` (and `uninstall.exe` when 7-Zip extracts
 and maps the existing x64 and ARM64 Store packages to their new versioned URLs
 without changing a submission unless `publish` is explicitly selected.
 
-After a validation-only run passes, set
-`MICROSOFT_STORE_SUBMISSION_ENABLED=true`. Future tag releases wait for both
-architecture uploads, update both package URLs together, and create one Store
-submission before the GitHub release is published. Reruns skip existing R2
+That validation-only run is what gated turning the flag on; it is now on. Tag
+releases wait for both architecture uploads, update both package URLs together,
+and create one Store submission before the GitHub release is published. Reruns skip existing R2
 objects only when their bytes match; a different build must use a new version
 instead of replacing an existing versioned URL, even while the GitHub release
 is still a draft.
+
+## Two ways to run the Release workflow
+
+Pick deliberately. They are not the same thing.
+
+| | `workflow_dispatch` (test build) | push a `v*` tag |
+|---|---|---|
+| Tag | `draft-<sha>` | `v<version>`, must match all four version files |
+| GitHub release | draft prerelease, stays draft | published automatically at the end |
+| Release notes | a fixed "test build" line | awk-extracted from the `## v<version>` CHANGELOG section, which fails the build if missing |
+| `latest.json` | not assembled | assembled, so installed users auto-update |
+| Microsoft Store | skipped | submitted **and** published when the flag is on |
+| Cleanup | deletes previous test-build drafts on the next dispatch | none; a leftover test draft has to be deleted by hand |
+
+Use dispatch for anything you intend to install and try. Use a tag only when
+you mean to ship, because the tag path has no checkpoint between "build" and
+"the public has it".
 
 ## Automated gate
 
