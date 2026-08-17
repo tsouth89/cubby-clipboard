@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import { findFileListHistoryClaims } from './product-page-claims.mjs';
@@ -100,4 +103,41 @@ test('gerund disclaimers are not reported', () => {
     findFileListHistoryClaims('<p>Ignoring file lists since v1.2.4.</p>'),
     []
   );
+});
+
+// SBS-780: the claims that were on main at cf916e9. The weak sentence
+// scan in check-release.mjs misses the README table cell (no verb). The
+// helper missed "file-drop lists" until the mention pattern included it.
+
+test('the original README table cell is a claim even without a verb', () => {
+  const row =
+    '| Text, HTML, RTF, images, and file lists | AES-256-GCM encryption for stored clipboard payloads |';
+  const claims = findFileListHistoryClaims(row);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0], /file lists/);
+});
+
+test('the original SECURITY.md file-drop sentence is a claim', () => {
+  const sentence =
+    'Core Windows clipboard representations are retained together: Unicode text, HTML, RTF, file-drop lists, and images.';
+  const claims = findFileListHistoryClaims(sentence);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0], /file-drop lists/);
+});
+
+test('a negated file-drop sentence is not a claim', () => {
+  assert.deepEqual(
+    findFileListHistoryClaims(
+      'Cubby does not retain file-drop lists as clipboard history.'
+    ),
+    []
+  );
+});
+
+test('live README.md and SECURITY.md do not claim file-list history', async () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  for (const relative of ['README.md', 'SECURITY.md']) {
+    const source = await readFile(path.join(root, relative), 'utf8');
+    assert.deepEqual(findFileListHistoryClaims(source), [], relative);
+  }
 });

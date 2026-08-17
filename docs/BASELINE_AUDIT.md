@@ -16,7 +16,7 @@ folder for supported behavior.
 | Inherited area | Cubby status |
 | --- | --- |
 | Clipboard polling and debounce | Replaced with `AddClipboardFormatListener`, ordered capture, and bounded contention retries |
-| Text/image-only storage model | Replaced with encrypted text, HTML, RTF, image, and file-list preservation |
+| Text/image-only storage model | Replaced with encrypted text, HTML, RTF, and image preservation. File-list history was added and later removed; copied files are ignored |
 | Plaintext clipboard storage | Replaced with AES-256-GCM payload encryption and a Windows DPAPI-protected key |
 | Inline/best-effort screenshot OCR | Replaced with a durable, recoverable single-worker queue using local Windows OCR |
 | SQLite/linear search | Replaced with an encrypted-at-rest-safe, memory-only trigram index; SQLite remains authoritative for order, folders, pins, and pagination |

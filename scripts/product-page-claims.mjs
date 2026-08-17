@@ -1,13 +1,18 @@
-// Shared wording guard for the public product pages.
+// Shared wording guard for public docs (SBS-780, SBS-832).
 //
-// Cubby stopped storing copied files as history in v1.2.4, so the pages must
-// not advertise file-list history again. The guard has to tell a claim apart
-// from a disclaimer: "Cubby does not store file lists" is a sentence we *want*
-// to be free to write, so a bare keyword match would fail the release for
-// saying the true thing.
+// Cubby stopped storing copied files as history in v1.2.4, so README,
+// SECURITY.md, and the product pages must not advertise file-list history
+// again. The guard has to tell a claim apart from a disclaimer: "Cubby does
+// not store file lists" is a sentence we *want* to be free to write, so a
+// bare keyword match would fail the release for saying the true thing.
+//
+// The original README lie was a table cell with no verb ("...and file lists").
+// The original SECURITY.md lie used "file-drop lists" / "retained". Both
+// have to count as mentions.
 
-/** Matches "file list(s)", "file-list(s)", and "copied file(s)". */
-const FILE_LIST_MENTION = /\b(?:file[\s-]*lists?|copied files?)\b/gi;
+/** Matches "file list(s)", "file-list(s)", "file-drop list(s)", and "copied file(s)". */
+const FILE_LIST_MENTION =
+  /\b(?:file[\s-]*lists?|file[\s-]*drops?(?:\s+lists?)?|copied files?)\b/gi;
 
 /** Verbs that assert support for whatever noun follows them. */
 const CLAIM_VERB =

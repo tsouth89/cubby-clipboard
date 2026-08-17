@@ -219,27 +219,51 @@ if (`${clipboardSource}\n${commandSource}`.includes('ClipboardContent::Files')) 
   );
 }
 
-// The gates above encode that copied files are never stored. Public docs claimed
-// the opposite for months because nothing tied the two together. If file capture
-// is ever restored, delete these lines deliberately along with the design work.
-//
+const [indexPageDoc, startPageDoc, termsPageDoc, pressKitDoc] = await Promise.all([
+  read('product_pages/index.html'),
+  read('product_pages/start.html'),
+  read('product_pages/terms.html'),
+  read('docs/press-kit/description.txt'),
+]);
+
+// SBS-780 / SBS-832: public docs must not claim file-list history while
+// capture policy ignores file payloads. Two detectors on purpose:
+// 1) findFileListHistoryClaims catches a table cell with no verb
+//    ("...and file lists") and "file-drop lists are retained".
+// 2) The weaker sentence scan catches "Cubby stores files" that never
+//    says "file lists". If file capture is restored, delete both
+//    deliberately along with the design work.
+const userFacingHistoryDocs = [
+  ['README.md', readmeDoc],
+  ['SECURITY.md', securityDoc],
+  ['product_pages/privacy.html', privacyPageDoc],
+  ['product_pages/support.html', supportPageDoc],
+  ['product_pages/index.html', indexPageDoc],
+  ['product_pages/start.html', startPageDoc],
+  ['product_pages/terms.html', termsPageDoc],
+  ['docs/press-kit/description.txt', pressKitDoc],
+  ['frontend/src/i18n/locales/en.json', settingsLocaleText],
+];
+
+for (const [docName, doc] of userFacingHistoryDocs) {
+  const [claim] = findFileListHistoryClaims(doc);
+  if (claim) {
+    throw new Error(`${docName} still claims file-list clipboard history: ${claim}`);
+  }
+}
+
 // A sentence only counts as a claim if it says files are retained or
 // supported (retained|stores|supports|includes|records) without also
 // negating that (not|never|ignore). This lets docs correctly say "Cubby does
 // not store file lists" while still catching restated lies like "Cubby
-// stores copied files" that don't use the literal phrase "file lists".
+// stores copied files" that do not use the literal phrase "file lists".
 // Checked per sentence rather than per line: a paragraph line can carry both
 // an accurate negated claim and a false unnegated one, and a negation later
 // in the same line must not paper over a false claim earlier in it.
 const fileMentionPattern = /\bfiles?\b/i;
 const retentionClaimPattern = /\b(?:retained|stores?|supports?|includes?|records?(?:ed)?)\b/i;
 const negationPattern = /\b(?:not|never|ignor\w*)\b/i;
-for (const [docName, doc] of [
-  ['README.md', readmeDoc],
-  ['SECURITY.md', securityDoc],
-  ['product_pages/privacy.html', privacyPageDoc],
-  ['product_pages/support.html', supportPageDoc],
-]) {
+for (const [docName, doc] of userFacingHistoryDocs) {
   const fileClaim = doc
     .replace(/\r?\n/g, ' ')
     .split(/(?<=[.!?])\s+/)
@@ -461,17 +485,6 @@ if (defaultSkipLikelySecrets === 'true' && !/on by default/i.test(skipLikelySecr
 
 if (!securityDoc.includes('RUSTSEC-2023-0071')) {
   throw new Error('SECURITY.md must document the reviewed RSA advisory waiver');
-}
-
-const productPageSources = [
-  ['product_pages/privacy.html', await read('product_pages/privacy.html')],
-  ['product_pages/support.html', await read('product_pages/support.html')],
-];
-for (const [file, source] of productPageSources) {
-  const [claim] = findFileListHistoryClaims(source);
-  if (claim) {
-    throw new Error(`${file} still claims file-list clipboard history: ${claim}`);
-  }
 }
 
 const reviewed = securityDoc.match(/^- Reviewed:\s*(\d{4}-\d{2}-\d{2})\s*$/m)?.[1];
