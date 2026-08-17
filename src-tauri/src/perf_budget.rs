@@ -353,7 +353,7 @@ mod measurements {
 
     async fn on_disk_database(dir: &std::path::Path) -> (Database, std::path::PathBuf) {
         let path = dir.join("cubby.db");
-        let database = Database::new(path.to_str().expect("utf-8 path"))
+        let (database, _notices) = Database::new(path.to_str().expect("utf-8 path"))
             .await
             .expect("database should open");
         database.migrate().await.expect("migration should succeed");

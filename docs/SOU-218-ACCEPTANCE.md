@@ -25,6 +25,7 @@ Status key: **Pass** (automated or verified) · **Pending** (needs human session
 | Healthy DB gets rolling backup | `healthy_database_gets_a_rolling_backup` | Pass |
 | Fresh backup is not rewritten | `fresh_rolling_backup_is_not_rewritten` | Pass |
 | Garbage DB is quarantined; fresh open works | `garbage_database_is_quarantined_and_fresh_open_succeeds` | Pass |
+| Quarantine/restore notices are returned for `startup_log` | `apply_database_health_returns_quarantine_notices`, `unusable_rolling_backup_reports_empty_history` (SBS-929) | Pass |
 | Structural corruption is quarantined | `structurally_corrupt_sqlite_is_quarantined` | Pass |
 | `storage.key` survives quarantine | `quarantine_rename_preserves_sibling_key_file` | Pass |
 | Encrypted DB without key still fails closed | `encrypted_database_without_its_key_fails_closed` | Pass |

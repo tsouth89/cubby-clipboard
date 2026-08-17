@@ -20,6 +20,7 @@ Clipboard capture is Cubby's primary product promise. A polished history UI is n
 - Keep local history durable: on startup, run SQLite `PRAGMA quick_check` on the existing `cubby.db`. If the file cannot be opened or fails the check, quarantine it (and any `-wal`/`-shm` sidecars) under a timestamped `*.corrupt-*` name and start a fresh empty database so capture never blocks on a broken store.
 - Refresh a rolling `cubby.db.bak` snapshot of a healthy database at most once per 24 hours (after a WAL checkpoint), both when the database opens and while Cubby stays running, so operators have a recent recovery point without copying on every launch or requiring a quit.
 - Never log clipboard content, previews, or decryptable payloads during recovery; logs may include paths and short structural diagnostics only. The DPAPI-protected `storage.key` and image blobs are left in place when the DB is quarantined.
+- Quarantine, restore-from-backup, and empty-history fallback are recorded through the same startup log buffer as migrations so they appear in the on-disk log after the logger is installed (SBS-929).
 
 ## Format baseline
 
