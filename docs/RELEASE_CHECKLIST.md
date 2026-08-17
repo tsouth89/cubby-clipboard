@@ -79,7 +79,7 @@ That script enforces:
 
 Also confirm:
 
-- All three version fields match: `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
+- All four version fields match: `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, and the `cubby` stanza in `src-tauri/Cargo.lock`. `release:check` covers the first three; the lockfile is caught only by `cargo tree --locked` in `audit-rust.ps1`, so a bump that forgets it fails the required `test` job rather than `release:check`. See AGENTS.md for the exact command.
 - Both x64 and arm64 NSIS installers build and are attached to the same draft release.
 
 ## Packaged-install smoke (manual VM)
@@ -162,7 +162,7 @@ payload. A Settings/About surface for this status is still optional.
   means a `src/bin` target lost its `required-features = ["dev-harness"]` gate;
   a `NotSigned` result means `signCommand` did not run.
 - Do not enable Winget publishing until `SouthForgeAI.CubbyClipboard` is reserved and the installer identity is final.
-- Do not submit to Microsoft Store until Partner Center identity, signing, privacy text, and clean upgrade/uninstall behavior are verified.
+- Store submission is automatic on a `v*` tag, so verify Partner Center identity, signing, privacy text, and clean upgrade/uninstall behavior *before* tagging, not before submitting. There is no manual submit step left to hold back.
 - Keep GPL-3.0 source, `NOTICE.md`, and PastePaw attribution available with every release.
 
 ## Privileged GitHub Action pins (SBS-778)
