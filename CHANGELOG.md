@@ -14,6 +14,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Skip-likely-secrets now scans the first 8 KiB of a large paste, so a 9 KiB log or PEM starting with a known token or `-----BEGIN` marker is skipped instead of stored (SBS-922)
 - A failed clip reload no longer looks like a healthy current list: same-filter refresh shows a retry banner, superseded loads are not treated as success, and folder / app / count reloads toast instead of staying silent (SBS-805)
 - Portable first-run can install `storage.key` on FAT/exFAT: CreateHardLinkW is NTFS-only, and the previous hard-link-only install deleted the temp key and panicked (SBS-908)
+- Encrypted backup export now includes live full-resolution screenshot originals, and refuses the export if one cannot be read, instead of restoring every image as an expired thumbnail (SBS-919)
 
 ## v1.3.2
 

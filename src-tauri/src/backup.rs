@@ -57,8 +57,8 @@ struct BackupBundle {
 #[derive(Debug, Serialize, Deserialize)]
 struct BackupClip {
     clip_type: String,
-    /// The clip's stored bytes, decrypted. For an image this is the thumbnail;
-    /// see the note on `export_backup` about full-resolution blobs.
+    /// The clip's stored bytes, decrypted. For an image this is the 320×220
+    /// thumbnail in `clips.content`, not the original.
     content_b64: String,
     text_preview: String,
     is_pinned: bool,
@@ -82,6 +82,11 @@ struct BackupClip {
     /// Folder *name*, not id: ids are local to a database.
     #[serde(default)]
     folder: Option<String>,
+    /// Full-resolution PNG, decrypted. Present when the source clip still had
+    /// a live `{uuid}.cubby` original. Absent for text, for images retention
+    /// already expired, and for bundles written before SBS-919.
+    #[serde(default)]
+    full_image_b64: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -107,6 +112,7 @@ type ExportRow = (
     Option<String>,                // metadata (encrypted)
     Option<String>,                // ocr_text (encrypted)
     chrono::DateTime<chrono::Utc>, // created_at
+    bool,                          // full_image_expired
     Option<String>,                // folder name
 );
 
@@ -183,6 +189,7 @@ fn export_field_label(field: &str) -> &'static str {
         "source_icon" => "unreadable source icon",
         "metadata" => "unreadable rich format",
         "ocr_text" => "unreadable recognized text",
+        "full_image" => "unreadable full-resolution image",
         _ => "unreadable field",
     }
 }
@@ -217,11 +224,12 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_LEN], String> {
 /// file is left unchanged and any temporary output is removed. Partial export
 /// is not offered from this path.
 ///
-/// Full-resolution image blobs are deliberately **not** included. They live in
-/// separate files that would multiply the bundle's size, and an imported image
-/// lands in the same "thumbnail and recognized text kept, full image gone"
-/// state that retention already produces (SOU-244), which the app models as a
-/// first-class case rather than as damage.
+/// Live screenshot originals travel with the bundle (SBS-919). `clips.content`
+/// is only the 320×220 thumbnail; the PNG lives in `{uuid}.cubby`. An image
+/// that is not already expired must include those bytes, or the export fails
+/// the same way an unreadable field does. Images retention has already expired
+/// stay thumbnail-only, which is the first-class SOU-244 state rather than
+/// damage.
 pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Result<usize, String> {
     let rows: Vec<ExportRow> = sqlx::query_as(
         r#"
@@ -237,6 +245,7 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
                clips.metadata,
                clips.ocr_text,
                clips.created_at,
+               clips.full_image_expired,
                folders.name
         FROM clips
         LEFT JOIN folders ON folders.id = clips.folder_id
@@ -263,6 +272,7 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
         metadata,
         ocr_text,
         created_at,
+        full_image_expired,
         folder,
     ) in rows
     {
@@ -285,7 +295,10 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
             created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
             folder,
         ) {
-            Ok(clip) => clips.push(clip),
+            Ok(clip) => match attach_export_full_image(db, &uuid, clip, full_image_expired).await {
+                Ok(clip) => clips.push(clip),
+                Err(fields) => failures.record(&uuid, &fields),
+            },
             Err(fields) => failures.record(&uuid, &fields),
         }
     }
@@ -401,6 +414,7 @@ fn decrypt_export_clip(
         ocr_text,
         created_at,
         folder,
+        full_image_b64: None,
     })
 }
 
@@ -421,6 +435,106 @@ fn decrypt_optional_export_field(
             None
         }
     }
+}
+
+/// Attach the live `{uuid}.cubby` original, or fail the clip the same way an
+/// unreadable field does. Already-expired images stay thumbnail-only.
+async fn attach_export_full_image(
+    db: &Database,
+    uuid: &str,
+    mut clip: BackupClip,
+    full_image_expired: bool,
+) -> Result<BackupClip, Vec<&'static str>> {
+    if clip.clip_type != "image" || full_image_expired {
+        return Ok(clip);
+    }
+    match load_export_full_image(db, uuid).await {
+        Ok(bytes) => {
+            clip.full_image_b64 = Some(BASE64.encode(&bytes));
+            Ok(clip)
+        }
+        Err(error) => {
+            log::warn!("BACKUP: clip {uuid} full-resolution original could not be read: {error}");
+            Err(vec!["full_image"])
+        }
+    }
+}
+
+/// Read the live original for export.
+///
+/// Never falls back to `clips.content`. That column is the thumbnail, and
+/// treating it as the original is the SBS-919 loss: the bundle looks complete,
+/// import marks the clip expired, and the screenshot is gone.
+///
+/// A query error, a decrypt error, and a missing file are distinct. Only a
+/// confirmed empty/absent index plus a confirmed-absent managed file plus an
+/// empty legacy blob means "nothing there" — and for a non-expired image that
+/// is still a failure, because the original was supposed to exist.
+async fn load_export_full_image(db: &Database, uuid: &str) -> Result<Vec<u8>, String> {
+    let index: Option<(Option<String>, Vec<u8>)> =
+        sqlx::query_as("SELECT file_path, full_content FROM clip_images WHERE clip_uuid = ?")
+            .bind(uuid)
+            .fetch_optional(&db.pool)
+            .await
+            .map_err(|error| format!("could not look up the stored original: {error}"))?;
+
+    if let Some((file_path, _)) = &index {
+        if let Some(path) = file_path.as_deref().filter(|path| !path.is_empty()) {
+            match read_export_image_file(&db.crypto, path) {
+                Ok(bytes) => return Ok(bytes),
+                Err(error) => log::warn!(
+                    "BACKUP: clip {uuid} indexed original at {path} was unusable: {error}"
+                ),
+            }
+        }
+    }
+
+    let managed = db.image_dir.join(format!("{uuid}.cubby"));
+    let mut managed_error = None;
+    match read_export_image_file(&db.crypto, &managed.to_string_lossy()) {
+        Ok(bytes) => return Ok(bytes),
+        Err(error) if error == "not-found" => {}
+        Err(error) => managed_error = Some(error),
+    }
+
+    if let Some((_, full_content)) = index {
+        if !full_content.is_empty() {
+            return if db.crypto.is_encrypted(&full_content) {
+                db.crypto.decrypt(&full_content)
+            } else {
+                Ok(full_content)
+            };
+        }
+    }
+
+    if let Some(error) = managed_error {
+        return Err(format!(
+            "managed original {} could not be read: {error}",
+            managed.display()
+        ));
+    }
+    Err("full-resolution original is missing".to_string())
+}
+
+fn read_export_image_file(
+    crypto: &crate::crypto::CryptoManager,
+    path: &str,
+) -> Result<Vec<u8>, String> {
+    let encrypted = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err("not-found".to_string());
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    if encrypted.is_empty() {
+        return Err("file was empty".to_string());
+    }
+    let bytes = crypto.decrypt(&encrypted)?;
+    if bytes.is_empty() {
+        return Err("decrypted original was empty".to_string());
+    }
+    Ok(bytes)
 }
 
 /// Write `bytes` beside `path`, then replace the destination so a failed
@@ -624,10 +738,20 @@ pub async fn import_backup(
                 continue;
             }
         };
+        let full_image = match decode_optional_full_image(clip.full_image_b64.as_deref()) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                result.errors.push(error);
+                continue;
+            }
+        };
 
+        // Capture hashes an image from the full PNG, not the thumbnail. A
+        // restored original has to use the same material or recopying that
+        // screenshot on the new machine stores a duplicate.
         let hash_material = crate::clipboard::build_clip_hash_material(
             &clip.clip_type,
-            &content,
+            full_image.as_deref().unwrap_or(&content),
             std::iter::empty::<(&str, &[u8])>(),
         );
         let content_hash = db.crypto.keyed_hash(&hash_material);
@@ -678,10 +802,24 @@ pub async fn import_backup(
         let encrypt_optional =
             |value: Option<&str>| db.crypto.encrypt_optional_text(value).ok().flatten();
 
-        // Images arrive as their thumbnail, which is exactly the state
-        // retention leaves an expired image in, so mark them that way rather
-        // than letting the app offer a full-resolution paste that cannot work.
-        let full_image_expired = i64::from(clip.clip_type == "image");
+        let new_uuid = Uuid::new_v4().to_string();
+        // Persist the original before the row exists. A clip that lands without
+        // its file would be marked expired and look like a successful restore
+        // of a screenshot the user can no longer copy. SBS-919.
+        let restored_original = match full_image.as_deref() {
+            Some(bytes) => match persist_imported_original(db, &new_uuid, bytes) {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    result.errors.push(error);
+                    continue;
+                }
+            },
+            None => None,
+        };
+        // Thumbnail-only images (old bundles, or already expired) stay in the
+        // first-class expired state so Copy image stays disabled.
+        let full_image_expired =
+            i64::from(clip.clip_type == "image" && restored_original.is_none());
         let ocr_status = if clip.ocr_text.is_some() {
             Some("completed")
         } else {
@@ -699,7 +837,7 @@ pub async fn import_backup(
             VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
-        .bind(Uuid::new_v4().to_string())
+        .bind(&new_uuid)
         .bind(&clip.clip_type)
         .bind(&encrypted_content)
         .bind(&encrypted_preview)
@@ -724,8 +862,38 @@ pub async fn import_backup(
         .await;
 
         match insert {
-            Ok(_) => result.imported += 1,
-            Err(error) => result.errors.push(format!("insert failed: {error}")),
+            Ok(_) => {
+                if let Some(file_path) = restored_original {
+                    if let Err(error) = index_imported_original(
+                        db,
+                        &new_uuid,
+                        &file_path,
+                        full_image.as_ref().map(Vec::len).unwrap_or(0) as i64,
+                    )
+                    .await
+                    {
+                        remove_imported_original(&file_path);
+                        if let Err(cleanup) = sqlx::query("DELETE FROM clips WHERE uuid = ?")
+                            .bind(&new_uuid)
+                            .execute(&db.pool)
+                            .await
+                        {
+                            log::error!(
+                                "BACKUP: failed to roll back clip {new_uuid} after image index error: {cleanup}"
+                            );
+                        }
+                        result.errors.push(error);
+                        continue;
+                    }
+                }
+                result.imported += 1;
+            }
+            Err(error) => {
+                if let Some(file_path) = restored_original {
+                    remove_imported_original(&file_path);
+                }
+                result.errors.push(format!("insert failed: {error}"));
+            }
         }
     }
 
@@ -753,6 +921,53 @@ async fn ensure_folder(db: &Database, name: &str) -> Result<i64, String> {
         .await
         .map(|done| done.last_insert_rowid())
         .map_err(|e| format!("Could not create folder {name}: {e}"))
+}
+
+fn decode_optional_full_image(value: Option<&str>) -> Result<Option<Vec<u8>>, String> {
+    let Some(encoded) = value else {
+        return Ok(None);
+    };
+    let bytes = BASE64
+        .decode(encoded.as_bytes())
+        .map_err(|_| "A clip's full-resolution image was unreadable".to_string())?;
+    if bytes.is_empty() {
+        return Err("A clip's full-resolution image was empty".to_string());
+    }
+    Ok(Some(bytes))
+}
+
+fn persist_imported_original(
+    db: &Database,
+    uuid: &str,
+    png_bytes: &[u8],
+) -> Result<String, String> {
+    crate::clipboard::persist_full_image_file(&db.crypto, &db.image_dir, uuid, png_bytes)
+        .map_err(|error| format!("Could not restore a screenshot original: {error}"))
+}
+
+async fn index_imported_original(
+    db: &Database,
+    uuid: &str,
+    file_path: &str,
+    file_size: i64,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        INSERT INTO clip_images (clip_uuid, full_content, file_path, file_size, storage_kind, mime_type, created_at)
+        VALUES (?, x'', ?, ?, 'file', 'image/png', CURRENT_TIMESTAMP)
+        "#,
+    )
+    .bind(uuid)
+    .bind(file_path)
+    .bind(file_size)
+    .execute(&db.pool)
+    .await
+    .map(|_| ())
+    .map_err(|error| format!("Could not index a restored screenshot original: {error}"))
+}
+
+fn remove_imported_original(file_path: &str) {
+    crate::clipboard::remove_full_image_file(file_path);
 }
 
 #[cfg(test)]
@@ -1192,6 +1407,74 @@ mod tests {
             .expect("the clip should exist")
     }
 
+    async fn insert_image_clip(
+        db: &Database,
+        thumbnail: &[u8],
+        full: Option<&[u8]>,
+        expired: bool,
+    ) -> String {
+        let uuid = Uuid::new_v4().to_string();
+        let hash_input = full.unwrap_or(thumbnail);
+        let material = crate::clipboard::build_clip_hash_material(
+            "image",
+            hash_input,
+            std::iter::empty::<(&str, &[u8])>(),
+        );
+        sqlx::query(
+            r#"INSERT INTO clips (
+                uuid, clip_type, content, text_preview, content_hash,
+                full_image_expired, created_at, last_accessed
+            ) VALUES (?, 'image', ?, ?, ?, ?, '2026-05-01 09:00:00', '2026-05-01 09:00:00')"#,
+        )
+        .bind(&uuid)
+        .bind(db.crypto.encrypt(thumbnail).unwrap())
+        .bind(db.crypto.encrypt_text("[Image]").unwrap())
+        .bind(db.crypto.keyed_hash(&material))
+        .bind(i64::from(expired))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        if let Some(png) = full {
+            std::fs::create_dir_all(&db.image_dir).unwrap();
+            let file_path =
+                crate::clipboard::persist_full_image_file(&db.crypto, &db.image_dir, &uuid, png)
+                    .unwrap();
+            sqlx::query(
+                r#"INSERT INTO clip_images (
+                    clip_uuid, full_content, file_path, file_size, storage_kind, mime_type
+                ) VALUES (?, x'', ?, ?, 'file', 'image/png')"#,
+            )
+            .bind(&uuid)
+            .bind(&file_path)
+            .bind(png.len() as i64)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+        uuid
+    }
+
+    async fn restored_image_state(db: &Database) -> (bool, Option<Vec<u8>>, Vec<u8>) {
+        let (uuid, expired, thumbnail): (String, bool, Vec<u8>) = sqlx::query_as(
+            "SELECT uuid, full_image_expired, content FROM clips WHERE clip_type = 'image'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let thumbnail = db.crypto.decrypt(&thumbnail).unwrap();
+        let file_path: Option<String> =
+            sqlx::query_scalar("SELECT file_path FROM clip_images WHERE clip_uuid = ?")
+                .bind(&uuid)
+                .fetch_optional(&db.pool)
+                .await
+                .unwrap();
+        let original = file_path.map(|path| {
+            crate::clipboard::read_full_image_file(&db.crypto, &path)
+                .expect("original should decrypt")
+        });
+        (expired, original, thumbnail)
+    }
+
     /// SBS-772: a clip whose payload cannot be decrypted must refuse the export
     /// rather than write a bundle that looks complete while omitting that clip.
     #[tokio::test]
@@ -1413,6 +1696,176 @@ mod tests {
             "the rest should be counted, not listed: {error}"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// SBS-919: a live screenshot original must survive a PC-migration
+    /// backup. The thumbnail in `clips.content` is not a substitute.
+    #[tokio::test]
+    async fn full_resolution_image_survives_a_round_trip() {
+        let source = test_database().await;
+        let thumbnail = b"thumb-320x220-not-the-original";
+        let original = b"full-res-png-bytes-sbs-919-secret";
+        insert_image_clip(&source, thumbnail, Some(original), false).await;
+
+        let path = temp_path("full-res-roundtrip");
+        let exported = export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .expect("a live original must export");
+        assert_eq!(exported, 1);
+
+        let raw = std::fs::read(&path).unwrap();
+        assert!(
+            !raw.windows(original.len()).any(|window| window == original),
+            "the bundle on disk must not hold the original in the clear"
+        );
+
+        let target = test_database().await;
+        let result = import_backup(&target, path.to_str().unwrap(), "correct horse", false)
+            .await
+            .expect("import should succeed");
+        assert_eq!(result.imported, 1);
+        assert!(result.errors.is_empty());
+
+        let (expired, restored, restored_thumb) = restored_image_state(&target).await;
+        assert!(
+            !expired,
+            "a restored original must not be marked full_image_expired"
+        );
+        assert_eq!(
+            restored.as_deref(),
+            Some(original.as_slice()),
+            "the restored file must be the full-resolution original"
+        );
+        assert_eq!(
+            restored_thumb, thumbnail,
+            "clips.content must stay the thumbnail, not the original"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&target.image_dir);
+        let _ = std::fs::remove_dir_all(&source.image_dir);
+    }
+
+    /// SBS-919: retention already dropped the original. That is a first-class
+    /// state, not a missing file, so export must succeed without one.
+    #[tokio::test]
+    async fn expired_image_exports_without_an_original() {
+        let source = test_database().await;
+        insert_image_clip(&source, b"expired-thumb", None, true).await;
+
+        let path = temp_path("expired-image");
+        export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .expect("an already-expired image must still export");
+
+        let target = test_database().await;
+        import_backup(&target, path.to_str().unwrap(), "correct horse", false)
+            .await
+            .unwrap();
+        let (expired, original, thumb) = restored_image_state(&target).await;
+        assert!(expired, "an expired image must stay expired after import");
+        assert!(original.is_none(), "no original should have been written");
+        assert_eq!(thumb, b"expired-thumb");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// SBS-919: a bundle written before this field existed still imports, as
+    /// the thumbnail-only expired state that version actually produced.
+    #[test]
+    fn old_bundle_clip_without_full_image_field_deserializes() {
+        let json = r#"{
+            "clip_type": "image",
+            "content_b64": "dGh1bWI=",
+            "text_preview": "[Image]",
+            "is_pinned": false,
+            "created_at": "2026-05-01 09:00:00"
+        }"#;
+        let clip: BackupClip = serde_json::from_str(json).expect("pre-SBS-919 clip must parse");
+        assert_eq!(clip.clip_type, "image");
+        assert!(
+            clip.full_image_b64.is_none(),
+            "a missing field must default to no original"
+        );
+    }
+
+    /// SBS-919: a live image whose original cannot be read must refuse the
+    /// export rather than write a bundle that looks complete and then expire
+    /// every screenshot on restore.
+    #[tokio::test]
+    async fn export_refuses_a_missing_full_resolution_original() {
+        let source = test_database().await;
+        let uuid =
+            insert_image_clip(&source, b"thumb-only-because-file-is-gone", None, false).await;
+
+        let path = temp_path("missing-original");
+        let original_dest = b"pre-existing destination must survive";
+        std::fs::write(&path, original_dest).unwrap();
+
+        let error = export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .expect_err("a missing live original must fail the export");
+
+        assert!(
+            error.contains("unreadable full-resolution image"),
+            "the error should name the full-image field type: {error}"
+        );
+        assert!(
+            error.contains(&uuid),
+            "the error should name the affected clip {uuid}: {error}"
+        );
+        assert!(
+            !error.contains("thumb-only-because-file-is-gone"),
+            "the error must not expose clip bytes: {error}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original_dest,
+            "a refused export must leave the destination unchanged"
+        );
+        assert!(
+            leftover_backup_temps(path.parent().unwrap()).is_empty(),
+            "a refused export must not leave temporary output"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// SBS-919: an original that is present but cannot be decrypted is not
+    /// "nothing there". Fail closed instead of substituting the thumbnail.
+    #[tokio::test]
+    async fn export_refuses_an_unreadable_full_resolution_original() {
+        let source = test_database().await;
+        let uuid = insert_image_clip(
+            &source,
+            b"readable-thumb",
+            Some(b"full-res-that-will-be-corrupted"),
+            false,
+        )
+        .await;
+        let file_path = source.image_dir.join(format!("{uuid}.cubby"));
+        std::fs::write(&file_path, b"not-an-encrypted-original").unwrap();
+
+        let path = temp_path("corrupt-original");
+        let error = export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .expect_err("an unreadable original must fail the export");
+
+        assert!(
+            error.contains("unreadable full-resolution image"),
+            "the error should name the full-image field type: {error}"
+        );
+        assert!(
+            error.contains(&uuid),
+            "the error should name the affected clip {uuid}: {error}"
+        );
+        assert!(
+            !error.contains("full-res-that-will-be-corrupted"),
+            "the error must not expose the original bytes: {error}"
+        );
+        assert!(
+            !path.exists(),
+            "a refused export must not create the destination file"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&source.image_dir);
     }
 
     /// `MoveFileExW` refuses paths above `MAX_PATH` unless they are `\\?\`
