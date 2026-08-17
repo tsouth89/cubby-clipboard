@@ -35,6 +35,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - The image window no longer offers Copy image after the original has expired (SBS-807)
 - Keep clip edits, history files, and captures from mixing together or vanishing
 - Stop a failed paste and a failed history reload from reporting success
+- A failed clip reload no longer looks like a healthy current list: same-filter refresh shows a retry banner, superseded loads are not treated as success, and folder / app / count reloads toast instead of staying silent (SBS-805)
 - Keep History preview details in sync after a save and after a reveal
 - Keep hidden clips blank in search results, and finish folder and duplicate cleanup
 - Keep the flyout visible while Settings is open, and honor the toggle and always-on-top preferences

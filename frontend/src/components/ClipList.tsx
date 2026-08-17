@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { ClipboardItem } from '../types';
 import { ClipCard } from './ClipCard';
 import { AlertCircle, RefreshCw } from 'lucide-react';
+import { clipListErrorSurface } from '../utils/clipLoadFailure';
 
 interface ClipListProps {
   clips: ClipboardItem[];
@@ -89,26 +90,29 @@ export function ClipList({
     );
   }
 
+  const errorSurface = clipListErrorSurface(loadError, clips.length);
+
+  if (errorSurface === 'panel') {
+    return (
+      <div className="flex h-full flex-col items-center justify-center px-10 text-center">
+        <AlertCircle size={22} className="mb-3 text-destructive" />
+        <p className="text-sm font-medium text-foreground/90">{t('clipList.loadFailed')}</p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+          {t('clipList.loadFailedDesc')}
+        </p>
+        <button
+          type="button"
+          onClick={onRetry}
+          className="mt-4 flex items-center gap-1.5 rounded-md border border-white/[0.1] bg-white/[0.05] px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-white/[0.09]"
+        >
+          <RefreshCw size={13} />
+          {t('clipList.retry')}
+        </button>
+      </div>
+    );
+  }
+
   if (clips.length === 0) {
-    if (loadError) {
-      return (
-        <div className="flex h-full flex-col items-center justify-center px-10 text-center">
-          <AlertCircle size={22} className="mb-3 text-destructive" />
-          <p className="text-sm font-medium text-foreground/90">{t('clipList.loadFailed')}</p>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            {t('clipList.loadFailedDesc')}
-          </p>
-          <button
-            type="button"
-            onClick={onRetry}
-            className="mt-4 flex items-center gap-1.5 rounded-md border border-white/[0.1] bg-white/[0.05] px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-white/[0.09]"
-          >
-            <RefreshCw size={13} />
-            {t('clipList.retry')}
-          </button>
-        </div>
-      );
-    }
     return (
       <div className="flex h-full flex-col items-center justify-center px-10 text-center">
         <p className="text-sm font-medium text-foreground/80">{emptyTitle}</p>
@@ -117,14 +121,14 @@ export function ClipList({
     );
   }
 
-  return (
+  const list = (
     <div
       ref={listRef}
       data-el="clip-list"
       id="clip-listbox"
       role="listbox"
       aria-label="Clipboard history"
-      className="no-scrollbar h-full overflow-y-auto px-2 pb-2"
+      className={`no-scrollbar overflow-y-auto px-2 pb-2 ${errorSurface === 'banner' ? 'min-h-0 flex-1' : 'h-full'}`}
       onScroll={(event) => {
         if (!hasMore || isLoading) return;
         const element = event.currentTarget;
@@ -164,6 +168,37 @@ export function ClipList({
           <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary/25 border-t-primary" />
         </div>
       )}
+    </div>
+  );
+
+  if (errorSurface !== 'banner') {
+    return list;
+  }
+
+  // Banner lives outside the listbox so the options stay its only children.
+  // A failed same-filter refresh used to keep these rows with no in-list
+  // error (SBS-805); the toast dismissed and the page looked current.
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div
+        role="alert"
+        data-el="clip-list-stale"
+        className="mx-2 mb-2 flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2"
+      >
+        <AlertCircle size={14} className="shrink-0 text-destructive" />
+        <p className="min-w-0 flex-1 text-xs font-medium text-foreground/90">
+          {t('clipList.refreshFailed')}
+        </p>
+        <button
+          type="button"
+          onClick={onRetry}
+          className="flex shrink-0 items-center gap-1.5 rounded-md border border-white/[0.1] bg-white/[0.05] px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-white/[0.09]"
+        >
+          <RefreshCw size={13} />
+          {t('clipList.retry')}
+        </button>
+      </div>
+      {list}
     </div>
   );
 }

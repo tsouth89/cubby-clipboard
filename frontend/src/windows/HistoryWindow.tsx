@@ -17,7 +17,12 @@ import { collectBulkCopyText } from '../utils/bulkCopy';
 import { ClipDetails } from '../utils/clipPreviewState';
 import { customRange, DATE_PRESET_LABELS, DatePreset, presetRange } from '../utils/dateRange';
 import { folderSelectionAfterReload } from '../utils/folderSelection';
-import { clipLoadFailure } from '../utils/clipLoadFailure';
+import {
+  clipLoadAnnouncesSuccess,
+  clipLoadFailure,
+  type ClipLoadResult,
+  sidecarReloadFailure,
+} from '../utils/clipLoadFailure';
 import {
   applySelectionClick,
   EMPTY_SELECTION,
@@ -118,7 +123,7 @@ export function HistoryWindow() {
   const { from: dateFrom, to: dateTo } = dateRange;
 
   const loadClips = useCallback(
-    async (append: boolean) => {
+    async (append: boolean): Promise<ClipLoadResult> => {
       const loadId = ++loadIdRef.current;
       const offset = append ? clipsRef.current.length : 0;
       const query = searchQuery.trim();
@@ -133,7 +138,6 @@ export function HistoryWindow() {
 
       try {
         setIsLoading(true);
-        setLoadError(false);
 
         const data = query
           ? await invoke<ClipboardItem[]>('search_clips', {
@@ -160,17 +164,17 @@ export function HistoryWindow() {
               sourceApp,
             });
 
-        if (loadId !== loadIdRef.current) return true;
+        if (loadId !== loadIdRef.current) return 'superseded';
         setClips((previous) => (append ? [...previous, ...data] : data));
         visibleFilterKeyRef.current = filterKey;
         setHasMore(data.length === PAGE_SIZE);
-        return true;
+        setLoadError(false);
+        return 'applied';
       } catch (error) {
-        // Superseded: a newer load owns the view, so this one failing is not a
-        // failure to refresh — report success and let the newer load speak.
-        if (loadId !== loadIdRef.current) return true;
+        // Superseded is unknown, not success: a caller that toasts "deleted"
+        // from this return would announce work the newer load has not applied.
+        if (loadId !== loadIdRef.current) return 'superseded';
         console.error('Failed to load clips:', error);
-        setLoadError(true);
         setHasMore(false);
         const failure = clipLoadFailure({
           append,
@@ -183,6 +187,9 @@ export function HistoryWindow() {
           // same-filter refresh rather than another filter change.
           visibleFilterKeyRef.current = filterKey;
         }
+        if (!append) {
+          setLoadError(true);
+        }
         if (failure.notify) {
           toast.error(t(append ? 'clipList.loadMoreFailed' : 'clipList.refreshFailed'), {
             // One id, so a backend that keeps failing on every clipboard change
@@ -190,7 +197,7 @@ export function HistoryWindow() {
             id: 'clip-load-failed',
           });
         }
-        return false;
+        return 'failed';
       } finally {
         if (loadId === loadIdRef.current) setIsLoading(false);
       }
@@ -207,24 +214,42 @@ export function HistoryWindow() {
         selectedFolderRef.current = next;
         setSelectedFolder(next);
       }
+      return true;
     } catch (error) {
       console.error('Failed to load folders:', error);
+      const failure = sidecarReloadFailure();
+      if (failure.notify) {
+        toast.error('Couldn’t refresh folders', { id: 'folder-load-failed' });
+      }
+      return false;
     }
   }, []);
 
   const loadSourceApps = useCallback(async () => {
     try {
       setSourceApps(await invoke<SourceAppCount[]>('get_source_apps'));
+      return true;
     } catch (error) {
       console.error('Failed to load source apps:', error);
+      const failure = sidecarReloadFailure();
+      if (failure.notify) {
+        toast.error('Couldn’t refresh apps', { id: 'source-apps-load-failed' });
+      }
+      return false;
     }
   }, []);
 
   const refreshTotalCount = useCallback(async () => {
     try {
       setTotalClipCount(await invoke<number>('get_clipboard_history_size'));
+      return true;
     } catch (error) {
       console.error('Failed to get history size:', error);
+      const failure = sidecarReloadFailure();
+      if (failure.notify) {
+        toast.error('Couldn’t refresh the clip count', { id: 'history-count-load-failed' });
+      }
+      return false;
     }
   }, []);
 
@@ -341,7 +366,7 @@ export function HistoryWindow() {
         refreshTotalCount(),
         loadSourceApps(),
       ]);
-      return reloaded;
+      return clipLoadAnnouncesSuccess(reloaded);
     },
     [clearSelection, loadClips, loadFolders, refreshTotalCount, loadSourceApps]
   );
@@ -540,9 +565,9 @@ export function HistoryWindow() {
         // Hidden rows still ship empty content after reload; keep the session
         // reveal in sync so leaving this clip and coming back does not revert.
         updateRevealed(clipId, { content: text, preview: text });
-        // Same-filter reload: loadClips already toasts refreshFailed on
+        // Same-filter reload: loadClips already shows the stale banner on
         // failure. A second toast here would talk over it.
-        if (!(await loadClips(false))) {
+        if (!clipLoadAnnouncesSuccess(await loadClips(false))) {
           return;
         }
         toast.success('Clip updated');
@@ -616,8 +641,11 @@ export function HistoryWindow() {
         forgetRevealed(clipId);
         // loadClips reports failure rather than throwing, so a stale list after
         // a failed reload would otherwise be announced as success.
-        if (!(await loadClips(false))) {
-          toast.error('Visibility changed, but the list could not be reloaded');
+        const reloaded = await loadClips(false);
+        if (!clipLoadAnnouncesSuccess(reloaded)) {
+          if (reloaded === 'failed') {
+            toast.error('Visibility changed, but the list could not be reloaded');
+          }
           return;
         }
         toast.success(hidden ? 'Clip hidden' : 'Clip no longer hidden');

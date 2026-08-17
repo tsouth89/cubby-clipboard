@@ -18,7 +18,12 @@ import { useUpdater } from './hooks/useUpdater';
 import { useRevealedClips } from './hooks/useRevealedClips';
 import { isImeKey, shouldCaptureTypeToSearch } from './utils/flyoutSearch';
 import { folderSelectionAfterReload } from './utils/folderSelection';
-import { clipLoadFailure } from './utils/clipLoadFailure';
+import {
+  clipLoadAnnouncesSuccess,
+  clipLoadFailure,
+  type ClipLoadResult,
+  sidecarReloadFailure,
+} from './utils/clipLoadFailure';
 import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
 import { generateDemoClips } from './debug/demoData';
@@ -317,7 +322,7 @@ function App() {
       append: boolean = false,
       searchQuery: string = '',
       filter: ContentFilter = 'all'
-    ) => {
+    ): Promise<ClipLoadResult> => {
       const perfId = ++loadPerfIdRef.current;
       const filterKey = JSON.stringify([folderId, searchQuery.trim(), filter]);
       const loadStart = perfLogEnabled ? performance.now() : 0;
@@ -326,7 +331,6 @@ function App() {
 
       try {
         setIsLoading(true);
-        setLoadError(false);
 
         const currentOffset = append ? clipsRef.current.length : 0;
         // The index lowercases but does not trim, so a leading space matches
@@ -393,7 +397,7 @@ function App() {
         // A newer load supersedes this one (e.g. the reset when the flyout
         // closes starts an unfiltered load while a filtered one is in flight).
         // Discard the stale result so it can't overwrite the current view.
-        if (perfId !== loadPerfIdRef.current) return true;
+        if (perfId !== loadPerfIdRef.current) return 'superseded';
 
         if (append) {
           setClips((prev) => {
@@ -429,13 +433,13 @@ function App() {
             });
           });
         }
-        return true;
+        setLoadError(false);
+        return 'applied';
       } catch (error) {
-        // Superseded: a newer load owns the view, so this one failing is not a
-        // failure to refresh — report success and let the newer load speak.
-        if (perfId !== loadPerfIdRef.current) return true;
+        // Superseded is unknown, not success: a caller that toasts "deleted"
+        // from this return would announce work the newer load has not applied.
+        if (perfId !== loadPerfIdRef.current) return 'superseded';
         console.error('Failed to load clips:', error);
-        setLoadError(true);
         setHasMore(false);
         const failure = clipLoadFailure({
           append,
@@ -448,6 +452,12 @@ function App() {
           // same-filter refresh rather than another filter change.
           visibleFilterKeyRef.current = filterKey;
         }
+        // Banner (same-filter replace) and panel (empty list) both read
+        // loadError. Pagination keeps the first page healthy, so it toasts
+        // instead of marking the list stale.
+        if (!append) {
+          setLoadError(true);
+        }
         if (failure.notify) {
           toast.error(t(append ? 'clipList.loadMoreFailed' : 'clipList.refreshFailed'), {
             // One id, so a backend that keeps failing on every clipboard change
@@ -455,7 +465,7 @@ function App() {
             id: 'clip-load-failed',
           });
         }
-        return false;
+        return 'failed';
       } finally {
         if (perfId === loadPerfIdRef.current) setIsLoading(false);
       }
@@ -466,7 +476,7 @@ function App() {
   const loadFolders = useCallback(async () => {
     if (assetCaptureEnabled) {
       setFolders([]);
-      return;
+      return true;
     }
     try {
       const data = await invoke<FolderItem[]>('get_folders');
@@ -477,8 +487,15 @@ function App() {
         selectedFolderRef.current = next;
         setSelectedFolder(next);
       }
+      return true;
     } catch (error) {
       console.error('Failed to load folders:', error);
+      // Last-known-good folders stay; unknown is not an empty folder list.
+      const failure = sidecarReloadFailure();
+      if (failure.notify) {
+        toast.error('Couldn’t refresh folders', { id: 'folder-load-failed' });
+      }
+      return false;
     }
   }, []);
 
@@ -510,13 +527,19 @@ function App() {
   const refreshTotalCount = useCallback(async () => {
     if (assetCaptureEnabled) {
       setTotalClipCount(generateDemoClips().length);
-      return;
+      return true;
     }
     try {
       const count = await invoke<number>('get_clipboard_history_size');
       setTotalClipCount(count);
+      return true;
     } catch (e) {
       console.error('Failed to get history size', e);
+      const failure = sidecarReloadFailure();
+      if (failure.notify) {
+        toast.error('Couldn’t refresh the clip count', { id: 'history-count-load-failed' });
+      }
+      return false;
     }
   }, []);
 
@@ -706,8 +729,10 @@ function App() {
         // row blank under a toast saying it is visible again. loadClips reports
         // failure rather than throwing, so the toast has to read its result.
         const reloaded = await refreshCurrentFolder();
-        if (!reloaded) {
-          toast.error('Visibility changed, but the list could not be reloaded');
+        if (!clipLoadAnnouncesSuccess(reloaded)) {
+          if (reloaded === 'failed') {
+            toast.error('Visibility changed, but the list could not be reloaded');
+          }
           return;
         }
         toast.success(hidden ? 'Clip hidden' : 'Clip no longer hidden');
@@ -990,8 +1015,12 @@ function App() {
       if (selectedFolder === folderId) {
         setSelectedFolder(null);
       }
-      await loadFolders();
-      refreshTotalCount();
+      const foldersReloaded = await loadFolders();
+      await refreshTotalCount();
+      if (!foldersReloaded) {
+        toast.error('Folder deleted, but the folder list could not be reloaded');
+        return;
+      }
       toast.success(t('folders.folderDeleted'));
     } catch (error) {
       console.error('Failed to delete folder:', error);
@@ -1020,7 +1049,7 @@ function App() {
         loadFolders(),
         refreshTotalCount(),
       ]);
-      if (!reloaded) {
+      if (!clipLoadAnnouncesSuccess(reloaded)) {
         return;
       }
       toast.success(
