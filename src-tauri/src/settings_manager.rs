@@ -1,5 +1,9 @@
 use crate::database::Database;
 use crate::models::AppSettings;
+use crate::settings_load::{
+    may_persist_first_run_defaults, promote_interrupted_tmp, recover_dest_gone_replace,
+    resolve_settings_disk_source, settings_tmp_path, SettingsDiskSource,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -12,46 +16,131 @@ pub struct SettingsManager {
     settings: RwLock<AppSettings>,
 }
 
+enum DiskRead {
+    Settings {
+        settings: AppSettings,
+        recovered_unreadable: bool,
+        recovered_interrupted: bool,
+    },
+    Missing,
+}
+
 impl SettingsManager {
     pub async fn new(app: &AppHandle, db: &Database) -> Self {
         // Keep settings on the same data root as the database (including the
         // debug `/dev` isolation from SOU-227 and portable mode).
         let base = crate::get_data_dir();
         let path = base.join("settings.json");
-        let load_path = Self::resolve_settings_load_path(app, &base, &path);
 
-        let (settings, recovered_unreadable) = if load_path.exists() {
-            match fs::read_to_string(&load_path)
-                .map_err(|e| e.to_string())
-                .and_then(|content| serde_json::from_str(&content).map_err(|e| e.to_string()))
-            {
-                Ok(settings) => (settings, false),
-                Err(error) => (
-                    Self::recover_from_unreadable_settings(&load_path, &error),
-                    true,
-                ),
-            }
-        } else {
-            // One-shot import from the old SQLite settings tables. After the
-            // first successful JSON write, settings.json is the sole source.
-            (Self::migrate_from_sqlite(db).await, false)
-        };
+        // Check the canonical path (and its leftover temp) before
+        // resolve_settings_load_path. In release that helper copies a legacy
+        // AppData file onto `path` when `path` is missing, which would hide an
+        // interrupted FAT/exFAT replace sitting in settings.json.tmp (SBS-935).
+        let (mut settings, recovered_unreadable, recovered_interrupted, missing) =
+            match Self::read_settings_from_disk(&path) {
+                DiskRead::Settings {
+                    settings,
+                    recovered_unreadable,
+                    recovered_interrupted,
+                } => (settings, recovered_unreadable, recovered_interrupted, false),
+                DiskRead::Missing => {
+                    let load_path = Self::resolve_settings_load_path(app, &base, &path);
+                    if load_path.exists() {
+                        match Self::parse_settings_file(&load_path) {
+                            Ok(settings) => (settings, false, false, false),
+                            Err(error) => (
+                                Self::recover_from_unreadable_settings(&load_path, &error),
+                                true,
+                                false,
+                                false,
+                            ),
+                        }
+                    } else {
+                        (Self::migrate_from_sqlite(db).await, false, false, true)
+                    }
+                }
+            };
 
-        let mut settings = settings;
         let seeded_defaults = Self::seed_default_sensitive_apps(&mut settings);
 
         // Ensure we save it once immediately if migrating or seeding, so the
         // file exists and the one-time password-manager ignore list sticks.
+        // An interrupted replace must persist the recovered object (or promote
+        // the leftover temp), never AppSettings::default() 30-day retention.
         let manager = Self {
             file_path: path,
             settings: RwLock::new(settings.clone()),
         };
-        if seeded_defaults || recovered_unreadable || !manager.file_path.exists() {
+        let persist_source = if recovered_interrupted {
+            SettingsDiskSource::InterruptedTmp
+        } else if missing {
+            SettingsDiskSource::Missing
+        } else {
+            SettingsDiskSource::Canonical
+        };
+        if recovered_interrupted && !seeded_defaults && !recovered_unreadable {
+            if let Err(error) = promote_interrupted_tmp(&manager.file_path) {
+                log::error!("SETTINGS: Failed to promote interrupted settings write: {error}");
+                if let Err(error) = manager.save(settings) {
+                    log::error!("SETTINGS: Failed to persist recovered settings: {error}");
+                }
+            }
+        } else if seeded_defaults
+            || recovered_unreadable
+            || (missing && may_persist_first_run_defaults(persist_source))
+        {
             if let Err(error) = manager.save(settings) {
                 log::error!("SETTINGS: Failed to persist settings: {error}");
             }
         }
         manager
+    }
+
+    fn parse_settings_file(path: &Path) -> Result<AppSettings, String> {
+        fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|content| serde_json::from_str(&content).map_err(|e| e.to_string()))
+    }
+
+    /// Read the canonical settings file, or a leftover sibling temp from an
+    /// interrupted replace. Does not consult legacy AppData or SQLite.
+    fn read_settings_from_disk(canonical: &Path) -> DiskRead {
+        match resolve_settings_disk_source(canonical) {
+            SettingsDiskSource::Canonical => match Self::parse_settings_file(canonical) {
+                Ok(settings) => DiskRead::Settings {
+                    settings,
+                    recovered_unreadable: false,
+                    recovered_interrupted: false,
+                },
+                Err(error) => DiskRead::Settings {
+                    settings: Self::recover_from_unreadable_settings(canonical, &error),
+                    recovered_unreadable: true,
+                    recovered_interrupted: false,
+                },
+            },
+            SettingsDiskSource::InterruptedTmp => {
+                let tmp = settings_tmp_path(canonical);
+                match Self::parse_settings_file(&tmp) {
+                    Ok(settings) => {
+                        log::warn!(
+                            "SETTINGS: settings.json is missing; recovered interrupted write from {} (SBS-935)",
+                            tmp.display()
+                        );
+                        DiskRead::Settings {
+                            settings,
+                            recovered_unreadable: false,
+                            recovered_interrupted: true,
+                        }
+                    }
+                    Err(error) => DiskRead::Settings {
+                        settings: Self::recover_from_unreadable_settings(&tmp, &error),
+                        recovered_unreadable: true,
+                        recovered_interrupted: true,
+                    },
+                }
+            }
+            SettingsDiskSource::Missing => DiskRead::Missing,
+        }
     }
 
     /// Prefer the canonical settings path. In release builds, migrate once from
@@ -206,10 +295,29 @@ impl SettingsManager {
         // a truncated settings.json (a truncated file used to silently reset
         // every preference on the next launch).
         let mut lock = self.settings.write().unwrap();
-        let tmp_path = self.file_path.with_extension("json.tmp");
+        let tmp_path = settings_tmp_path(&self.file_path);
         fs::write(&tmp_path, json).map_err(|e| e.to_string())?;
         if let Err(error) = replace_file_atomically(&tmp_path, &self.file_path) {
-            let _ = fs::remove_file(&tmp_path);
+            // On exFAT/FAT, replace is delete-the-target-then-rename. A failure
+            // after the destination entry is gone leaves the temp holding the
+            // only copy of the preferences, so deleting it here would destroy
+            // both the old file and the new one. Try to put it in place instead
+            // (same dest-gone fallback as backup.rs; SBS-935).
+            if recover_dest_gone_replace(&tmp_path, &self.file_path) {
+                log::warn!(
+                    "SETTINGS: replacing settings.json failed ({error}); the new file was renamed into place instead"
+                );
+                *lock = new_settings;
+                return Ok(());
+            }
+            if self.file_path.exists() {
+                let _ = fs::remove_file(&tmp_path);
+            } else {
+                log::error!(
+                    "SETTINGS: replacing settings.json failed ({error}) and the destination is gone; leaving {}",
+                    tmp_path.display()
+                );
+            }
             return Err(error);
         }
         *lock = new_settings;
@@ -317,6 +425,89 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(on_disk.auto_delete_days, 365);
         assert!(!path.with_extension("json.tmp").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// SBS-935: an interrupted replace leaves settings.json.tmp and no
+    /// settings.json. Load must recover keep-forever (0), not first-run 30,
+    /// and must not persist AppSettings::default() over the leftover temp.
+    #[test]
+    fn interrupted_tmp_recovers_retention_and_is_not_overwritten_by_defaults() {
+        let dir =
+            std::env::temp_dir().join(format!("cubby-settings-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let tmp = settings_tmp_path(&path);
+        let recovered = AppSettings {
+            auto_delete_days: 0,
+            default_sensitive_apps_seeded: true,
+            has_completed_onboarding: true,
+            ..AppSettings::default()
+        };
+        fs::write(&tmp, serde_json::to_string_pretty(&recovered).unwrap()).unwrap();
+        assert!(!path.exists());
+
+        let source = resolve_settings_disk_source(&path);
+        assert_eq!(source, SettingsDiskSource::InterruptedTmp);
+        assert!(!may_persist_first_run_defaults(source));
+
+        match SettingsManager::read_settings_from_disk(&path) {
+            DiskRead::Settings {
+                settings,
+                recovered_unreadable,
+                recovered_interrupted,
+            } => {
+                assert!(!recovered_unreadable);
+                assert!(recovered_interrupted);
+                assert_eq!(settings.auto_delete_days, 0);
+                assert!(settings.has_completed_onboarding);
+                assert_ne!(
+                    settings.auto_delete_days,
+                    AppSettings::default().auto_delete_days
+                );
+
+                // Seeded flag is already true, so new() promotes the leftover
+                // temp rather than saving AppSettings::default() over it.
+                let mut loaded = settings;
+                let seeded = SettingsManager::seed_default_sensitive_apps(&mut loaded);
+                assert!(!seeded);
+                promote_interrupted_tmp(&path).unwrap();
+            }
+            DiskRead::Missing => panic!("leftover settings.json.tmp must not be a first-run miss"),
+        }
+
+        assert!(path.exists());
+        assert!(!tmp.exists());
+        let on_disk: AppSettings =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk.auto_delete_days, 0);
+        assert!(on_disk.has_completed_onboarding);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unreadable_interrupted_tmp_uses_safe_defaults_not_thirty_day() {
+        let dir =
+            std::env::temp_dir().join(format!("cubby-settings-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let tmp = settings_tmp_path(&path);
+        fs::write(&tmp, "{\"theme\": \"dark\", TRUNCATED").unwrap();
+
+        match SettingsManager::read_settings_from_disk(&path) {
+            DiskRead::Settings {
+                settings,
+                recovered_unreadable,
+                recovered_interrupted,
+            } => {
+                assert!(recovered_unreadable);
+                assert!(recovered_interrupted);
+                assert_eq!(settings.auto_delete_days, 0);
+            }
+            DiskRead::Missing => panic!("unreadable leftover temp is not a first-run miss"),
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -45,6 +45,7 @@ pub mod perf_budget;
 mod search_index;
 mod secrets;
 mod settings_commands;
+mod settings_load;
 mod settings_manager;
 mod shortcuts;
 mod startup_recovery_log;
