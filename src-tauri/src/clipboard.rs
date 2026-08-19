@@ -1470,6 +1470,34 @@ fn should_skip_sensitive_capture(
     skip_sensitive && sensitive && !remote_client
 }
 
+/// Outcome of the skip-likely-secrets capture gate.
+///
+/// `Unscannable` is its own state: failing to decode the paste is not the
+/// same as "not a secret", so capture refuses to store it (SBS-922).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LikelySecretDecision {
+    Store,
+    Skip(crate::secrets::SecretKind),
+    Unscannable,
+}
+
+fn likely_secret_decision(
+    skip_likely_secrets: bool,
+    clip_type: &str,
+    clip_content: &[u8],
+) -> LikelySecretDecision {
+    if !skip_likely_secrets || clip_type != "text" {
+        return LikelySecretDecision::Store;
+    }
+    match std::str::from_utf8(clip_content) {
+        Ok(text) => match crate::secrets::classify_secret(text) {
+            Some(kind) => LikelySecretDecision::Skip(kind),
+            None => LikelySecretDecision::Store,
+        },
+        Err(_) => LikelySecretDecision::Unscannable,
+    }
+}
+
 /// `CF_UNICODETEXT` payload bytes: UTF-16LE, NUL-terminated as Win32 requires.
 #[cfg(target_os = "windows")]
 fn utf16_clipboard_bytes(text: &str) -> Vec<u8> {
@@ -1898,14 +1926,18 @@ async fn process_clipboard_snapshot(
         return;
     }
 
-    if settings.skip_likely_secrets && clip_type == "text" {
-        if let Ok(text) = std::str::from_utf8(&clip_content) {
-            if let Some(kind) = crate::secrets::classify_secret(text) {
-                // Category only — never log the matched clipboard bytes.
-                log::info!("CLIPBOARD: Skipping likely secret ({})", kind.as_str());
-                discard_clear_target();
-                return;
-            }
+    match likely_secret_decision(settings.skip_likely_secrets, clip_type, &clip_content) {
+        LikelySecretDecision::Store => {}
+        LikelySecretDecision::Skip(kind) => {
+            // Category only — never log the matched clipboard bytes.
+            log::info!("CLIPBOARD: Skipping likely secret ({})", kind.as_str());
+            discard_clear_target();
+            return;
+        }
+        LikelySecretDecision::Unscannable => {
+            log::info!("CLIPBOARD: Skipping text that could not be scanned for secrets");
+            discard_clear_target();
+            return;
         }
     }
 
@@ -3051,9 +3083,10 @@ mod tests {
     use super::{
         build_clip_hash_material, calculate_hash, capture_state_name, capture_text,
         clear_ignore_hash_if_matches, clipboard_retry_delay, ignore_marker_applies,
-        is_remote_client_owner, is_remote_client_process, next_listener_backoff, relayed_clip_hash,
-        rgba_to_cf_dib, set_ignore_hash, should_forget_recent_capture, should_relay_capture,
-        should_skip_sensitive_capture, CapturedContent, CapturedFormat, CAPTURE_STATE_LISTENING,
+        is_remote_client_owner, is_remote_client_process, likely_secret_decision,
+        next_listener_backoff, relayed_clip_hash, rgba_to_cf_dib, set_ignore_hash,
+        should_forget_recent_capture, should_relay_capture, should_skip_sensitive_capture,
+        CapturedContent, CapturedFormat, LikelySecretDecision, CAPTURE_STATE_LISTENING,
         CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED, CLIPBOARD_CLEAR_FORGET_WINDOW,
         IGNORE_HASH, IGNORE_HASH_TTL,
     };
@@ -3372,6 +3405,57 @@ mod tests {
         assert!(!should_skip_sensitive_capture(true, false, false));
         assert!(!should_skip_sensitive_capture(false, true, false));
         assert!(!should_skip_sensitive_capture(false, true, true));
+    }
+
+    /// SBS-922: Skip likely secrets must refuse a 9 KiB paste that starts
+    /// with a known marker, not store it because the whole blob is over 8 KiB.
+    #[test]
+    fn skip_likely_secrets_refuses_a_9kib_prefix_secret() {
+        let padding = "x".repeat(9 * 1024);
+        let github = format!("ghp_{} {padding}", "abcdefghijklmnopqrstuvwxyz0123456789");
+        let aws = format!("AKIA{}{} {padding}", "IOSFODNN7", "EXAMPLE");
+        let pem = format!(
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----\n{padding}"
+        );
+        assert!(matches!(
+            likely_secret_decision(true, "text", github.as_bytes()),
+            LikelySecretDecision::Skip(crate::secrets::SecretKind::GitHubToken)
+        ));
+        assert!(matches!(
+            likely_secret_decision(true, "text", aws.as_bytes()),
+            LikelySecretDecision::Skip(crate::secrets::SecretKind::AwsAccessKey)
+        ));
+        assert!(matches!(
+            likely_secret_decision(true, "text", pem.as_bytes()),
+            LikelySecretDecision::Skip(crate::secrets::SecretKind::PrivateKey)
+        ));
+        assert_eq!(
+            likely_secret_decision(true, "text", padding.as_bytes()),
+            LikelySecretDecision::Store
+        );
+        // Setting off, or a non-text clip, still stores.
+        assert_eq!(
+            likely_secret_decision(false, "text", github.as_bytes()),
+            LikelySecretDecision::Store
+        );
+        assert_eq!(
+            likely_secret_decision(true, "image", github.as_bytes()),
+            LikelySecretDecision::Store
+        );
+    }
+
+    /// A scan error is not "not a secret". Invalid UTF-8 text cannot be
+    /// classified, so capture skips storage when the setting is on.
+    #[test]
+    fn skip_likely_secrets_treats_undecodable_text_as_unscannable() {
+        assert_eq!(
+            likely_secret_decision(true, "text", &[0xff, 0xfe, 0xfd]),
+            LikelySecretDecision::Unscannable
+        );
+        assert_eq!(
+            likely_secret_decision(false, "text", &[0xff, 0xfe, 0xfd]),
+            LikelySecretDecision::Store
+        );
     }
 
     #[test]

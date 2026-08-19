@@ -56,15 +56,24 @@ impl SecretKind {
     }
 }
 
+/// Largest prefix classified on an oversized paste. Walking a multi-megabyte
+/// log is skipped for CPU, but the window is large enough for token, PEM, and
+/// card prefixes so a 9 KiB blob starting with `ghp_`, `AKIA`, or
+/// `-----BEGIN` is still skipped (SBS-922).
+pub const SECRET_SCAN_PREFIX_BYTES: usize = 8_192;
+
 /// Returns a secret category when `text` matches a high-confidence pattern.
 /// Empty / whitespace-only input never matches.
+///
+/// Pastes longer than [`SECRET_SCAN_PREFIX_BYTES`] are still scanned: only
+/// the leading window is classified. A marker that first appears after that
+/// window is not seen.
 pub fn classify_secret(text: &str) -> Option<SecretKind> {
     let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.len() > 8_192 {
-        // Extremely long pastes are almost never a single secret; skip scanning
-        // so we don't burn CPU on multi-megabyte logs.
+    if trimmed.is_empty() {
         return None;
     }
+    let trimmed = secret_scan_window(trimmed);
 
     if looks_like_private_key(trimmed) {
         return Some(SecretKind::PrivateKey);
@@ -105,7 +114,12 @@ pub fn classify_secret(text: &str) -> Option<SecretKind> {
 /// user's note is not.
 pub fn looks_like_credential(text: &str) -> bool {
     let trimmed = text.trim();
-    if classify_secret(trimmed).is_some() {
+    // Deliberately not the windowed scan `classify_secret` does. Forget-on-clear
+    // deletes a clip the user can never get back, so it only counts a match on a
+    // paste small enough to have been read whole. A 9 KiB log or key tutorial
+    // that merely mentions `ghp_` in its first 8 KiB stays in history; the
+    // skip-likely-secrets setting still windows it (SBS-922).
+    if trimmed.len() <= SECRET_SCAN_PREFIX_BYTES && classify_secret(trimmed).is_some() {
         return true;
     }
 
@@ -129,6 +143,17 @@ pub fn looks_like_credential(text: &str) -> bool {
         .filter(|present| *present)
         .count()
         >= 3
+}
+
+fn secret_scan_window(text: &str) -> &str {
+    if text.len() <= SECRET_SCAN_PREFIX_BYTES {
+        return text;
+    }
+    let mut end = SECRET_SCAN_PREFIX_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 fn looks_like_private_key(text: &str) -> bool {
@@ -389,5 +414,40 @@ mod tests {
     #[test]
     fn secret_kind_labels_are_stable_for_logs() {
         assert_eq!(SecretKind::GitHubToken.as_str(), "github_token");
+    }
+
+    /// SBS-922: a paste over 8 KiB used to skip the scan entirely, so a
+    /// 9 KiB log starting with a known marker was stored.
+    #[test]
+    fn scans_prefix_of_pastes_larger_than_8_kib() {
+        let padding = "x".repeat(9 * 1024);
+        let github = format!("ghp_{} {padding}", "abcdefghijklmnopqrstuvwxyz0123456789");
+        let aws = format!("AKIA{}{} {padding}", "IOSFODNN7", "EXAMPLE");
+        let pem = format!(
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----\n{padding}"
+        );
+        assert!(github.len() > SECRET_SCAN_PREFIX_BYTES);
+        assert!(aws.len() > SECRET_SCAN_PREFIX_BYTES);
+        assert!(pem.len() > SECRET_SCAN_PREFIX_BYTES);
+        assert_eq!(classify_secret(&github), Some(SecretKind::GitHubToken));
+        assert_eq!(classify_secret(&aws), Some(SecretKind::AwsAccessKey));
+        assert_eq!(classify_secret(&pem), Some(SecretKind::PrivateKey));
+        assert_eq!(classify_secret(&padding), None);
+        // Forget-on-clear keeps its old oversized-note rule: it deletes, so it
+        // only trusts a paste it read whole.
+        assert!(!looks_like_credential(&github));
+        let small_github = format!("ghp_{}", "abcdefghijklmnopqrstuvwxyz0123456789");
+        assert!(small_github.len() <= SECRET_SCAN_PREFIX_BYTES);
+        assert!(looks_like_credential(&small_github));
+    }
+
+    /// The documented bound: a marker that first appears after the prefix
+    /// window is not classified. Catching that would mean scanning the whole
+    /// paste, which this function deliberately does not do.
+    #[test]
+    fn does_not_scan_past_the_documented_prefix_window() {
+        let padding = "x".repeat(SECRET_SCAN_PREFIX_BYTES + 8);
+        let github = format!("{padding} ghp_{}", "abcdefghijklmnopqrstuvwxyz0123456789");
+        assert_eq!(classify_secret(&github), None);
     }
 }

@@ -131,7 +131,7 @@
     "skipSensitive": "Skip passwords and sensitive copies",
     "skipSensitiveDesc": "When an app such as a password manager marks a copy as sensitive, Cubby won't save it (Windows' own clipboard history does the same). Turn this off to capture everything, including passwords.",
     "skipLikelySecrets": "Skip likely secrets in text",
-    "skipLikelySecretsDesc": "Don't save text that looks like API tokens, private keys, or payment card numbers. Off by default. Turn it on if you'd rather keep these out of your history (the matching is conservative, but it can skip a clip you meant to keep).",
+    "skipLikelySecretsDesc": "Don't save text that looks like API tokens, private keys, or payment card numbers. Off by default. Turn it on if you'd rather keep these out of your history (the matching is conservative, but it can skip a clip you meant to keep). Large pastes are still checked: Cubby scans the first 8 KB, which is enough to catch those markers at the start of a log or key.",
     "forgetOnClipboardClear": "Forget copies the app clears",
     "forgetOnClipboardClearDesc": "If something clears the clipboard soon after a copy (common for password manager browser extensions), remove that last item from history. Only password-shaped items are removed; notes, links, and pinned items stay.",
     "ignoredAppsDesc": "Don't capture clipboard from these apps. Major password managers are added once by default; remove any you want Cubby to capture.",
