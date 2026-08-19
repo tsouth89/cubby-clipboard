@@ -4,7 +4,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { claimSegments, findFileListHistoryClaims } from './product-page-claims.mjs';
+import {
+  claimSegments,
+  findFileListHistoryClaims,
+  findWeakerFileRetentionClaim,
+} from './product-page-claims.mjs';
 
 test('a positive support claim is reported', () => {
   const claims = findFileListHistoryClaims(
@@ -180,4 +184,10 @@ test('claimSegments breaks at markup and JSON boundaries', () => {
     (segment) => /\bfiles?\b/i.test(segment) && /\bincludes?\b/i.test(segment)
   );
   assert.equal(joined, undefined, 'two locale strings must not read as one sentence');
+});
+
+test('weaker file-retention scan treats no/without as negation', () => {
+  assert.equal(findWeakerFileRetentionClaim('No files are retained.'), undefined);
+  assert.equal(findWeakerFileRetentionClaim('Without storing files.'), undefined);
+  assert.match(findWeakerFileRetentionClaim('Cubby stores files.') ?? '', /stores files/);
 });

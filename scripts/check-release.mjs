@@ -3,7 +3,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { checkPrivilegedActionPins } from '../.github/scripts/check-privileged-action-pins.mjs';
-import { claimSegments, findFileListHistoryClaims } from './product-page-claims.mjs';
+import {
+  findFileListHistoryClaims,
+  findWeakerFileRetentionClaim,
+} from './product-page-claims.mjs';
 import { extractDefaultSkipLikelySecrets, evaluateSecretHeuristicsDoc, saysDefaultOff } from './release-check-helpers.mjs';
 import {
   assertAllowlistNotWideOpen,
@@ -254,26 +257,15 @@ for (const [docName, doc] of userFacingHistoryDocs) {
 
 // A sentence only counts as a claim if it says files are retained or
 // supported (retained|stores|supports|includes|records) without also
-// negating that (not|never|ignore). This lets docs correctly say "Cubby does
-// not store file lists" while still catching restated lies like "Cubby
-// stores copied files" that do not use the literal phrase "file lists".
-// Checked per sentence rather than per line: a paragraph line can carry both
-// an accurate negated claim and a false unnegated one, and a negation later
-// in the same line must not paper over a false claim earlier in it.
-const fileMentionPattern = /\bfiles?\b/i;
-const retentionClaimPattern = /\b(?:retained|stores?|supports?|includes?|records?(?:ed)?)\b/i;
-const negationPattern = /\b(?:not|never|ignor\w*)\b/i;
+// negating that (no|not|never|without|none|neither|ignore). This lets docs
+// correctly say "No files are retained" while still catching restated lies
+// like "Cubby stores copied files" that do not use the literal phrase
+// "file lists". Checked per sentence rather than per line: a paragraph line
+// can carry both an accurate negated claim and a false unnegated one, and a
+// negation later in the same line must not paper over a false claim earlier
+// in it.
 for (const [docName, doc] of userFacingHistoryDocs) {
-  // claimSegments, not a bare [.!?] split: markup ends a sentence at `.</p>`
-  // and JSON at `disk.",`, neither of which that split sees. Without it the
-  // install steps in start.html and a whole block of en.json read as one
-  // sentence, so any ordinary "includes" nearby failed the release.
-  const fileClaim = claimSegments(doc).find(
-    (sentence) =>
-      fileMentionPattern.test(sentence) &&
-      retentionClaimPattern.test(sentence) &&
-      !negationPattern.test(sentence)
-  );
+  const fileClaim = findWeakerFileRetentionClaim(doc);
   if (fileClaim) {
     throw new Error(
       `${docName} claims file clipboard history is retained or supported, which capture policy deliberately ignores: ${fileClaim.trim()}`

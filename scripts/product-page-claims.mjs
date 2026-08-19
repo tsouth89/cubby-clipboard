@@ -122,3 +122,23 @@ export function findFileListHistoryClaims(source) {
   }
   return claims;
 }
+
+/**
+ * Weaker scan used by the release check: a sentence that says files are
+ * retained or supported without also negating that. Broader than
+ * `findFileListHistoryClaims` so "Cubby stores files" still fails even when
+ * it never says "file lists". `no`/`without`/`none`/`neither` have to count
+ * as negation or a disclaimer such as "No files are retained" false-fails.
+ */
+export function findWeakerFileRetentionClaim(source) {
+  const fileMentionPattern = /\bfiles?\b/i;
+  const retentionClaimPattern =
+    /\b(?:retained|stores?|supports?|includes?|records?(?:ed)?)\b/i;
+  const negationPattern = /\b(?:no|not|never|without|none|neither|ignor\w*)\b/i;
+  return claimSegments(source).find(
+    (sentence) =>
+      fileMentionPattern.test(sentence) &&
+      retentionClaimPattern.test(sentence) &&
+      !negationPattern.test(sentence)
+  );
+}
