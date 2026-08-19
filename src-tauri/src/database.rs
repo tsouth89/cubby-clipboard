@@ -2080,7 +2080,10 @@ mod tests {
         std::fs::write(&stale, b"orphaned staging bytes").unwrap();
         std::fs::write(&keep, b"live original").unwrap();
         Database::sweep_stale_image_temps(&directory);
-        assert!(!stale.exists(), "a crash-left staging file must not survive");
+        assert!(
+            !stale.exists(),
+            "a crash-left staging file must not survive"
+        );
         assert!(keep.exists(), "committed originals must be left alone");
         let _ = std::fs::remove_dir_all(directory);
     }
