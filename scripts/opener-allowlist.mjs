@@ -51,13 +51,34 @@ export function assertAllowlistNotWideOpen(patterns) {
   }
 }
 
+// SBS-1016: a Settings link is any const/let/var binding of an http(s)
+// literal, or a string passed directly to openUrl( / handleOpenUrl(.
+// Do not require the identifier to end in URL or sit at column 0 —
+// `const DISCORD_LINK = 'https://…'` is the case that used to slip
+// through while the existing *URL constants kept the empty-set guard quiet.
 // No dollar-anchor: sources can be CRLF, so a trailing CR would leave
 // the pattern matching nothing and the gate passing on an empty set.
 const OPENED_URL_PATTERN =
-  /(?:^const \w*URL = |openUrl\(\s*)['"](https?:[^'"]+)['"]/gm;
+  /(?:^\s*(?:export\s+)?(?:const|let|var)\s+\w+\s*=\s*|(?:handleO|o)penUrl\(\s*)['"](https?:\/\/[^'"]+)['"]/gm;
+
+// Quoted http(s) URL with a host. Prefix-only checks such as 'https://'
+// do not match because [^'"]+ requires at least one character after ://.
+const HTTP_URL_LITERAL = /['"](https?:\/\/[^'"]+)['"]/g;
+
+function stripTrailingCr(url) {
+  return url.replace(/\r$/, "");
+}
 
 export function extractOpenedUrls(source) {
-  return [...source.matchAll(OPENED_URL_PATTERN)].map(([, url]) => url.replace(/\r$/, ""));
+  return [...source.matchAll(OPENED_URL_PATTERN)].map(([, url]) => stripTrailingCr(url));
+}
+
+// Settings is the only surface that opens URLs today. Any quoted http(s)
+// URL there is treated as a link that must be on the allowlist. Not used
+// on the rest of frontend/src, where test fixtures contain example.test
+// URLs that are never opened.
+export function extractHttpUrlLiterals(source) {
+  return [...source.matchAll(HTTP_URL_LITERAL)].map(([, url]) => stripTrailingCr(url));
 }
 
 export function urlSlashVariants(url) {

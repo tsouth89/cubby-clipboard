@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   assertAllowlistNotWideOpen,
   extractAllowlistPatterns,
+  extractHttpUrlLiterals,
   extractOpenedUrls,
   isPatternWideOpen,
   isUrlAllowed,
@@ -99,10 +100,61 @@ test('slash variants cover the live homepage with and without a trailing slash',
   ]);
 });
 
-
 test('path URLs keep their written form; rust-url does not add a slash', () => {
   assert.deepEqual(urlSlashVariants('https://cubbyclipboard.com/privacy'), [
     'https://cubbyclipboard.com/privacy',
   ]);
 });
 
+test('extractOpenedUrls finds a const that does not end in URL or sit at column 0', () => {
+  // SBS-1016: the old /^const \w*URL = / pattern missed this and
+  // release:check still passed because the existing *URL constants kept
+  // settingsOpenedUrls non-empty.
+  const source = [
+    "const GITHUB_URL = 'https://github.com/tsouth89/cubby-clipboard';",
+    "  const DISCORD_LINK = 'https://discord.gg/cubby';",
+    "export const SUPPORT_HREF = \"https://cubbyclipboard.com/support\";",
+    "let DOCS_PAGE = 'https://cubbyclipboard.com/docs';",
+  ].join('\n');
+  assert.deepEqual(extractOpenedUrls(source), [
+    'https://github.com/tsouth89/cubby-clipboard',
+    'https://discord.gg/cubby',
+    'https://cubbyclipboard.com/support',
+    'https://cubbyclipboard.com/docs',
+  ]);
+});
+
+test('extractOpenedUrls still finds an inline openUrl or handleOpenUrl string', () => {
+  // handleOpenUrl is the Settings wrapper; openUrl is a case-sensitive
+  // substring only of the plugin call, not of handleOpenUrl.
+  assert.deepEqual(extractOpenedUrls("openUrl('https://cubbyclipboard.com/privacy')"), [
+    'https://cubbyclipboard.com/privacy',
+  ]);
+  assert.deepEqual(extractOpenedUrls("handleOpenUrl('https://discord.gg/cubby')"), [
+    'https://discord.gg/cubby',
+  ]);
+});
+
+test('extractHttpUrlLiterals finds Settings object and call-site URLs the const pattern can miss', () => {
+  const source = [
+    "const LINKS = { discord: 'https://discord.gg/cubby' };",
+    "const pages = ['https://cubbyclipboard.com/support'];",
+    "content.startsWith('https://');",
+  ].join('\n');
+  assert.deepEqual(extractHttpUrlLiterals(source), [
+    'https://discord.gg/cubby',
+    'https://cubbyclipboard.com/support',
+  ]);
+});
+
+test('live SettingsPanel quoted URLs are the three product links', async () => {
+  const source = await readFile(
+    path.join(repoRoot, 'frontend/src/components/SettingsPanel.tsx'),
+    'utf8'
+  );
+  assert.deepEqual(extractHttpUrlLiterals(source), [
+    'https://github.com/tsouth89/cubby-clipboard',
+    'https://cubbyclipboard.com',
+    'https://cubbyclipboard.com/privacy',
+  ]);
+});
