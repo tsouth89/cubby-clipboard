@@ -150,10 +150,13 @@ mod tests {
         );
     }
 
+    /// What `TargetKind::LogDir` actually produces is
+    /// `%LOCALAPPDATA%\<identifier>\logs`, so the identifier segment is the
+    /// marker. Do not widen this to the substring "AppData": on Windows
+    /// `std::env::temp_dir()` is `%LOCALAPPDATA%\Temp`, so a correct portable
+    /// mapping rooted in TEMP would fail this check.
     fn looks_like_tauri_appdata_log_path(path: &Path) -> bool {
-        let rendered = path.to_string_lossy();
-        rendered.contains("AppData")
-            || rendered.contains("LOCALAPPDATA")
-            || rendered.contains("ai.southforge.cubbyclipboard")
+        path.components()
+            .any(|component| component.as_os_str() == "ai.southforge.cubbyclipboard")
     }
 }
