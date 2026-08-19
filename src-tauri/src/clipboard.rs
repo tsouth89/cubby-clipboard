@@ -2879,9 +2879,11 @@ pub fn create_image_preview(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
 pub use crate::image_persist::persist_full_image_file;
 
 /// Stage a recaptured full-resolution original, update the existing image row
-/// inside one transaction, and replace the previous original only after that
-/// transaction commits. Any failure leaves the prior row and the prior file
-/// intact and never queues OCR against a file that was never written.
+/// inside one transaction, and commit that transaction only after the staged
+/// file has replaced the live original. A failed rename rolls the row back so
+/// the clip cannot claim an original that is not on disk (SBS-996). Any
+/// earlier failure leaves the prior row and the prior file intact and never
+/// queues OCR against a file that was never written.
 async fn recapture_existing_image(
     db: &Database,
     existing_id: &str,
@@ -4246,9 +4248,10 @@ mod tests {
             );
             assert_eq!(expired_flag(&index_fail_db, "shot").await, 1);
             // Review finding on PR #214: the write must not leave an orphan
-            // behind. Staging handles that on its own -- the temp file is only
-            // renamed onto `{uuid}.cubby` after the transaction commits, so a
-            // failed index leaves neither an original nor a stray temp.
+            // behind. The temp file is only renamed onto `{uuid}.cubby` after
+            // the SQL statements succeed; SBS-996 then commits the transaction.
+            // A failed index never reaches the rename, so it leaves neither an
+            // original nor a stray temp.
             assert!(
                 !index_fail_db.image_dir.join("shot.cubby").exists(),
                 "a failed index must not leave an unindexed original behind"

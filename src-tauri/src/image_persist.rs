@@ -119,10 +119,12 @@ pub(crate) struct RecaptureFields<'a> {
 /// leaves the previous `clips` row, `clip_images` index, and on-disk original
 /// untouched so tests can pin the staging-failure path without AppHandle.
 ///
-/// Ordering matters: both statements run inside one transaction, and the staged
-/// original only replaces the live file after that transaction commits. A
-/// failure at any earlier point returns with the staged handle un-committed, so
-/// its `Drop` deletes the temp file and the previous original survives intact.
+/// Ordering matters: both statements run inside one transaction, and that
+/// transaction is committed only after the staged original has replaced the
+/// live file. A failed rename rolls the transaction back (SBS-996), so no
+/// committed row ever names a `{uuid}.cubby` that is not on disk. A failure
+/// at any earlier point returns with the staged handle un-committed, so its
+/// `Drop` deletes the temp file and the previous original survives intact.
 ///
 /// `full_image_expired = 0` belongs in that same transaction (SBS-769). This is
 /// the one place a recaptured original becomes usable again, and clearing the
@@ -187,19 +189,21 @@ pub(crate) async fn apply_existing_image_recapture(
         format!("CLIPBOARD: Failed to index image file for existing clip {existing_id}: {error}")
     })?;
 
+    // The file must exist at `{uuid}.cubby` before this transaction becomes
+    // visible. Committing first (the previous order) left an expired revive
+    // claiming an original that `Drop` then deleted when MoveFileExW failed
+    // (SBS-996). A failed rename now rolls the SQL back: last-good for a live
+    // clip, still-expired for a revive. A failed commit after a successful
+    // rename can leave the new bytes on disk with the prior row; that is an
+    // orphan file, not a row that names a missing original.
+    staged.commit().map_err(|error| {
+        format!("CLIPBOARD: Failed to replace the stored original for existing clip {existing_id}: {error}")
+    })?;
+
     transaction.commit().await.map_err(|error| {
         format!(
             "CLIPBOARD: Failed to commit the recapture for existing clip {existing_id}: {error}"
         )
-    })?;
-
-    // The database now describes the staged bytes, so replacing the previous
-    // original is the last step. If this single rename fails the previous
-    // original is still the one on disk; that leaves the row's thumbnail and
-    // file_size ahead of the file, which is reported as an error rather than
-    // silently losing the original.
-    staged.commit().map_err(|error| {
-        format!("CLIPBOARD: Failed to replace the stored original for existing clip {existing_id}: {error}")
     })?;
     Ok(())
 }
@@ -384,6 +388,50 @@ mod tests {
         .await
         .unwrap();
         (content, preview, file_path)
+    }
+
+    /// Retention leftover: the `clips` row is still there (OCR text kept) but
+    /// the original file and `clip_images` row are gone, and
+    /// `full_image_expired = 1`. This is the SBS-769 revive starting state.
+    async fn seed_expired_image_clip(
+        pool: &sqlx::SqlitePool,
+        crypto: &CryptoManager,
+        uuid: &str,
+    ) -> (Vec<u8>, String) {
+        let content = crypto.encrypt(b"old-thumbnail").unwrap();
+        let preview = crypto.encrypt_text("[Image]").unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO clips (
+                uuid, clip_type, content, text_preview, content_hash,
+                is_deleted, is_thumbnail, ocr_status, ocr_text,
+                full_image_expired, created_at, last_accessed
+            )
+            VALUES (
+                ?, 'image', ?, ?, 'existing-hash',
+                0, 0, 'completed', 'already-recognized',
+                1, '2026-01-15 12:00:00', '2026-01-15 12:00:00'
+            )
+            "#,
+        )
+        .bind(uuid)
+        .bind(&content)
+        .bind(&preview)
+        .execute(pool)
+        .await
+        .unwrap();
+        (content, preview)
+    }
+
+    /// Staging succeeded; delete the temp so `StagedImageFile::commit` cannot
+    /// rename it onto `{uuid}.cubby`. Dest (if any) is left alone.
+    fn break_staged_rename(image_dir: &std::path::Path, uuid: &str) {
+        let temp_path = image_dir.join(format!("{uuid}.cubby.tmp"));
+        assert!(
+            temp_path.exists(),
+            "the test needs a staged temp file to delete"
+        );
+        std::fs::remove_file(&temp_path).expect("deleting the staged temp should succeed");
     }
 
     type RecaptureRow = (
@@ -625,6 +673,203 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(indexed_size, b"new-full-res".len() as i64);
+        assert!(
+            !image_dir.join(format!("{uuid}.cubby.tmp")).exists(),
+            "a committed staged file must leave no temp file behind"
+        );
+
+        let _ = std::fs::remove_dir_all(&image_dir);
+    }
+
+    /// SBS-996: a rename failure after the SQL statements succeed must not
+    /// commit `full_image_expired = 0` or a `clip_images` row pointing at a
+    /// file that `Drop` then deletes. That is the revive case — retention
+    /// already removed the previous original, so there is nothing on disk
+    /// for the committed row to fall back to.
+    #[tokio::test]
+    async fn a_rename_failure_on_an_expired_revive_does_not_claim_a_missing_original() {
+        let pool = recapture_pool().await;
+        let crypto = CryptoManager::ephemeral();
+        let image_dir = std::env::temp_dir().join(format!(
+            "cubby-recapture-rename-fail-expired-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&image_dir).unwrap();
+        let uuid = "expired-image-rename-fail";
+        let (old_content, old_preview) = seed_expired_image_clip(&pool, &crypto, uuid).await;
+
+        let staged = stage_full_image_file(&crypto, &image_dir, uuid, b"revived-full-res");
+        assert!(staged.is_ok(), "the file write itself must succeed here");
+        break_staged_rename(&image_dir, uuid);
+
+        let recapture = apply_existing_image_recapture(
+            &pool,
+            uuid,
+            staged,
+            b"revived-full-res".len() as i64,
+            new_fields(b"new-thumbnail", "new-preview"),
+        )
+        .await;
+        assert!(
+            recapture.is_err(),
+            "a failed rename must fail the recapture, not continue as success"
+        );
+        let error = recapture.unwrap_err();
+        assert!(
+            error.contains(uuid),
+            "the error should name the existing clip: {error}"
+        );
+        assert!(
+            error.contains("replace") || error.contains("persist"),
+            "the error should describe the file replace failure: {error}"
+        );
+
+        let row = load_recapture_row(&pool, uuid).await;
+        assert_eq!(row.0, old_content, "thumbnail must stay the expired one");
+        assert_eq!(
+            row.1.as_deref(),
+            Some(old_preview.as_str()),
+            "preview must stay the expired one"
+        );
+        assert_eq!(
+            row.3, 1,
+            "a failed revive must keep full_image_expired so Paste still says expired"
+        );
+        assert_eq!(row.4.as_deref(), Some("completed"));
+        assert_eq!(row.5.as_deref(), Some("already-recognized"));
+        assert_eq!(row.6, "2026-01-15 12:00:00");
+
+        let indexed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM clip_images WHERE clip_uuid = ?")
+                .bind(uuid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            indexed, 0,
+            "no clip_images row may name an original that is not on disk"
+        );
+        assert!(
+            !image_dir.join(format!("{uuid}.cubby")).exists(),
+            "the destination must not exist after a failed revive rename"
+        );
+        assert!(
+            !image_dir.join(format!("{uuid}.cubby.tmp")).exists(),
+            "the abandoned staged file must be cleaned up"
+        );
+
+        let _ = std::fs::remove_dir_all(&image_dir);
+    }
+
+    /// SBS-996 on a live clip: the previous original is still on disk when
+    /// the rename fails, and rolling the transaction back keeps `clip_images`
+    /// describing that file instead of the staged bytes that never landed.
+    #[tokio::test]
+    async fn a_rename_failure_on_a_live_clip_keeps_the_previous_original_and_row() {
+        let pool = recapture_pool().await;
+        let crypto = CryptoManager::ephemeral();
+        let image_dir = std::env::temp_dir().join(format!(
+            "cubby-recapture-rename-fail-live-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let uuid = "live-image-rename-fail";
+        let (old_content, old_preview, file_path) =
+            seed_healthy_image_clip(&pool, &crypto, &image_dir, uuid, b"previous-full-res").await;
+
+        let staged = stage_full_image_file(&crypto, &image_dir, uuid, b"new-full-res");
+        assert!(staged.is_ok(), "the file write itself must succeed here");
+        break_staged_rename(&image_dir, uuid);
+
+        let recapture = apply_existing_image_recapture(
+            &pool,
+            uuid,
+            staged,
+            b"new-full-res".len() as i64,
+            new_fields(b"new-thumbnail", "new-preview"),
+        )
+        .await;
+        assert!(
+            recapture.is_err(),
+            "a failed rename must fail the recapture"
+        );
+
+        let row = load_recapture_row(&pool, uuid).await;
+        assert_still_prior_healthy_clip(&row, &old_content, &old_preview);
+
+        let indexed_size: i64 =
+            sqlx::query_scalar("SELECT file_size FROM clip_images WHERE clip_uuid = ?")
+                .bind(uuid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            indexed_size,
+            b"previous-full-res".len() as i64,
+            "clip_images must still describe the file that is actually on disk"
+        );
+        assert_eq!(
+            read_original(&crypto, &file_path),
+            b"previous-full-res",
+            "a failed rename must not have replaced the previous original"
+        );
+        assert!(
+            !image_dir.join(format!("{uuid}.cubby.tmp")).exists(),
+            "the abandoned staged file must be cleaned up"
+        );
+
+        let _ = std::fs::remove_dir_all(&image_dir);
+    }
+
+    /// Happy path for the SBS-769 revive: after a successful recapture the
+    /// committed row and the file agree, and `full_image_expired` is clear.
+    #[tokio::test]
+    async fn a_successful_revive_commits_only_after_the_original_is_on_disk() {
+        let pool = recapture_pool().await;
+        let crypto = CryptoManager::ephemeral();
+        let image_dir = std::env::temp_dir().join(format!(
+            "cubby-recapture-revive-ok-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&image_dir).unwrap();
+        let uuid = "expired-image-success";
+        seed_expired_image_clip(&pool, &crypto, uuid).await;
+
+        let staged = stage_full_image_file(&crypto, &image_dir, uuid, b"revived-full-res");
+        apply_existing_image_recapture(
+            &pool,
+            uuid,
+            staged,
+            b"revived-full-res".len() as i64,
+            new_fields(b"new-thumbnail", "new-preview"),
+        )
+        .await
+        .expect("successful persist should revive the expired original");
+
+        let row = load_recapture_row(&pool, uuid).await;
+        assert_eq!(row.0, b"new-thumbnail");
+        assert_eq!(row.1.as_deref(), Some("new-preview"));
+        assert_eq!(
+            row.3, 0,
+            "a successful revive must clear full_image_expired"
+        );
+        let file_path = image_dir.join(format!("{uuid}.cubby"));
+        assert!(
+            file_path.exists(),
+            "the revived original must be on disk before the row is visible"
+        );
+        assert_eq!(
+            read_original(&crypto, &file_path.to_string_lossy()),
+            b"revived-full-res"
+        );
+
+        let indexed: (String, i64) =
+            sqlx::query_as("SELECT file_path, file_size FROM clip_images WHERE clip_uuid = ?")
+                .bind(uuid)
+                .fetch_one(&pool)
+                .await
+                .expect("the revive should have indexed the original");
+        assert_eq!(indexed.1, b"revived-full-res".len() as i64);
+        assert_eq!(indexed.0, file_path.to_string_lossy());
         assert!(
             !image_dir.join(format!("{uuid}.cubby.tmp")).exists(),
             "a committed staged file must leave no temp file behind"
