@@ -8,13 +8,14 @@
     "loading": "Wird geladen...",
     "copied": "In die Zwischenablage kopiert",
     "pause": "Pausieren",
-    "resume": "Fortsetzen"
+    "resume": "Fortsetzen",
+    "clipActions": "Eintragsaktionen"
   },
   "clipList": {
     "empty": "Noch keine Einträge",
     "emptyDesc": "Kopieren Sie etwas in Ihre Zwischenablage, dann erscheint es hier.",
-    "loadMoreFailed": "Couldn’t load more clips",
-    "refreshFailed": "Couldn’t refresh clipboard history"
+    "loadMoreFailed": "Weitere Einträge konnten nicht geladen werden",
+    "refreshFailed": "Zwischenablageverlauf konnte nicht aktualisiert werden"
   },
   "folders": {
     "all": "Alle Einträge",
@@ -87,7 +88,8 @@
     "removeDuplicatesSuccess": "{{count}} doppelte Einträge entfernt",
     "newFolderPlaceholder": "Neuer Ordnername",
     "noFolders": "Keine benutzerdefinierten Ordner erstellt.",
-    "linkFailed": "Could not open {{url}} in your browser."
+    "portableUpdateNote": "Die portable Version aktualisiert sich nicht selbst. Zum Upgrade laden Sie die neueste portable ZIP-Datei herunter und ersetzen Sie Cubby Clipboard.exe. Lassen Sie den Ordner 'data' und die Datei portable.txt daneben, dann bleiben Verlauf, Einstellungen und Ordner erhalten.",
+    "linkFailed": "{{url}} konnte nicht im Browser geöffnet werden."
   },
   "notifications": {
     "clipDeleted": "Eintrag gelöscht",

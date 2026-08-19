@@ -8,13 +8,14 @@
     "loading": "Chargement...",
     "copied": "Copié dans le presse-papiers",
     "pause": "Pause",
-    "resume": "Reprendre"
+    "resume": "Reprendre",
+    "clipActions": "Actions de l'élément"
   },
   "clipList": {
     "empty": "Aucun élément pour le moment",
     "emptyDesc": "Copiez quelque chose dans votre presse-papiers et cela apparaîtra ici.",
-    "loadMoreFailed": "Couldn’t load more clips",
-    "refreshFailed": "Couldn’t refresh clipboard history"
+    "loadMoreFailed": "Impossible de charger plus d'éléments",
+    "refreshFailed": "Impossible d'actualiser l'historique du presse-papiers"
   },
   "folders": {
     "all": "Tous les éléments",
@@ -87,7 +88,8 @@
     "removeDuplicatesSuccess": "{{count}} éléments en double supprimés",
     "newFolderPlaceholder": "Nom du nouveau dossier",
     "noFolders": "Aucun dossier personnalisé créé.",
-    "linkFailed": "Could not open {{url}} in your browser."
+    "portableUpdateNote": "La version portable ne se met pas à jour toute seule. Pour passer à une version plus récente, téléchargez le dernier ZIP portable et remplacez Cubby Clipboard.exe. Conservez le dossier 'data' et le fichier portable.txt à côté : votre historique, vos paramètres et vos dossiers seront conservés.",
+    "linkFailed": "Impossible d'ouvrir {{url}} dans votre navigateur."
   },
   "notifications": {
     "clipDeleted": "Élément supprimé",

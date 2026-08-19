@@ -8,13 +8,14 @@
     "loading": "読み込み中...",
     "copied": "クリップボードにコピーしました",
     "pause": "一時停止",
-    "resume": "再開"
+    "resume": "再開",
+    "clipActions": "クリップ操作"
   },
   "clipList": {
     "empty": "まだクリップがありません",
     "emptyDesc": "何かをクリップボードにコピーすると、ここに表示されます。",
-    "loadMoreFailed": "Couldn’t load more clips",
-    "refreshFailed": "Couldn’t refresh clipboard history"
+    "loadMoreFailed": "これ以上のクリップを読み込めませんでした",
+    "refreshFailed": "クリップボード履歴を更新できませんでした"
   },
   "folders": {
     "all": "すべてのクリップ",
@@ -87,7 +88,8 @@
     "removeDuplicatesSuccess": "{{count}} 件の重複クリップを削除しました",
     "newFolderPlaceholder": "新しいフォルダー名",
     "noFolders": "カスタムフォルダーはまだ作成されていません。",
-    "linkFailed": "Could not open {{url}} in your browser."
+    "portableUpdateNote": "ポータブル版は自動更新されません。アップグレードするには、最新のポータブル ZIP をダウンロードして Cubby Clipboard.exe を置き換えてください。「data」フォルダーと portable.txt を同じ場所に残しておけば、履歴、設定、フォルダーはそのまま引き継がれます。",
+    "linkFailed": "ブラウザーで {{url}} を開けませんでした。"
   },
   "notifications": {
     "clipDeleted": "クリップを削除しました",
