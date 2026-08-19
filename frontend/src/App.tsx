@@ -625,6 +625,7 @@ function App() {
       // Cubby has no trash/recovery surface. Delete must therefore remove the
       // persisted payload immediately instead of leaving a hidden soft-delete.
       await invoke('delete_clip', { id: clipId, hardDelete: true });
+      forgetRevealed(clipId);
       setClips((currentClips) => currentClips.filter((clip) => clip.id !== clipId));
       setSelectedClipId(nextSelection);
       // Refresh counts
@@ -717,7 +718,9 @@ function App() {
           // until the reload landed, which is the whole thing being prevented.
           setClips((current) =>
             current.map((clip) =>
-              clip.id === clipId ? { ...clip, is_hidden: true, content: '', preview: '' } : clip
+              clip.id === clipId
+                ? { ...clip, is_hidden: true, content: '', preview: '', notes: null }
+                : clip
             )
           );
         }
@@ -1060,6 +1063,7 @@ function App() {
       if (!clipLoadAnnouncesSuccess(reloaded)) {
         return;
       }
+      clearRevealed();
       toast.success(
         mode === 'unpinned'
           ? t('notifications.clearUnpinnedSuccess', { count: deleted })

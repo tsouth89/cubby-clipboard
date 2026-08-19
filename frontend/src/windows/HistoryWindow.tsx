@@ -92,7 +92,8 @@ export function HistoryWindow() {
   useSystemAccent();
   const density = settings?.density ?? 'comfortable';
 
-  const { revealed, toggleReveal, forgetRevealed, updateRevealed } = useRevealedClips();
+  const { revealed, toggleReveal, forgetRevealed, updateRevealed, clearRevealed } =
+    useRevealedClips();
 
   const clipsRef = useRef<ClipboardItem[]>(clips);
   clipsRef.current = clips;
@@ -117,6 +118,24 @@ export function HistoryWindow() {
       unlisten.then((dispose) => dispose()).catch(() => undefined);
     };
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    getCurrentWindow()
+      .onFocusChanged(({ payload: focused }) => {
+        if (!focused) clearRevealed();
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [clearRevealed]);
 
   // Destructured so the load callback depends on the two stamps rather than a
   // fresh object identity each render, which would reload on every keystroke.
@@ -384,6 +403,7 @@ export function HistoryWindow() {
         ids: selectedIds,
         hardDelete: true,
       });
+      selectedIds.forEach((id) => forgetRevealed(id));
       // A failed reload already speaks: ClipList shows the error panel once
       // these rows are dropped. A superseded reload belongs to a newer load.
       // Either way this handler only withholds its success toast.
@@ -393,7 +413,7 @@ export function HistoryWindow() {
       console.error('Failed to delete clips:', error);
       toast.error('Failed to delete clips');
     }
-  }, [afterBulkChange, selectedIds, selectionCount]);
+  }, [afterBulkChange, forgetRevealed, selectedIds, selectionCount]);
 
   const handleBulkPin = useCallback(
     async (pinned: boolean) => {
@@ -638,6 +658,18 @@ export function HistoryWindow() {
       try {
         const hidden = await invoke<boolean>('toggle_clip_hidden', { id: clipId });
         forgetRevealed(clipId);
+        if (hidden) {
+          // Blank the row immediately. loadClips is the only other writer, and
+          // a failed same-filter reload would otherwise keep the plaintext on
+          // screen with no error toast (SBS-1006).
+          setClips((current) =>
+            current.map((clip) =>
+              clip.id === clipId
+                ? { ...clip, is_hidden: true, content: '', preview: '', notes: null }
+                : clip
+            )
+          );
+        }
         // loadClips reports failure rather than throwing, so a stale list after
         // a failed reload would otherwise be announced as success.
         // Same-filter reload: a failure shows the stale banner over the rows,
@@ -685,6 +717,7 @@ export function HistoryWindow() {
         // Cubby has no trash, so delete removes the payload immediately rather
         // than leaving a hidden soft-delete. Same contract as the flyout.
         await invoke('delete_clip', { id: clipId, hardDelete: true });
+        forgetRevealed(clipId);
         setClips(remaining);
         setSelectedClipId(nextSelection);
         loadFolders();
@@ -695,7 +728,7 @@ export function HistoryWindow() {
         toast.error('Failed to delete clip');
       }
     },
-    [loadFolders, refreshTotalCount]
+    [forgetRevealed, loadFolders, refreshTotalCount]
   );
 
   const handleClose = useCallback(() => {
