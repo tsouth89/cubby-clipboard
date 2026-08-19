@@ -1368,12 +1368,14 @@ async fn clip_has_live_image(
     Ok(present)
 }
 
+type AdoptedImageRow = (Vec<u8>, Option<String>, Option<i64>, String, String);
+
 async fn adopt_live_image(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     survivor_uuid: &str,
     loser_uuid: &str,
 ) -> Result<(), String> {
-    let row: Option<(Vec<u8>, Option<String>, Option<i64>, String, String)> = sqlx::query_as(
+    let row: Option<AdoptedImageRow> = sqlx::query_as(
         r#"
         SELECT full_content, file_path, file_size, storage_kind, mime_type
         FROM clip_images
