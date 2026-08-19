@@ -27,6 +27,8 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 #[cfg(target_os = "windows")]
+use windows::Win32::Foundation::CloseHandle;
+#[cfg(target_os = "windows")]
 use windows::Win32::Foundation::MAX_PATH;
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::{
@@ -2926,6 +2928,18 @@ fn resolve_source_app_info(identity: Option<SourceAppIdentity>) -> SourceAppInfo
             Ok(h) => h,
             Err(_) => return (None, None, None, None, false),
         };
+        // OpenProcess returns a kernel handle. Every other capture path
+        // (paste target, Win+V helper) CloseHandle's it; this one did not, so
+        // each captured clip leaked a process handle until Cubby exited (SBS-1004).
+        struct ProcessHandleGuard(windows::Win32::Foundation::HANDLE);
+        impl Drop for ProcessHandleGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = CloseHandle(self.0);
+                }
+            }
+        }
+        let _process_guard = ProcessHandleGuard(process_handle);
 
         let mut name_buffer = [0u16; MAX_PATH as usize];
         let name_size = GetModuleBaseNameW(process_handle, None, &mut name_buffer);
