@@ -8,6 +8,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Search no longer ships full decrypted clip bodies on every keystroke; flyout and History search rows use the same preview-only contract as the list (SBS-912)
 
 ### Fixed
+- Empty Unicode text is no longer diagnosed as a clipboard lock, so a copy that still has HTML or RTF is stored instead of dropped; an advertised picture still retries before that HTML wrapper is stored (SBS-924)
 - Recover an interrupted settings.json replace from the leftover temp instead of treating it as a first-run 30-day retention (SBS-935)
 - Record startup quarantine and rolling-backup restore in the on-disk log, instead of discarding those lines before the logger exists (SBS-929)
 - Skip-likely-secrets now scans the first 8 KiB of a large paste, so a 9 KiB log or PEM starting with a known token or `-----BEGIN` marker is skipped instead of stored (SBS-922)
