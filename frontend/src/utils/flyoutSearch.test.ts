@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isImeKey, shouldCaptureTypeToSearch } from './flyoutSearch';
+import { isImeKey, shortcutsSuspended, shouldCaptureTypeToSearch } from './flyoutSearch';
 
 function key(
   partial: Partial<{
@@ -48,5 +48,26 @@ describe('shouldCaptureTypeToSearch', () => {
     expect(shouldCaptureTypeToSearch(key({ metaKey: true }))).toBe(false);
     expect(shouldCaptureTypeToSearch(key({ key: 'Enter' }))).toBe(false);
     expect(shouldCaptureTypeToSearch(key({ key: 'Escape' }))).toBe(false);
+  });
+});
+
+describe('shortcutsSuspended', () => {
+  it('stands down while a modal confirm owns the keyboard', () => {
+    // ConfirmDialog listens on window, which runs after document, so a
+    // History shortcut that keeps acting answers the confirm for the user:
+    // Delete hard-deletes the previewed clip mid-question (SBS-1007).
+    expect(shortcutsSuspended(key({ key: 'Delete' }), true)).toBe(true);
+    expect(shortcutsSuspended(key({ key: 'Escape' }), true)).toBe(true);
+    expect(shortcutsSuspended(key({ key: 'Enter' }), true)).toBe(true);
+  });
+
+  it('lets shortcuts through with no modal open', () => {
+    expect(shortcutsSuspended(key({ key: 'Delete' }), false)).toBe(false);
+    expect(shortcutsSuspended(key({ key: 'Escape' }), false)).toBe(false);
+  });
+
+  it('still stands down for IME composition with no modal open', () => {
+    expect(shortcutsSuspended(key({ isComposing: true, key: 'Enter' }), false)).toBe(true);
+    expect(shortcutsSuspended(key({ keyCode: 229, key: 'Process' }), false)).toBe(true);
   });
 });

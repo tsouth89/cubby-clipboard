@@ -46,23 +46,23 @@ describe('applySelectionClick', () => {
     expect(ids(grown)).toEqual(['b', 'c', 'd', 'e']);
     // Shrinking back from the same anchor: previously-added rows stay selected
     // (this is additive extension), but the anchor has not walked to row 4.
-    expect(grown.anchorIndex).toBe(1);
+    expect(grown.anchorId).toBe('b');
   });
 
   it('falls back to a plain toggle when shift arrives with no anchor', () => {
     const state = applySelectionClick(EMPTY_SELECTION, ORDER, 2, shift);
     expect(ids(state)).toEqual(['c']);
-    expect(state.anchorIndex).toBe(2);
+    expect(state.anchorId).toBe('c');
   });
 
   it('re-anchors when the anchor row is deselected', () => {
     const state = select([1, 3, 3], [plain, ctrl, ctrl]);
     expect(ids(state)).toEqual(['b']);
-    expect(state.anchorIndex).toBe(3);
+    expect(state.anchorId).toBe('d');
   });
 
   it('drops the anchor once nothing is selected', () => {
-    expect(select([1, 1]).anchorIndex).toBeNull();
+    expect(select([1, 1]).anchorId).toBeNull();
   });
 
   it('ignores a click on an index that is not rendered', () => {
@@ -102,7 +102,17 @@ describe('pruneSelection', () => {
 
   it('clears the anchor when the last selected row disappears', () => {
     const state = select([0]);
-    expect(pruneSelection(state, ['b', 'c']).anchorIndex).toBeNull();
+    expect(pruneSelection(state, ['b', 'c']).anchorId).toBeNull();
+  });
+
+  it('keeps the Shift origin on the same clip after a reorder', () => {
+    const state = applySelectionClick(EMPTY_SELECTION, ORDER, 2, plain);
+    expect(state.anchorId).toBe('c');
+    const reordered = ['c', 'a', 'b', 'd', 'e'];
+    const pruned = pruneSelection(state, reordered);
+    expect(pruned.anchorId).toBe('c');
+    const extended = applySelectionClick(pruned, reordered, 3, shift);
+    expect(ids(extended).sort()).toEqual(['a', 'b', 'c', 'd'].sort());
   });
 });
 

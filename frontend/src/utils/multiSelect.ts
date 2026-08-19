@@ -5,8 +5,9 @@
  * plain click on the checkbox toggles one row, Ctrl+click toggles without
  * disturbing the rest, and Shift+click extends from the last row you touched.
  *
- * Kept pure and index-based so the rules can be tested without a DOM: the
- * caller owns the rendered order and passes it in.
+ * The Shift origin is a clip id, not a row index. Pinning or deleting remaps
+ * indices, and an index-based origin would select rows the user never swept
+ * (SBS-1007).
  */
 
 export interface SelectionGesture {
@@ -17,11 +18,11 @@ export interface SelectionGesture {
 
 export interface SelectionState {
   ids: ReadonlySet<string>;
-  /** Row the next Shift+click extends from; null once the set is emptied. */
-  anchorIndex: number | null;
+  /** Clip the next Shift+click extends from; null once the set is emptied. */
+  anchorId: string | null;
 }
 
-export const EMPTY_SELECTION: SelectionState = { ids: new Set(), anchorIndex: null };
+export const EMPTY_SELECTION: SelectionState = { ids: new Set(), anchorId: null };
 
 /**
  * Apply a click on `index` to the current selection.
@@ -39,31 +40,28 @@ export function applySelectionClick(
   const id = order[index];
   if (id === undefined) return state;
 
-  // Shift extends from the anchor. With no anchor yet there is nothing to
-  // extend from, so it behaves as a plain toggle and sets one.
-  if (gesture.shiftKey && state.anchorIndex !== null) {
-    const from = Math.min(state.anchorIndex, index);
-    const to = Math.max(state.anchorIndex, index);
+  const anchorIndex = state.anchorId === null ? -1 : order.indexOf(state.anchorId);
+  // Shift extends from the anchor. With no anchor yet, or after the anchored
+  // clip left the list, there is nothing to extend from, so it behaves as a
+  // plain toggle and sets one.
+  if (gesture.shiftKey && anchorIndex >= 0) {
+    const from = Math.min(anchorIndex, index);
+    const to = Math.max(anchorIndex, index);
     const ids = new Set(state.ids);
     for (let cursor = from; cursor <= to; cursor += 1) {
       const rangeId = order[cursor];
       if (rangeId !== undefined) ids.add(rangeId);
     }
-    // The anchor stays put, so dragging the shift end around keeps growing and
-    // shrinking from the same origin instead of walking away from it.
-    return { ids, anchorIndex: state.anchorIndex };
+    return { ids, anchorId: state.anchorId };
   }
 
   const ids = new Set(state.ids);
   if (ids.has(id)) {
     ids.delete(id);
-    // Deselecting the anchor leaves the next Shift+click without a sensible
-    // origin, so re-anchor here rather than extending from a row the user just
-    // removed.
-    return { ids, anchorIndex: ids.size === 0 ? null : index };
+    return { ids, anchorId: ids.size === 0 ? null : id };
   }
   ids.add(id);
-  return { ids, anchorIndex: index };
+  return { ids, anchorId: id };
 }
 
 /** Select every currently rendered row, or clear if they are all selected. */
@@ -71,19 +69,20 @@ export function toggleSelectAll(state: SelectionState, order: readonly string[])
   if (order.length > 0 && order.every((id) => state.ids.has(id))) {
     return EMPTY_SELECTION;
   }
-  return { ids: new Set(order), anchorIndex: order.length > 0 ? order.length - 1 : null };
+  return { ids: new Set(order), anchorId: order[order.length - 1] ?? null };
 }
 
 /**
  * Drop ids that are no longer rendered. Selection is over loaded rows, so a
  * filter change or a delete must not leave the count claiming rows that are
- * gone.
+ * gone. The Shift origin follows the clip, not the slot it used to occupy.
  */
 export function pruneSelection(state: SelectionState, order: readonly string[]): SelectionState {
   const present = new Set(order);
   const ids = new Set([...state.ids].filter((id) => present.has(id)));
-  if (ids.size === state.ids.size) return state;
-  return { ids, anchorIndex: ids.size === 0 ? null : state.anchorIndex };
+  const anchorId = state.anchorId !== null && present.has(state.anchorId) ? state.anchorId : null;
+  if (ids.size === state.ids.size && anchorId === state.anchorId) return state;
+  return { ids, anchorId: ids.size === 0 ? null : anchorId };
 }
 
 /** Selected ids in rendered order, which is the order bulk actions apply in. */

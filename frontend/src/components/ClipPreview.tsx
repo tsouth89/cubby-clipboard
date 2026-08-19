@@ -432,14 +432,13 @@ export function ClipPreview({
               if (next !== (revealed?.notes ?? clip.notes ?? '')) void onSaveNotes(clip.id, next);
             }}
             onKeyDown={(event) => {
-              // While an IME is composing, Enter and Escape belong to the
-              // candidate window, not to this field: Enter accepts a candidate
-              // and Escape abandons one. Acting on either would commit or
-              // discard a note the user is still in the middle of typing.
+              // Escape must not bubble even while composing: HistoryWindow
+              // would close the window before this handler's early return
+              // (SBS-1008).
+              if (event.key === 'Escape') event.stopPropagation();
               if (event.nativeEvent.isComposing) return;
               if (event.key === 'Enter') event.currentTarget.blur();
               if (event.key === 'Escape') {
-                event.stopPropagation();
                 noteCancelled.current = true;
                 event.currentTarget.blur();
               }
