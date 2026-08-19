@@ -915,7 +915,11 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                 type="submit"
                 disabled={
                   backupPrompt === 'export'
-                    ? backupPassphrase.length < 12 || backupPassphrase !== backupPassphraseConfirm
+                    ? // Count characters, not UTF-16 units: the backend floor is
+                      // chars().count(), so .length would pass an 11-character
+                      // passphrase with one emoji and then be refused there.
+                      [...backupPassphrase].length < 12 ||
+                      backupPassphrase !== backupPassphraseConfirm
                     : backupPassphrase.length === 0
                 }
                 className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"

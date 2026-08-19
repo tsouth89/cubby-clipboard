@@ -1459,7 +1459,7 @@ mod tests {
         let path = temp_path("short-pass");
         let error = export_backup(&source, path.to_str().unwrap(), "short")
             .await
-            .expect_err("eleven characters is below the export floor");
+            .expect_err("five characters is below the export floor");
         assert!(error.contains("12"));
         assert!(!path.exists(), "a refused export must not write a file");
     }
