@@ -27,21 +27,86 @@ pub(crate) struct RichCapture {
     pub rtf: Option<String>,
 }
 
-/// After materialize has no content, why — and what the capture path should do.
+/// Everything one materialize attempt learned before it decides what to do.
 ///
-/// Three states, not two: empty text is not a lock, and a missing format is
-/// not empty text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MissAction {
-    /// HTML or RTF has content. Store that clip; do not diagnose a lock.
-    CaptureRich,
-    /// Placeholder-only empty clipboard. Password-manager auto-clear.
-    Cleared,
-    /// Empty or missing text, no rich payload, no image. Private/custom only
-    /// or nothing we store. Mark handled; do not restart the listener.
-    Unsupported,
-    /// Could not open the clipboard, or a supported payload stayed unreadable.
-    Contended,
+/// Kept as one struct so production and the tests below feed [`decide_capture`]
+/// the same facts. The decision used to live inline in
+/// `materialize_clipboard_content_once`, where no test could reach it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AttemptFacts<'a> {
+    pub text: PayloadRead<'a>,
+    pub html: PayloadRead<'a>,
+    pub rtf: PayloadRead<'a>,
+    /// An image format is advertised on the clipboard.
+    pub image_advertised: bool,
+    /// An image actually decoded on this attempt.
+    pub image_readable: bool,
+    /// Last of the bounded attempts: nothing will be retried after this one.
+    pub last_attempt: bool,
+}
+
+/// What the caller should do with one materialize attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CaptureDecision {
+    /// Store the image that already decoded.
+    Image,
+    /// Store this text / HTML / RTF clip.
+    Rich(RichCapture),
+    /// Nothing to store and nothing left to wait for. Not a lock: the caller
+    /// marks the sequence handled (or cleared) instead of restarting the
+    /// listener (SBS-924).
+    DeterminateMiss,
+    /// Try again while attempts remain.
+    Transient,
+}
+
+/// Decide one attempt from what it observed.
+///
+/// Order is the whole point:
+/// 1. Non-empty Unicode text is the copy. HTML and RTF ride along.
+/// 2. Unicode text that is advertised but unread is a delayed render, so retry
+///    while attempts remain rather than storing an HTML-derived stand-in for a
+///    body that is about to arrive.
+/// 3. A readable image beats an HTML/RTF-derived body. A Word, PowerPoint, or
+///    Outlook copy of a picture has empty Unicode text, an HTML wrapper, RTF,
+///    and a bitmap; storing the wrapper would lose the picture entirely.
+/// 4. Otherwise HTML or RTF with content is the clip.
+/// 5. An advertised-but-unread image, or unread HTML/RTF, is still contention.
+pub(crate) fn decide_capture(facts: AttemptFacts<'_>) -> CaptureDecision {
+    let html = nonempty_present(facts.html);
+    let rtf = nonempty_present(facts.rtf);
+
+    if let PayloadRead::Present(body) = facts.text {
+        if !body.is_empty() {
+            return CaptureDecision::Rich(RichCapture {
+                searchable_text: body.to_string(),
+                html: html.map(str::to_string),
+                rtf: rtf.map(str::to_string),
+            });
+        }
+    }
+
+    if matches!(facts.text, PayloadRead::Unknown) && !facts.last_attempt {
+        return CaptureDecision::Transient;
+    }
+
+    if facts.image_readable {
+        return CaptureDecision::Image;
+    }
+
+    if let Some(rich) = rich_capture_from_payloads(facts.text, facts.html, facts.rtf) {
+        return CaptureDecision::Rich(rich);
+    }
+
+    if facts.image_advertised
+        || matches!(facts.text, PayloadRead::Unknown)
+        || matches!(facts.html, PayloadRead::Unknown)
+        || matches!(facts.rtf, PayloadRead::Unknown)
+    {
+        return CaptureDecision::Transient;
+    }
+
+    CaptureDecision::DeterminateMiss
 }
 
 /// Build a storable clip from observed text/HTML/RTF.
@@ -91,59 +156,6 @@ pub(crate) fn rich_capture_from_payloads(
     })
 }
 
-/// Decide the post-miss action from observed facts.
-///
-/// `only_placeholder_text_formats` is `None` when we could not enumerate
-/// formats (unknown). That must not become a clear (would delete the previous
-/// capture) or a lock (the SBS-924 false diagnosis).
-pub(crate) fn classify_miss(
-    text: PayloadRead<'_>,
-    html: PayloadRead<'_>,
-    rtf: PayloadRead<'_>,
-    image_advertised: bool,
-    only_placeholder_text_formats: Option<bool>,
-    clipboard_opened: bool,
-) -> MissAction {
-    if rich_capture_from_payloads(text, html, rtf).is_some() {
-        // Non-empty text, or empty/missing text with HTML/RTF. Neither is a lock.
-        return MissAction::CaptureRich;
-    }
-
-    // Advertised but unread text/HTML/RTF is delayed render or a lost read,
-    // not "empty" and not "missing".
-    if matches!(text, PayloadRead::Unknown)
-        || matches!(html, PayloadRead::Unknown)
-        || matches!(rtf, PayloadRead::Unknown)
-    {
-        return MissAction::Contended;
-    }
-
-    if !clipboard_opened
-        || matches!(text, PayloadRead::Unknown)
-            && matches!(html, PayloadRead::Unknown)
-            && matches!(rtf, PayloadRead::Unknown)
-    {
-        return MissAction::Contended;
-    }
-
-    if image_advertised {
-        return MissAction::Contended;
-    }
-
-    match only_placeholder_text_formats {
-        Some(true) => MissAction::Cleared,
-        Some(false) => MissAction::Unsupported,
-        None => match text {
-            // Known empty text, formats unknown: do not clear (might still
-            // hold a private format) and do not lock (we already read).
-            PayloadRead::Present("") => MissAction::Unsupported,
-            PayloadRead::Present(_) => MissAction::Unsupported,
-            PayloadRead::Missing => MissAction::Unsupported,
-            PayloadRead::Unknown => MissAction::Contended,
-        },
-    }
-}
-
 fn nonempty_present(read: PayloadRead<'_>) -> Option<&str> {
     match read {
         PayloadRead::Present(body) if !body.is_empty() => Some(body),
@@ -151,35 +163,67 @@ fn nonempty_present(read: PayloadRead<'_>) -> Option<&str> {
     }
 }
 
+/// Elements whose text is never the copied content. `xml` and the Office
+/// conditional comments around it carry Word settings such as
+/// `<w:View>Normal</w:View>`, which used to land in the stored clip.
+const NON_CONTENT_ELEMENTS: [&str; 5] = ["head", "style", "script", "xml", "title"];
+
+/// Elements that end a visible run. Whitespace is collapsed at the end, so
+/// emitting a plain space here is enough.
+const BREAKING_ELEMENTS: [&str; 13] = [
+    "p",
+    "div",
+    "br",
+    "tr",
+    "li",
+    "td",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "blockquote",
+];
+
 /// Best-effort visible text from a CF_HTML document (header already stripped).
+///
+/// `get_html` returns the whole StartHTML..EndHTML document, so this has to
+/// ignore comments, non-content elements, and everything outside the
+/// StartFragment..EndFragment markers when the source wrote them.
 pub(crate) fn plain_text_from_html(html: &str) -> String {
+    let chars: Vec<char> = html_fragment(html).chars().collect();
     let mut out = String::new();
-    let mut in_tag = false;
-    let mut tag = String::new();
-    for ch in html.chars() {
-        match ch {
-            '<' => {
-                in_tag = true;
-                tag.clear();
-            }
-            '>' if in_tag => {
-                in_tag = false;
-                let name = tag
-                    .trim_start_matches('/')
-                    .split(|c: char| c.is_ascii_whitespace() || c == '/')
-                    .next()
-                    .unwrap_or("");
-                if matches!(
-                    name.to_ascii_lowercase().as_str(),
-                    "p" | "div" | "br" | "tr" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
-                ) {
-                    if !out.ends_with(' ') && !out.is_empty() {
-                        out.push(' ');
-                    }
-                }
-            }
-            _ if in_tag => tag.push(ch),
-            _ => out.push(ch),
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '<' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        // A comment runs to the first `-->`, which for an Office conditional
+        // block is after the `<![endif]`, so the Word XML inside goes with it.
+        if starts_with(&chars, i, "<!--") {
+            i = match find_from(&chars, i + 4, "-->") {
+                Some(end) => end + 3,
+                None => chars.len(),
+            };
+            continue;
+        }
+        let Some(close) = chars[i..].iter().position(|c| *c == '>').map(|at| i + at) else {
+            // Unterminated tag: nothing after it can be trusted as markup.
+            break;
+        };
+        let raw: String = chars[i + 1..close].iter().collect();
+        let name = tag_name(&raw);
+        i = close + 1;
+        let is_open = !raw.starts_with('/') && !raw.ends_with('/');
+        if is_open && NON_CONTENT_ELEMENTS.contains(&name.as_str()) {
+            i = skip_element(&chars, i, &name);
+            continue;
+        }
+        if BREAKING_ELEMENTS.contains(&name.as_str()) {
+            out.push(' ');
         }
     }
     decode_basic_entities(&out)
@@ -188,13 +232,97 @@ pub(crate) fn plain_text_from_html(html: &str) -> String {
         .join(" ")
 }
 
+/// The copied selection, when the source marked it. Everything outside is
+/// document scaffolding the user did not copy.
+fn html_fragment(html: &str) -> &str {
+    const START: &str = "<!--StartFragment-->";
+    const END: &str = "<!--EndFragment-->";
+    let Some(start) = html.find(START) else {
+        return html;
+    };
+    let rest = &html[start + START.len()..];
+    match rest.find(END) {
+        Some(end) => &rest[..end],
+        None => rest,
+    }
+}
+
+fn tag_name(raw: &str) -> String {
+    raw.trim_start_matches('/')
+        .split(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+fn starts_with(chars: &[char], at: usize, needle: &str) -> bool {
+    needle
+        .chars()
+        .enumerate()
+        .all(|(offset, expected)| chars.get(at + offset) == Some(&expected))
+}
+
+fn find_from(chars: &[char], from: usize, needle: &str) -> Option<usize> {
+    (from..chars.len()).find(|at| starts_with(chars, *at, needle))
+}
+
+/// Index just past `</name>`, or the end of the document when it never closes.
+fn skip_element(chars: &[char], from: usize, name: &str) -> usize {
+    let closing = format!("</{name}");
+    let mut i = from;
+    while i < chars.len() {
+        if chars[i] == '<' {
+            let lowered: String = chars[i..(i + closing.len()).min(chars.len())]
+                .iter()
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if lowered == closing {
+                return match chars[i..].iter().position(|c| *c == '>') {
+                    Some(at) => i + at + 1,
+                    None => chars.len(),
+                };
+            }
+        }
+        i += 1;
+    }
+    chars.len()
+}
+
+/// Destination groups whose contents are binary or table data, not the copied
+/// text. `\pict` is the one that matters most: its hex image bytes used to be
+/// copied straight into the stored clip.
+const RTF_NON_CONTENT_DESTINATIONS: [&str; 8] = [
+    "pict",
+    "fonttbl",
+    "colortbl",
+    "stylesheet",
+    "info",
+    "header",
+    "footer",
+    "themedata",
+];
+
 /// Best-effort visible text from a simple RTF payload.
 pub(crate) fn plain_text_from_rtf(rtf: &str) -> String {
     let bytes = rtf.as_bytes();
     let mut out = String::new();
+    let mut depth: usize = 0;
+    // Depth of the outermost group being skipped, if any.
+    let mut skipping_from: Option<usize> = None;
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                if skipping_from == Some(depth) {
+                    skipping_from = None;
+                }
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
             b'\\' => {
                 i += 1;
                 if i >= bytes.len() {
@@ -202,13 +330,15 @@ pub(crate) fn plain_text_from_rtf(rtf: &str) -> String {
                 }
                 match bytes[i] {
                     b'\\' | b'{' | b'}' => {
-                        out.push(bytes[i] as char);
+                        if skipping_from.is_none() {
+                            out.push(bytes[i] as char);
+                        }
                         i += 1;
                     }
                     b'\'' => {
                         if i + 2 < bytes.len() {
                             if let Ok(value) = u8::from_str_radix(&rtf[i + 1..i + 3], 16) {
-                                if value >= 32 {
+                                if skipping_from.is_none() && value >= 32 {
                                     out.push(value as char);
                                 }
                             }
@@ -217,12 +347,19 @@ pub(crate) fn plain_text_from_rtf(rtf: &str) -> String {
                             i += 1;
                         }
                     }
+                    // `\*` marks an ignorable destination: generator strings,
+                    // list tables, and similar. None of it is copied text.
+                    b'*' => {
+                        skipping_from.get_or_insert(depth);
+                        i += 1;
+                    }
                     b'\n' | b'\r' => i += 1,
                     c if c.is_ascii_alphabetic() => {
-                        i += 1;
+                        let start = i;
                         while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
                             i += 1;
                         }
+                        let word = &rtf[start..i];
                         if i < bytes.len() && (bytes[i] == b'-' || bytes[i].is_ascii_digit()) {
                             if bytes[i] == b'-' {
                                 i += 1;
@@ -231,16 +368,30 @@ pub(crate) fn plain_text_from_rtf(rtf: &str) -> String {
                                 i += 1;
                             }
                         }
+                        // One trailing space is the control-word delimiter, not
+                        // content.
                         if i < bytes.len() && bytes[i] == b' ' {
                             i += 1;
+                        }
+                        if RTF_NON_CONTENT_DESTINATIONS.contains(&word) {
+                            skipping_from.get_or_insert(depth);
+                        } else if skipping_from.is_none()
+                            && matches!(word, "par" | "line" | "tab" | "cell" | "row" | "sect")
+                        {
+                            // Word and Outlook break paragraphs with `\par`. No
+                            // space here concatenates adjacent paragraphs, so
+                            // search stops matching on word boundaries.
+                            out.push(' ');
                         }
                     }
                     _ => i += 1,
                 }
             }
-            b'{' | b'}' | b'\n' | b'\r' => i += 1,
+            b'\n' | b'\r' => i += 1,
             c => {
-                out.push(c as char);
+                if skipping_from.is_none() {
+                    out.push(c as char);
+                }
                 i += 1;
             }
         }
@@ -261,9 +412,33 @@ fn decode_basic_entities(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_miss, plain_text_from_html, plain_text_from_rtf, rich_capture_from_payloads,
-        MissAction, PayloadRead,
+        decide_capture, plain_text_from_html, plain_text_from_rtf, rich_capture_from_payloads,
+        AttemptFacts, CaptureDecision, PayloadRead,
     };
+
+    /// Facts for a clipboard with no image and no attempts left to spend, which
+    /// is the shape most of these cases care about.
+    fn facts<'a>(
+        text: PayloadRead<'a>,
+        html: PayloadRead<'a>,
+        rtf: PayloadRead<'a>,
+    ) -> AttemptFacts<'a> {
+        AttemptFacts {
+            text,
+            html,
+            rtf,
+            image_advertised: false,
+            image_readable: false,
+            last_attempt: false,
+        }
+    }
+
+    fn rich_text(decision: &CaptureDecision) -> &str {
+        match decision {
+            CaptureDecision::Rich(rich) => &rich.searchable_text,
+            other => panic!("expected a rich capture, got {other:?}"),
+        }
+    }
 
     /// SBS-924: empty CF_UNICODETEXT plus live HTML is a rich capture, not a lock.
     #[test]
@@ -278,17 +453,68 @@ mod tests {
         assert_eq!(captured.searchable_text, "Office format only");
         assert_eq!(captured.html.as_deref(), Some(html));
         assert_eq!(captured.rtf, None);
-        assert_eq!(
-            classify_miss(
-                PayloadRead::Present(""),
-                PayloadRead::Present(html),
-                PayloadRead::Missing,
-                false,
-                Some(false),
-                true,
-            ),
-            MissAction::CaptureRich
-        );
+
+        let decision = decide_capture(facts(
+            PayloadRead::Present(""),
+            PayloadRead::Present(html),
+            PayloadRead::Missing,
+        ));
+        assert_eq!(rich_text(&decision), "Office format only");
+    }
+
+    /// SBS-924 follow-up: a Word, PowerPoint, or Outlook copy of a picture has
+    /// empty Unicode text, an HTML wrapper, RTF, and a bitmap. Storing the
+    /// wrapper as a text clip loses the picture, which is never sent on the
+    /// content event and so never reaches the clips table.
+    #[test]
+    fn a_readable_image_beats_an_html_derived_body() {
+        let decision = decide_capture(AttemptFacts {
+            text: PayloadRead::Present(""),
+            html: PayloadRead::Present("<img src=\"file:///C:/Temp/image001.png\">"),
+            rtf: PayloadRead::Present(r"{\rtf1{\pict\pngblip 89504e47}}"),
+            image_advertised: true,
+            image_readable: true,
+            last_attempt: false,
+        });
+        assert_eq!(decision, CaptureDecision::Image);
+    }
+
+    /// Real text still wins over a bitmap that happens to ride along.
+    #[test]
+    fn readable_text_still_beats_an_image() {
+        let decision = decide_capture(AttemptFacts {
+            text: PayloadRead::Present("the copied phrase"),
+            html: PayloadRead::Present("<p>the copied phrase</p>"),
+            rtf: PayloadRead::Missing,
+            image_advertised: true,
+            image_readable: true,
+            last_attempt: false,
+        });
+        assert_eq!(rich_text(&decision), "the copied phrase");
+    }
+
+    /// Advertised CF_UNICODETEXT that has not rendered yet is a delayed read,
+    /// not an empty body. Accepting an HTML-derived stand-in on the first try
+    /// stores that stand-in forever: the sequence is noted as handled and the
+    /// real text is never read again.
+    #[test]
+    fn unread_advertised_text_retries_before_accepting_html() {
+        let attempt = AttemptFacts {
+            text: PayloadRead::Unknown,
+            html: PayloadRead::Present("<p>wrapper</p>"),
+            rtf: PayloadRead::Missing,
+            image_advertised: false,
+            image_readable: false,
+            last_attempt: false,
+        };
+        assert_eq!(decide_capture(attempt), CaptureDecision::Transient);
+
+        // Out of attempts, the wrapper is better than nothing.
+        let last = AttemptFacts {
+            last_attempt: true,
+            ..attempt
+        };
+        assert_eq!(rich_text(&decide_capture(last)), "wrapper");
     }
 
     /// SBS-924: empty text plus a private/custom format is handled, not a lock.
@@ -301,31 +527,12 @@ mod tests {
         )
         .is_none());
         assert_eq!(
-            classify_miss(
+            decide_capture(facts(
                 PayloadRead::Present(""),
                 PayloadRead::Missing,
                 PayloadRead::Missing,
-                false,
-                Some(false),
-                true,
-            ),
-            MissAction::Unsupported
-        );
-    }
-
-    /// SBS-924: placeholder-only empty clipboard is a clear, not a lock.
-    #[test]
-    fn truly_empty_clipboard_is_cleared_not_locked() {
-        assert_eq!(
-            classify_miss(
-                PayloadRead::Present(""),
-                PayloadRead::Missing,
-                PayloadRead::Missing,
-                false,
-                Some(true),
-                true,
-            ),
-            MissAction::Cleared
+            )),
+            CaptureDecision::DeterminateMiss
         );
     }
 
@@ -333,15 +540,12 @@ mod tests {
     #[test]
     fn unopened_clipboard_is_still_a_lock() {
         assert_eq!(
-            classify_miss(
+            decide_capture(facts(
                 PayloadRead::Unknown,
                 PayloadRead::Unknown,
                 PayloadRead::Unknown,
-                false,
-                None,
-                false,
-            ),
-            MissAction::Contended
+            )),
+            CaptureDecision::Transient
         );
     }
 
@@ -360,7 +564,8 @@ mod tests {
 
     #[test]
     fn missing_text_is_not_collapsed_into_empty_text() {
-        // get_text Err is Missing, not Present(""). HTML still wins.
+        // get_text Err with the format not advertised is Missing, not
+        // Present(""). HTML still wins, and there is nothing to wait for.
         let captured = rich_capture_from_payloads(
             PayloadRead::Missing,
             PayloadRead::Present("<p>still here</p>"),
@@ -369,32 +574,13 @@ mod tests {
         .expect("a missing Unicode format must not drop HTML");
         assert_eq!(captured.searchable_text, "still here");
 
-        // Missing text, no rich, no image, private formats: unsupported, not lock.
         assert_eq!(
-            classify_miss(
+            decide_capture(facts(
                 PayloadRead::Missing,
                 PayloadRead::Missing,
                 PayloadRead::Missing,
-                false,
-                Some(false),
-                true,
-            ),
-            MissAction::Unsupported
-        );
-    }
-
-    #[test]
-    fn unread_advertised_unicode_text_is_contention() {
-        assert_eq!(
-            classify_miss(
-                PayloadRead::Unknown,
-                PayloadRead::Missing,
-                PayloadRead::Missing,
-                false,
-                Some(false),
-                true,
-            ),
-            MissAction::Contended
+            )),
+            CaptureDecision::DeterminateMiss
         );
     }
 
@@ -402,45 +588,27 @@ mod tests {
     #[test]
     fn empty_text_plus_unread_html_is_contention_not_unsupported() {
         assert_eq!(
-            classify_miss(
+            decide_capture(facts(
                 PayloadRead::Present(""),
                 PayloadRead::Unknown,
                 PayloadRead::Missing,
-                false,
-                Some(false),
-                true,
-            ),
-            MissAction::Contended
+            )),
+            CaptureDecision::Transient
         );
     }
 
     #[test]
     fn advertised_unread_image_is_contention() {
         assert_eq!(
-            classify_miss(
-                PayloadRead::Present(""),
-                PayloadRead::Missing,
-                PayloadRead::Missing,
-                true,
-                Some(false),
-                true,
-            ),
-            MissAction::Contended
-        );
-    }
-
-    #[test]
-    fn unknown_format_enum_after_empty_text_is_not_a_lock_or_a_clear() {
-        assert_eq!(
-            classify_miss(
-                PayloadRead::Present(""),
-                PayloadRead::Missing,
-                PayloadRead::Missing,
-                false,
-                None,
-                true,
-            ),
-            MissAction::Unsupported
+            decide_capture(AttemptFacts {
+                text: PayloadRead::Present(""),
+                html: PayloadRead::Missing,
+                rtf: PayloadRead::Missing,
+                image_advertised: true,
+                image_readable: false,
+                last_attempt: false,
+            }),
+            CaptureDecision::Transient
         );
     }
 
@@ -475,11 +643,81 @@ mod tests {
         );
     }
 
+    /// `get_html` hands back the whole StartHTML..EndHTML document. Word's
+    /// conditional comments hold settings markup such as
+    /// `<w:View>Normal</w:View>`, which used to be copied into the stored clip
+    /// and pasted instead of the copied phrase.
+    #[test]
+    fn office_conditional_comments_and_settings_are_not_clip_text() {
+        let word = concat!(
+            "<html><head><style>p { margin: 0 }</style>",
+            "<!--[if gte mso 9]><xml><w:WordDocument><w:View>Normal</w:View>",
+            "</w:WordDocument></xml><![endif]--></head>",
+            "<body><p>Hello</p></body></html>"
+        );
+        assert_eq!(plain_text_from_html(word), "Hello");
+    }
+
+    /// When the source marks the selection, only the selection is the copy.
+    #[test]
+    fn only_the_marked_fragment_is_clip_text() {
+        let document = concat!(
+            "<html><body>before<!--StartFragment--><p>the copied phrase</p>",
+            "<!--EndFragment-->after</body></html>"
+        );
+        assert_eq!(plain_text_from_html(document), "the copied phrase");
+    }
+
+    /// A stylesheet in the body is markup, not content.
+    #[test]
+    fn style_and_script_bodies_are_not_clip_text() {
+        assert_eq!(
+            plain_text_from_html("<div><style>.a{color:red}</style>kept<script>x=1</script></div>"),
+            "kept"
+        );
+    }
+
     #[test]
     fn rtf_control_words_are_stripped() {
         assert_eq!(
             plain_text_from_rtf(r"{\rtf1\ansi\deff0 {\fonttbl} Hello}"),
             "Hello"
         );
+    }
+
+    /// `\par` is how Word and Outlook break paragraphs. Dropping it entirely
+    /// runs the paragraphs together, so search stops matching on the word
+    /// boundary between them.
+    #[test]
+    fn rtf_paragraph_breaks_become_whitespace() {
+        assert_eq!(
+            plain_text_from_rtf(r"{\rtf1 Hello\par World}"),
+            "Hello World"
+        );
+        // A control word ends at the first non-letter, so `\par` followed by a
+        // newline is the other shape Word writes. `\parWorld` is a different
+        // control word, not `\par` plus text, and is not RTF Word emits.
+        assert_eq!(
+            plain_text_from_rtf("{\\rtf1 Hello\\par\nWorld}"),
+            "Hello World"
+        );
+        assert_eq!(plain_text_from_rtf(r"{\rtf1 a\tab b\line c}"), "a b c");
+    }
+
+    /// A pasted picture carries its bytes as hex inside `\pict`. Those used to
+    /// be copied straight into the stored body and the History preview.
+    #[test]
+    fn rtf_picture_bytes_and_tables_are_not_clip_text() {
+        let word = concat!(
+            r"{\rtf1\ansi{\fonttbl{\f0 Calibri;}}{\colortbl;\red0\green0\blue0;}",
+            r"{\*\generator Riched20 10.0.0;}",
+            r"{\pict\pngblip\picw100\pich100 89504e470d0a1a0a0000000d49484452}",
+            r" the copied phrase}"
+        );
+        let text = plain_text_from_rtf(word);
+        assert_eq!(text, "the copied phrase");
+        assert!(!text.contains("89504e47"), "picture hex leaked: {text}");
+        assert!(!text.contains("Calibri"), "font table leaked: {text}");
+        assert!(!text.contains("Riched20"), "generator leaked: {text}");
     }
 }

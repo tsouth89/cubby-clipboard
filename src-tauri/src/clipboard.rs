@@ -1195,30 +1195,48 @@ fn materialize_clipboard_content_once(attempt: u32) -> MaterializeOnce {
         let text_read = observed_payload(&text, clipboard_has_unicode_text_format());
         let html_read = observed_payload(&html, clipboard_has_html_format());
         let rtf_read = observed_payload(&rtf, clipboard_has_rtf_format());
-        if let Some(rich) =
-            crate::clipboard_miss::rich_capture_from_payloads(text_read, html_read, rtf_read)
-        {
-            if let Some(content) = capture_text(rich.searchable_text) {
-                return MaterializeOnce::Captured(
-                    content,
-                    captured_rich_formats(rich.html, rich.rtf),
-                );
-            }
-        }
 
-        if let Ok(image) = read_clipboard_image_fast(last_attempt) {
-            return MaterializeOnce::Captured(captured_image(image), Vec::new());
-        }
-        // We opened the clipboard and read it. Empty text is not a lock; an
-        // advertised image or delayed HTML/RTF that did not decode yet still is.
-        if clipboard_has_image_format()
-            || matches!(text_read, crate::clipboard_miss::PayloadRead::Unknown)
-            || matches!(html_read, crate::clipboard_miss::PayloadRead::Unknown)
-            || matches!(rtf_read, crate::clipboard_miss::PayloadRead::Unknown)
-        {
-            return MaterializeOnce::Transient;
-        }
-        return MaterializeOnce::DeterminateMiss;
+        // Only decode when the Unicode body cannot carry the copy on its own.
+        // A non-empty text clip never needs the bitmap, and decoding one on
+        // every attempt would pay for pixels nobody stores.
+        let image = if matches!(
+            text_read,
+            crate::clipboard_miss::PayloadRead::Present(body) if !body.is_empty()
+        ) {
+            None
+        } else {
+            read_clipboard_image_fast(last_attempt).ok()
+        };
+
+        let decision = crate::clipboard_miss::decide_capture(crate::clipboard_miss::AttemptFacts {
+            text: text_read,
+            html: html_read,
+            rtf: rtf_read,
+            image_advertised: clipboard_has_image_format(),
+            image_readable: image.is_some(),
+            last_attempt,
+        });
+        return match decision {
+            crate::clipboard_miss::CaptureDecision::Image => match image {
+                Some(image) => MaterializeOnce::Captured(captured_image(image), Vec::new()),
+                None => MaterializeOnce::Transient,
+            },
+            crate::clipboard_miss::CaptureDecision::Rich(rich) => {
+                match capture_text(rich.searchable_text) {
+                    Some(content) => MaterializeOnce::Captured(
+                        content,
+                        captured_rich_formats(rich.html, rich.rtf),
+                    ),
+                    // The body strips to nothing after all. Nothing here will
+                    // change on a retry, so do not restart the listener.
+                    None => MaterializeOnce::DeterminateMiss,
+                }
+            }
+            crate::clipboard_miss::CaptureDecision::DeterminateMiss => {
+                MaterializeOnce::DeterminateMiss
+            }
+            crate::clipboard_miss::CaptureDecision::Transient => MaterializeOnce::Transient,
+        };
     }
 
     if let Ok(image) = read_clipboard_image_fast(last_attempt) {

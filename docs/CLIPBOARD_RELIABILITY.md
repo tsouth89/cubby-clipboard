@@ -32,11 +32,23 @@ The first compatibility baseline covers:
 - PNG and Windows bitmap variants
 - Multiple simultaneous formats representing the same copied item
 
-An empty `CF_UNICODETEXT` payload is not a lock. If HTML or RTF is present,
-that copy is stored (searchable text is derived from the rich payload). Empty
-text plus only private/custom formats is an unsupported copy: mark it handled
-without restarting the listener or recording a lock miss. A clipboard that
+An empty `CF_UNICODETEXT` payload is not a lock. When Unicode text is empty or
+missing, the order is: a readable image first (an Office copy of a picture has
+empty text, an HTML wrapper, RTF, and a bitmap), then HTML or RTF with content,
+whose searchable text is derived from the rich payload. Empty text plus only
+private/custom formats is an unsupported copy: mark it handled without
+restarting the listener or recording a lock miss.
+
+Advertised text that has not rendered yet is not empty text. While attempts
+remain it is contention, so a delayed `CF_UNICODETEXT` is not replaced by an
+HTML-derived stand-in that would then be stored for good. A clipboard that
 cannot be opened is still diagnosed as contention.
+
+Searchable text derived from HTML skips comments (including Office conditional
+blocks and the Word settings XML inside them) and non-content elements, and
+uses the `StartFragment`/`EndFragment` selection when the source marked one.
+From RTF it skips `\pict`, the font, colour, and style tables, and other
+ignorable destinations, and turns `\par`, `\line`, and `\tab` into spaces.
 
 File clipboard payloads are intentionally ignored. Windows file copies are
 references to external paths rather than durable clipboard content, so Cubby
