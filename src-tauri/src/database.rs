@@ -289,11 +289,17 @@ impl Database {
                 .bind(&survivor.uuid)
                 .execute(&mut *transaction)
                 .await
-                .map_err(|error| format!("could not keep the completed OCR on the surviving clip: {error}"))?;
+                .map_err(|error| {
+                    format!("could not keep the completed OCR on the surviving clip: {error}")
+                })?;
             }
 
-            if !clip_has_live_image(&mut transaction, &survivor.uuid, survivor.full_image_expired)
-                .await?
+            if !clip_has_live_image(
+                &mut transaction,
+                &survivor.uuid,
+                survivor.full_image_expired,
+            )
+            .await?
             {
                 for loser in losers {
                     if clip_has_live_image(&mut transaction, &loser.uuid, loser.full_image_expired)
@@ -1353,13 +1359,12 @@ async fn clip_has_live_image(
     if expired != 0 {
         return Ok(false);
     }
-    let present: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM clip_images WHERE clip_uuid = ?)",
-    )
-    .bind(uuid)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(|error| format!("could not check a duplicate clip's image: {error}"))?;
+    let present: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM clip_images WHERE clip_uuid = ?)")
+            .bind(uuid)
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(|error| format!("could not check a duplicate clip's image: {error}"))?;
     Ok(present)
 }
 
@@ -1719,12 +1724,11 @@ mod tests {
 
         assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
 
-        let survivor: (String, Option<String>, Option<String>, i64) = sqlx::query_as(
-            "SELECT uuid, ocr_text, ocr_status, full_image_expired FROM clips",
-        )
-        .fetch_one(&database.pool)
-        .await
-        .unwrap();
+        let survivor: (String, Option<String>, Option<String>, i64) =
+            sqlx::query_as("SELECT uuid, ocr_text, ocr_status, full_image_expired FROM clips")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
         assert_eq!(survivor.0, "original");
         assert_eq!(survivor.1.as_deref(), Some("invoice total"));
         assert_eq!(survivor.2.as_deref(), Some("completed"));
@@ -1734,7 +1738,10 @@ mod tests {
                 .fetch_one(&database.pool)
                 .await
                 .unwrap();
-        assert_eq!(images, 1, "the live original must move onto the surviving row");
+        assert_eq!(
+            images, 1,
+            "the live original must move onto the surviving row"
+        );
     }
 
     /// Soft delete keeps the row, so a newer deleted duplicate must never win:
