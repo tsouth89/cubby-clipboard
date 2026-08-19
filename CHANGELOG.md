@@ -6,6 +6,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 
 ### Security
 - Search no longer ships full decrypted clip bodies on every keystroke; flyout and History search rows use the same preview-only contract as the list (SBS-912)
+- The opener release gate now models glob the way tauri-plugin-opener does (star and question-mark match slash) and refuses a host pattern that contains a wildcard, so a dropped-slash glob fails the release check instead of shipping (SBS-997)
 
 ### Fixed
 - Encrypted backup export now includes live full-resolution screenshot originals, and refuses the export if one cannot be read, instead of restoring every image as an expired thumbnail; a restore keeps those originals through the destination keep-for window without rewriting the visible capture date (SBS-919)
