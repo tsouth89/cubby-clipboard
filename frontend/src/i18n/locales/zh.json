@@ -8,7 +8,10 @@
     "loading": "加载中...",
     "copied": "已复制到剪贴板",
     "pause": "暂停",
-    "resume": "继续"
+    "resume": "继续",
+    "clipActions": "剪贴操作",
+    "folderActions": "文件夹操作",
+    "historyActions": "历史记录操作"
   },
   "clipList": {
     "empty": "暂无剪贴",
