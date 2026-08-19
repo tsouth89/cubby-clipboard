@@ -70,8 +70,11 @@ pub(crate) enum CaptureDecision {
 /// 3. A readable image beats an HTML/RTF-derived body. A Word, PowerPoint, or
 ///    Outlook copy of a picture has empty Unicode text, an HTML wrapper, RTF,
 ///    and a bitmap; storing the wrapper would lose the picture entirely.
-/// 4. Otherwise HTML or RTF with content is the clip.
-/// 5. An advertised-but-unread image, or unread HTML/RTF, is still contention.
+/// 4. An advertised-but-unread image still retries before HTML/RTF, except on
+///    the last attempt. The first fast PNG read often misses, and accepting
+///    the wrapper then stops later attempts from ever seeing the bitmap.
+/// 5. Otherwise HTML or RTF with content is the clip.
+/// 6. Unread HTML/RTF, or a last-attempt unread image, is still contention.
 pub(crate) fn decide_capture(facts: AttemptFacts<'_>) -> CaptureDecision {
     let html = nonempty_present(facts.html);
     let rtf = nonempty_present(facts.rtf);
@@ -92,6 +95,10 @@ pub(crate) fn decide_capture(facts: AttemptFacts<'_>) -> CaptureDecision {
 
     if facts.image_readable {
         return CaptureDecision::Image;
+    }
+
+    if facts.image_advertised && !facts.last_attempt {
+        return CaptureDecision::Transient;
     }
 
     if let Some(rich) = rich_capture_from_payloads(facts.text, facts.html, facts.rtf) {
@@ -309,6 +316,8 @@ pub(crate) fn plain_text_from_rtf(rtf: &str) -> String {
     let mut depth: usize = 0;
     // Depth of the outermost group being skipped, if any.
     let mut skipping_from: Option<usize> = None;
+    // `\ucN` fallback length after `\u`; RTF default is one ANSI byte.
+    let mut ansi_fallback_bytes: usize = 1;
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
@@ -360,20 +369,50 @@ pub(crate) fn plain_text_from_rtf(rtf: &str) -> String {
                             i += 1;
                         }
                         let word = &rtf[start..i];
+                        let mut param: Option<i32> = None;
                         if i < bytes.len() && (bytes[i] == b'-' || bytes[i].is_ascii_digit()) {
+                            let param_start = i;
                             if bytes[i] == b'-' {
                                 i += 1;
                             }
                             while i < bytes.len() && bytes[i].is_ascii_digit() {
                                 i += 1;
                             }
+                            param = rtf[param_start..i].parse().ok();
+                        }
+                        if word == "bin" {
+                            // `\binN` is followed immediately by N raw bytes.
+                            // Those bytes are not RTF tokens: a 0x7D in a
+                            // Word `\pict\bin` payload would otherwise close
+                            // the skip and leak the rest into clip text.
+                            let skip = param.unwrap_or(0).max(0) as usize;
+                            i = (i + skip).min(bytes.len());
+                            continue;
                         }
                         // One trailing space is the control-word delimiter, not
-                        // content.
+                        // content. Not for `\bin`, whose payload starts here.
                         if i < bytes.len() && bytes[i] == b' ' {
                             i += 1;
                         }
-                        if RTF_NON_CONTENT_DESTINATIONS.contains(&word) {
+                        if word == "uc" {
+                            if let Some(count) = param {
+                                ansi_fallback_bytes = count.max(0) as usize;
+                            }
+                        } else if word == "u" {
+                            if skipping_from.is_none() {
+                                if let Some(code) = param {
+                                    let unsigned = if code < 0 {
+                                        code.wrapping_add(65536)
+                                    } else {
+                                        code
+                                    } as u32;
+                                    if let Some(ch) = char::from_u32(unsigned) {
+                                        out.push(ch);
+                                    }
+                                }
+                            }
+                            i = (i + ansi_fallback_bytes).min(bytes.len());
+                        } else if RTF_NON_CONTENT_DESTINATIONS.contains(&word) {
                             skipping_from.get_or_insert(depth);
                         } else if skipping_from.is_none()
                             && matches!(word, "par" | "line" | "tab" | "cell" | "row" | "sect")
@@ -612,6 +651,32 @@ mod tests {
         );
     }
 
+    /// Office picture copies advertise PNG/DIB plus an HTML wrapper. The first
+    /// fast image read often misses; accepting the wrapper then marks the
+    /// sequence handled and the bitmap never reaches history.
+    #[test]
+    fn unread_advertised_image_retries_before_accepting_html() {
+        let attempt = AttemptFacts {
+            text: PayloadRead::Present(""),
+            html: PayloadRead::Present("<img src=\"file:///C:/Temp/image001.png\">"),
+            rtf: PayloadRead::Present(r"{\rtf1{\pict\pngblip 89504e47}}"),
+            image_advertised: true,
+            image_readable: false,
+            last_attempt: false,
+        };
+        assert_eq!(decide_capture(attempt), CaptureDecision::Transient);
+
+        let last = AttemptFacts {
+            last_attempt: true,
+            ..attempt
+        };
+        let decision = decide_capture(last);
+        assert!(
+            matches!(decision, CaptureDecision::Rich(_)),
+            "last attempt should keep the wrapper rather than miss: {decision:?}"
+        );
+    }
+
     #[test]
     fn nonempty_unicode_text_keeps_html_and_rtf_companions() {
         let captured = rich_capture_from_payloads(
@@ -719,5 +784,28 @@ mod tests {
         assert!(!text.contains("89504e47"), "picture hex leaked: {text}");
         assert!(!text.contains("Calibri"), "font table leaked: {text}");
         assert!(!text.contains("Riched20"), "generator leaked: {text}");
+    }
+
+    /// `\binN` payload is raw bytes, not RTF. A `}` in those bytes must not
+    /// end the `\pict` skip and leak the rest into searchable text.
+    #[test]
+    fn rtf_bin_payload_is_not_parsed_as_rtf() {
+        let mut rtf = String::from(r"{\rtf1{\pict\bin");
+        let payload = b"abc}SECRET";
+        rtf.push_str(&payload.len().to_string());
+        rtf.push_str(std::str::from_utf8(payload).unwrap());
+        rtf.push_str("} the copied phrase}");
+        let text = plain_text_from_rtf(&rtf);
+        assert_eq!(text, "the copied phrase");
+        assert!(
+            !text.contains("SECRET"),
+            "binary after a payload '}}' leaked: {text}"
+        );
+    }
+
+    /// Word writes non-ASCII as `\uN` plus an ANSI fallback, often `?`.
+    #[test]
+    fn rtf_unicode_control_word_emits_the_codepoint() {
+        assert_eq!(plain_text_from_rtf(r"{\rtf1\u12354?}"), "あ");
     }
 }
