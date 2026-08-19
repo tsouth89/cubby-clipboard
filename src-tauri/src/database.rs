@@ -322,14 +322,6 @@ impl Database {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_clips_hash ON clips(content_hash);
-        "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
             CREATE INDEX IF NOT EXISTS idx_clips_folder ON clips(folder_id);
         "#,
         )
@@ -1378,6 +1370,30 @@ mod tests {
         .await
         .expect("index lookup should succeed");
         assert!(!old_index, "the old non-unique index should be replaced");
+    }
+
+    #[tokio::test]
+    async fn migrate_does_not_rebuild_the_old_hash_index_after_uniqueness() {
+        let database = migrated_database().await;
+        database
+            .enforce_content_hash_uniqueness()
+            .await
+            .expect("a fresh database has nothing to reconcile");
+        database
+            .migrate()
+            .await
+            .expect("a second migrate on an already-unique database must succeed");
+        let old_index: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_clips_hash')",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .expect("index lookup should succeed");
+        assert!(
+            !old_index,
+            "startup must not rebuild the non-unique index uniqueness just dropped"
+        );
+        assert!(unique_hash_index_exists(&database).await);
     }
 
     #[tokio::test]
