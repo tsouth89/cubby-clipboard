@@ -1833,8 +1833,13 @@ mod tests {
     #[tokio::test]
     async fn export_treats_a_now_expired_original_as_thumbnail_only() {
         let source = test_database().await;
-        let uuid = insert_image_clip(&source, b"stale-expired-thumb", Some(b"live-original"), false)
-            .await;
+        let uuid = insert_image_clip(
+            &source,
+            b"stale-expired-thumb",
+            Some(b"live-original"),
+            false,
+        )
+        .await;
         sqlx::query("UPDATE clips SET full_image_expired = 1 WHERE uuid = ?")
             .bind(&uuid)
             .execute(&source.pool)
@@ -1878,18 +1883,16 @@ mod tests {
     #[tokio::test]
     async fn export_refuses_a_legacy_original_that_decrypts_empty() {
         let source = test_database().await;
-        let uuid = insert_image_clip(&source, b"empty-decrypt-thumb", Some(b"not-empty"), false)
-            .await;
+        let uuid =
+            insert_image_clip(&source, b"empty-decrypt-thumb", Some(b"not-empty"), false).await;
         let file = source.image_dir.join(format!("{uuid}.cubby"));
         let _ = std::fs::remove_file(&file);
-        sqlx::query(
-            "UPDATE clip_images SET full_content = ?, file_path = '' WHERE clip_uuid = ?",
-        )
-        .bind(source.crypto.encrypt(&[]).unwrap())
-        .bind(&uuid)
-        .execute(&source.pool)
-        .await
-        .unwrap();
+        sqlx::query("UPDATE clip_images SET full_content = ?, file_path = '' WHERE clip_uuid = ?")
+            .bind(source.crypto.encrypt(&[]).unwrap())
+            .bind(&uuid)
+            .execute(&source.pool)
+            .await
+            .unwrap();
 
         let path = temp_path("empty-decrypt-original");
         export_backup(&source, path.to_str().unwrap(), "correct horse")
@@ -1905,8 +1908,13 @@ mod tests {
     #[tokio::test]
     async fn index_failure_does_not_leave_a_clip_that_blocks_retry() {
         let source = test_database().await;
-        insert_image_clip(&source, b"index-fail-thumb", Some(b"index-fail-original"), false)
-            .await;
+        insert_image_clip(
+            &source,
+            b"index-fail-thumb",
+            Some(b"index-fail-original"),
+            false,
+        )
+        .await;
         let path = temp_path("index-fail-retry");
         export_backup(&source, path.to_str().unwrap(), "correct horse")
             .await
@@ -1923,12 +1931,18 @@ mod tests {
         let failed = import_backup(&target, path.to_str().unwrap(), "correct horse", false)
             .await
             .unwrap();
-        assert_eq!(failed.imported, 0, "the failed index must not count as imported");
+        assert_eq!(
+            failed.imported, 0,
+            "the failed index must not count as imported"
+        );
         let leftover: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM clips")
             .fetch_one(&target.pool)
             .await
             .unwrap();
-        assert_eq!(leftover, 0, "the clips row must be gone so a retry can restore");
+        assert_eq!(
+            leftover, 0,
+            "the clips row must be gone so a retry can restore"
+        );
 
         sqlx::query("DROP TRIGGER fail_index")
             .execute(&target.pool)
@@ -1937,7 +1951,10 @@ mod tests {
         let retry = import_backup(&target, path.to_str().unwrap(), "correct horse", false)
             .await
             .unwrap();
-        assert_eq!(retry.imported, 1, "retry must not be treated as a duplicate");
+        assert_eq!(
+            retry.imported, 1,
+            "retry must not be treated as a duplicate"
+        );
         assert_eq!(retry.duplicates, 0);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         let _ = std::fs::remove_dir_all(&target.image_dir);
