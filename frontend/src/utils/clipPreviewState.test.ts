@@ -114,4 +114,37 @@ describe('withSavedOcrText', () => {
   it('clears recognized text when the correction is empty', () => {
     expect(withSavedOcrText(details, '   ')?.ocr_text).toBeNull();
   });
+
+  it('rewrites drag-select word boxes to the correction (SBS-1010)', () => {
+    const withLayout: ClipDetails = {
+      ...details,
+      ocr_text: 'htlps://exarnple.com',
+      ocr_layout: {
+        aspect: 2,
+        words: [{ text: 'htlps://exarnple.com', x: 0.1, y: 0.2, width: 0.5, height: 0.1, line: 0 }],
+      },
+    };
+    const saved = withSavedOcrText(withLayout, 'https://example.com');
+    expect(saved?.ocr_text).toBe('https://example.com');
+    expect(saved?.ocr_layout?.words).toEqual([
+      { text: 'https://example.com', x: 0.1, y: 0.2, width: 0.5, height: 0.1, line: 0 },
+    ]);
+  });
+
+  it('clears word boxes when the correction is emptied', () => {
+    const withLayout: ClipDetails = {
+      ...details,
+      ocr_layout: {
+        aspect: 2,
+        words: [{ text: 'stale', x: 0, y: 0, width: 0.2, height: 0.1, line: 0 }],
+      },
+    };
+    const saved = withSavedOcrText(withLayout, '   ');
+    expect(saved?.ocr_text).toBeNull();
+    expect(saved?.ocr_layout).toBeNull();
+  });
+
+  it('leaves a missing layout missing rather than inventing boxes', () => {
+    expect(withSavedOcrText(details, 'fixed scan')?.ocr_layout).toBeNull();
+  });
 });

@@ -1613,11 +1613,12 @@ pub async fn toggle_clip_pin(
 /// clip permanently unfindable by its real text and give the user no way to
 /// mend that. A correction is worth more to search than to one paste.
 ///
-/// The per-word boxes are deliberately left alone. They still describe where
-/// words sit on the image, which is what the selection overlay needs; only the
-/// recognized-text block — what search, Copy text, and Shift+Enter use — is
-/// corrected. Selecting a misread word directly off the image therefore still
-/// yields the original reading.
+/// The per-word boxes are rewritten to the same tokens (SBS-1010). Leaving them
+/// as the engine stored them meant drag-select and search highlights still
+/// copied the misreading after "Recognized text updated". Geometry stays;
+/// leftover boxes are dropped so a shorter correction cannot select a stale
+/// word. Unreadable existing boxes are left unchanged rather than cleared —
+/// failed to decrypt is not "no layout".
 #[tauri::command]
 pub async fn set_clip_ocr_text(
     id: String,
@@ -1627,14 +1628,64 @@ pub async fn set_clip_ocr_text(
     set_clip_ocr_text_in_database(db.inner(), &id, &text).await
 }
 
+/// Whether a correction can rewrite the stored word-box JSON.
+enum OcrWordsUpdate {
+    /// Encrypt and store this JSON, or NULL the column.
+    Replace(Option<String>),
+    /// Existing ciphertext could not be read; leave the column alone.
+    LeaveUnchanged,
+}
+
+fn rewrite_stored_ocr_words(
+    crypto: &crate::crypto::CryptoManager,
+    encrypted_words: Option<&str>,
+    trimmed: &str,
+) -> Result<OcrWordsUpdate, String> {
+    if trimmed.is_empty() {
+        // Clearing the assembled block must also clear selectable boxes, or
+        // drag-select still copies the reading the user just deleted.
+        return Ok(OcrWordsUpdate::Replace(None));
+    }
+    let Some(ciphertext) = encrypted_words else {
+        return Ok(OcrWordsUpdate::Replace(None));
+    };
+    let json = match crypto.decrypt_text(ciphertext) {
+        Ok(json) => json,
+        Err(error) => {
+            log::warn!(
+                "CLIPS: Leaving unreadable OCR word boxes unchanged after a correction: {error}"
+            );
+            return Ok(OcrWordsUpdate::LeaveUnchanged);
+        }
+    };
+    let layout: crate::ocr::OcrLayout = match serde_json::from_str(&json) {
+        Ok(layout) => layout,
+        Err(error) => {
+            log::warn!(
+                "CLIPS: Leaving unparseable OCR word boxes unchanged after a correction: {error}"
+            );
+            return Ok(OcrWordsUpdate::LeaveUnchanged);
+        }
+    };
+    let layout = crate::ocr::apply_ocr_text_to_layout(layout, trimmed);
+    if layout.words.is_empty() {
+        return Ok(OcrWordsUpdate::Replace(None));
+    }
+    let json = serde_json::to_string(&layout).map_err(|error| error.to_string())?;
+    Ok(OcrWordsUpdate::Replace(Some(crypto.encrypt_text(&json)?)))
+}
+
 async fn set_clip_ocr_text_in_database(db: &Database, id: &str, text: &str) -> Result<(), String> {
-    let clip_type: Option<String> =
-        sqlx::query_scalar("SELECT clip_type FROM clips WHERE uuid = ?")
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT clip_type, ocr_words FROM clips WHERE uuid = ?")
             .bind(id)
             .fetch_optional(&db.pool)
             .await
             .map_err(|e| e.to_string())?;
-    if clip_type.as_deref() != Some("image") {
+    let Some((clip_type, encrypted_words)) = row else {
+        return Err("Recognized text belongs to image clips".to_string());
+    };
+    if clip_type != "image" {
         return Err("Recognized text belongs to image clips".to_string());
     }
 
@@ -1644,14 +1695,30 @@ async fn set_clip_ocr_text_in_database(db: &Database, id: &str, text: &str) -> R
     } else {
         db.crypto.encrypt_optional_text(Some(trimmed))?
     };
+    let words_update = rewrite_stored_ocr_words(&db.crypto, encrypted_words.as_deref(), trimmed)?;
     // A corrected clip counts as processed: leaving it pending would let the
     // background worker overwrite the correction on its next pass.
-    sqlx::query("UPDATE clips SET ocr_text = ?, ocr_status = 'completed' WHERE uuid = ?")
-        .bind(&stored)
-        .bind(id)
-        .execute(&db.pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    match words_update {
+        OcrWordsUpdate::Replace(stored_words) => {
+            sqlx::query(
+                "UPDATE clips SET ocr_text = ?, ocr_words = ?, ocr_status = 'completed' WHERE uuid = ?",
+            )
+            .bind(&stored)
+            .bind(&stored_words)
+            .bind(id)
+            .execute(&db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+        OcrWordsUpdate::LeaveUnchanged => {
+            sqlx::query("UPDATE clips SET ocr_text = ?, ocr_status = 'completed' WHERE uuid = ?")
+                .bind(&stored)
+                .bind(id)
+                .execute(&db.pool)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
 
     db.search_index.update_ocr(id, trimmed);
     Ok(())
@@ -3668,6 +3735,73 @@ mod tests {
                 .await
                 .unwrap();
         assert!(!raw.unwrap().contains("invoice"));
+    }
+
+    #[tokio::test]
+    async fn a_corrected_reading_rewrites_drag_select_word_boxes() {
+        // SBS-1010: saving a correction used to leave ocr_words as the engine
+        // stored them, so drag-select and search highlights still copied the
+        // misreading after Copy text already used the fix.
+        let database = test_database().await;
+        let layout = crate::ocr::OcrLayout {
+            image_width: 100,
+            image_height: 50,
+            words: vec![crate::ocr::OcrWordBox {
+                text: "htlps://exarnple.com".to_string(),
+                x: 10.0,
+                y: 5.0,
+                width: 80.0,
+                height: 10.0,
+                line: Some(0),
+            }],
+        };
+        sqlx::query(
+            "INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash, ocr_text, ocr_words, ocr_status) VALUES ('shot', 'image', ?, ?, 'h', ?, ?, 'completed')",
+        )
+        .bind(database.crypto.encrypt(&[1, 2, 3]).unwrap())
+        .bind(database.crypto.encrypt_text("Screenshot").unwrap())
+        .bind(database.crypto.encrypt_text("htlps://exarnple.com").unwrap())
+        .bind(
+            database
+                .crypto
+                .encrypt_text(&serde_json::to_string(&layout).unwrap())
+                .unwrap(),
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        set_clip_ocr_text_in_database(&database, "shot", "https://example.com")
+            .await
+            .unwrap();
+
+        let details = get_clip_details_in_database(&database, "shot")
+            .await
+            .expect("details should load");
+        assert_eq!(details.ocr_text.as_deref(), Some("https://example.com"));
+        let words = details.ocr_layout.expect("layout should remain").words;
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].text, "https://example.com");
+        assert_eq!(words[0].x, 0.1);
+        assert_eq!(words[0].width, 0.8);
+
+        // Not stored in the clear.
+        let raw_words: Option<String> =
+            sqlx::query_scalar("SELECT ocr_words FROM clips WHERE uuid = 'shot'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert!(!raw_words.unwrap().contains("example"));
+
+        // Clearing the assembled block must drop the boxes too.
+        set_clip_ocr_text_in_database(&database, "shot", "   ")
+            .await
+            .unwrap();
+        let cleared = get_clip_details_in_database(&database, "shot")
+            .await
+            .expect("details should load");
+        assert!(cleared.ocr_text.is_none());
+        assert!(cleared.ocr_layout.is_none());
     }
 
     #[tokio::test]
