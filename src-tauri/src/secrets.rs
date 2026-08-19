@@ -114,7 +114,12 @@ pub fn classify_secret(text: &str) -> Option<SecretKind> {
 /// user's note is not.
 pub fn looks_like_credential(text: &str) -> bool {
     let trimmed = text.trim();
-    if classify_secret(trimmed).is_some() {
+    // Deliberately not the windowed scan `classify_secret` does. Forget-on-clear
+    // deletes a clip the user can never get back, so it only counts a match on a
+    // paste small enough to have been read whole. A 9 KiB log or key tutorial
+    // that merely mentions `ghp_` in its first 8 KiB stays in history; the
+    // skip-likely-secrets setting still windows it (SBS-922).
+    if trimmed.len() <= SECRET_SCAN_PREFIX_BYTES && classify_secret(trimmed).is_some() {
         return true;
     }
 
@@ -428,7 +433,12 @@ mod tests {
         assert_eq!(classify_secret(&aws), Some(SecretKind::AwsAccessKey));
         assert_eq!(classify_secret(&pem), Some(SecretKind::PrivateKey));
         assert_eq!(classify_secret(&padding), None);
-        assert!(looks_like_credential(&github));
+        // Forget-on-clear keeps its old oversized-note rule: it deletes, so it
+        // only trusts a paste it read whole.
+        assert!(!looks_like_credential(&github));
+        let small_github = format!("ghp_{}", "abcdefghijklmnopqrstuvwxyz0123456789");
+        assert!(small_github.len() <= SECRET_SCAN_PREFIX_BYTES);
+        assert!(looks_like_credential(&small_github));
     }
 
     /// The documented bound: a marker that first appears after the prefix

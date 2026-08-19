@@ -36,7 +36,7 @@ Third-party actions in privileged release, Store, and signing workflows must be 
 In addition to AES-256-GCM at rest, Cubby skips:
 
 - Clipboard items tagged with Windows `ExcludeClipboardContentFromMonitorProcessing` (default on).
-- Text that matches high-confidence secret heuristics such as private keys, cloud API tokens, and grouped payment-card numbers (off by default, enable in Settings; category logged, never content). This one is opt-in because a wrong guess silently drops a clip the user wanted to keep. Pastes larger than 8 KiB are still scanned: the first 8 KiB is checked so a secret marker at the start of a log or PEM is skipped. Content after that window is not scanned. Text that cannot be decoded as UTF-8 is treated as unscannable and is not stored.
+- Text that matches high-confidence secret heuristics such as private keys, cloud API tokens, and grouped payment-card numbers (off by default, enable in Settings; category logged, never content). This one is opt-in because a wrong guess silently drops a clip the user wanted to keep. Pastes larger than 8 KiB are still scanned: the first 8 KiB is checked so a secret marker at the start of a log or PEM is skipped. Content after that window is not scanned. While this setting is on, text that cannot be decoded as UTF-8 is treated as unscannable and is not stored; with the setting off, that text is stored like any other clip.
 - A one-time seeded ignore list of major password-manager executables, editable in Settings.
 
 Release Info logs persist under the application log directory. The History source-app filter is recorded there as `none` / `blank` / `set`, not as the selected application name.
