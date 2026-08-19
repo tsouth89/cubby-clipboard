@@ -687,30 +687,40 @@ fn kick_flyout_worker() {
     {
         return;
     }
-    std::thread::spawn(|| loop {
-        let job = pending_flyout().lock().unwrap().take();
-        let Some((window, request)) = job else {
-            FLYOUT_WORKER_LIVE.store(false, Ordering::SeqCst);
-            if pending_flyout().lock().unwrap().is_some()
-                && FLYOUT_WORKER_LIVE
-                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-            {
-                continue;
+    std::thread::spawn(|| {
+        // Clear the latch on panic as well as on a normal drain, then start a
+        // replacement if a request arrived during unwind (SBS-990).
+        struct FlyoutWorkerGuard;
+        impl Drop for FlyoutWorkerGuard {
+            fn drop(&mut self) {
+                FLYOUT_WORKER_LIVE.store(false, Ordering::SeqCst);
+                if pending_flyout()
+                    .lock()
+                    .map(|slot| slot.is_some())
+                    .unwrap_or(false)
+                {
+                    kick_flyout_worker();
+                }
             }
-            return;
-        };
-        let Some(guard) = AnimationGuard::acquire()
-            .or_else(|| AnimationGuard::acquire_within(ANIMATION_LOCK_WAIT))
-        else {
-            log::warn!("WINDOW: Flyout request dropped, animation lock still held after 1s");
-            continue;
-        };
-        match request {
-            FlyoutRequest::Show(anchor) => run_window_show(window, anchor, guard),
-            FlyoutRequest::Hide => {
-                let _ = window.hide();
-                drop(guard);
+        }
+        let _guard = FlyoutWorkerGuard;
+        loop {
+            let job = pending_flyout().lock().unwrap().take();
+            let Some((window, request)) = job else {
+                return;
+            };
+            let Some(guard) = AnimationGuard::acquire()
+                .or_else(|| AnimationGuard::acquire_within(ANIMATION_LOCK_WAIT))
+            else {
+                log::warn!("WINDOW: Flyout request dropped, animation lock still held after 1s");
+                continue;
+            };
+            match request {
+                FlyoutRequest::Show(anchor) => run_window_show(window, anchor, guard),
+                FlyoutRequest::Hide => {
+                    let _ = window.hide();
+                    drop(guard);
+                }
             }
         }
     });
