@@ -183,30 +183,57 @@ impl Database {
             // Among visible rows the lowest id wins, which is the original
             // capture rather than an accidental re-insert, and is exactly the
             // `MIN(id)` rule that command already uses.
-            let rows: Vec<DuplicateRow> =
-                sqlx::query_as::<_, (String, bool, bool, Option<i64>, Option<String>)>(
-                    r#"
-                SELECT uuid, is_pinned, is_hidden, folder_id, notes
+            let rows: Vec<DuplicateRow> = sqlx::query_as::<
+                _,
+                (
+                    String,
+                    bool,
+                    bool,
+                    Option<i64>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    i64,
+                ),
+            >(
+                r#"
+                SELECT uuid, is_pinned, is_hidden, folder_id, notes,
+                       ocr_text, ocr_words, ocr_status, full_image_expired
                 FROM clips
                 WHERE content_hash = ?
                 ORDER BY is_deleted ASC, id ASC
                 "#,
-                )
-                .bind(hash)
-                .fetch_all(&mut *transaction)
-                .await
-                .map_err(|error| format!("could not read a duplicate clip group: {error}"))?
-                .into_iter()
-                .map(
-                    |(uuid, is_pinned, is_hidden, folder_id, notes)| DuplicateRow {
-                        uuid,
-                        is_pinned,
-                        is_hidden,
-                        folder_id,
-                        notes,
-                    },
-                )
-                .collect();
+            )
+            .bind(hash)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(|error| format!("could not read a duplicate clip group: {error}"))?
+            .into_iter()
+            .map(
+                |(
+                    uuid,
+                    is_pinned,
+                    is_hidden,
+                    folder_id,
+                    notes,
+                    ocr_text,
+                    ocr_words,
+                    ocr_status,
+                    full_image_expired,
+                )| DuplicateRow {
+                    uuid,
+                    is_pinned,
+                    is_hidden,
+                    folder_id,
+                    notes,
+                    ocr_text,
+                    ocr_words,
+                    ocr_status,
+                    full_image_expired,
+                },
+            )
+            .collect();
 
             let Some((survivor, losers)) = rows.split_first() else {
                 continue;
@@ -245,6 +272,38 @@ impl Database {
             .execute(&mut *transaction)
             .await
             .map_err(|error| format!("could not merge duplicate clip state: {error}"))?;
+
+            let best_ocr = rows
+                .iter()
+                .max_by_key(|row| ocr_quality(&row.ocr_status, &row.ocr_text))
+                .unwrap_or(survivor);
+            if ocr_quality(&best_ocr.ocr_status, &best_ocr.ocr_text)
+                > ocr_quality(&survivor.ocr_status, &survivor.ocr_text)
+            {
+                sqlx::query(
+                    "UPDATE clips SET ocr_text = ?, ocr_words = ?, ocr_status = ? WHERE uuid = ?",
+                )
+                .bind(&best_ocr.ocr_text)
+                .bind(&best_ocr.ocr_words)
+                .bind(&best_ocr.ocr_status)
+                .bind(&survivor.uuid)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| format!("could not keep the completed OCR on the surviving clip: {error}"))?;
+            }
+
+            if !clip_has_live_image(&mut transaction, &survivor.uuid, survivor.full_image_expired)
+                .await?
+            {
+                for loser in losers {
+                    if clip_has_live_image(&mut transaction, &loser.uuid, loser.full_image_expired)
+                        .await?
+                    {
+                        adopt_live_image(&mut transaction, &survivor.uuid, &loser.uuid).await?;
+                        break;
+                    }
+                }
+            }
 
             for loser in losers {
                 // Child rows cascade, but the image blobs on disk do not, so
@@ -1269,6 +1328,98 @@ struct DuplicateRow {
     is_hidden: bool,
     folder_id: Option<i64>,
     notes: Option<String>,
+    ocr_text: Option<String>,
+    ocr_words: Option<String>,
+    ocr_status: Option<String>,
+    full_image_expired: i64,
+}
+
+fn ocr_quality(status: &Option<String>, text: &Option<String>) -> u8 {
+    let has_text = text
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    match (status.as_deref(), has_text) {
+        (Some("completed"), true) => 2,
+        (_, true) => 1,
+        _ => 0,
+    }
+}
+
+async fn clip_has_live_image(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    uuid: &str,
+    expired: i64,
+) -> Result<bool, String> {
+    if expired != 0 {
+        return Ok(false);
+    }
+    let present: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM clip_images WHERE clip_uuid = ?)",
+    )
+    .bind(uuid)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|error| format!("could not check a duplicate clip's image: {error}"))?;
+    Ok(present)
+}
+
+async fn adopt_live_image(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    survivor_uuid: &str,
+    loser_uuid: &str,
+) -> Result<(), String> {
+    let row: Option<(Vec<u8>, Option<String>, Option<i64>, String, String)> = sqlx::query_as(
+        r#"
+        SELECT full_content, file_path, file_size, storage_kind, mime_type
+        FROM clip_images
+        WHERE clip_uuid = ?
+        "#,
+    )
+    .bind(loser_uuid)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| format!("could not read a duplicate clip's image: {error}"))?;
+    let Some((full_content, file_path, file_size, storage_kind, mime_type)) = row else {
+        return Ok(());
+    };
+
+    let adopted_path = match file_path.as_deref() {
+        Some(path) if std::path::Path::new(path).exists() => {
+            let source = std::path::Path::new(path);
+            let destination = source.with_file_name(format!("{survivor_uuid}.cubby"));
+            if destination != source {
+                std::fs::copy(source, &destination).map_err(|error| {
+                    format!("could not keep the surviving clip's original image: {error}")
+                })?;
+            }
+            Some(destination.to_string_lossy().into_owned())
+        }
+        other => other.map(str::to_string),
+    };
+
+    sqlx::query(
+        r#"
+        INSERT OR REPLACE INTO clip_images
+            (clip_uuid, full_content, file_path, file_size, storage_kind, mime_type)
+        VALUES (?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(survivor_uuid)
+    .bind(full_content)
+    .bind(adopted_path)
+    .bind(file_size)
+    .bind(storage_kind)
+    .bind(mime_type)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| format!("could not reattach the surviving clip's image: {error}"))?;
+
+    sqlx::query("UPDATE clips SET full_image_expired = 0 WHERE uuid = ?")
+        .bind(survivor_uuid)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| format!("could not revive the surviving clip's original: {error}"))?;
+    Ok(())
 }
 
 async fn add_column_if_missing(pool: &SqlitePool, sql: &str) -> Result<(), sqlx::Error> {
@@ -1509,6 +1660,81 @@ mod tests {
             "the user's note should carry forward"
         );
         assert!(unique_hash_index_exists(&database).await);
+    }
+
+    #[tokio::test]
+    async fn a_newer_duplicate_keeps_its_live_image_and_completed_ocr() {
+        let database = migrated_database().await;
+        insert_clip_with_hash(
+            &database,
+            "original",
+            "image-hash",
+            false,
+            None,
+            "2026-03-01 09:00:00",
+        )
+        .await;
+        insert_clip_with_hash(
+            &database,
+            "recapture",
+            "image-hash",
+            false,
+            None,
+            "2026-08-01 09:00:00",
+        )
+        .await;
+        sqlx::query(
+            r#"
+            UPDATE clips
+            SET clip_type = 'image', full_image_expired = 1, ocr_status = 'failed'
+            WHERE uuid = 'original'
+            "#,
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            UPDATE clips
+            SET clip_type = 'image',
+                full_image_expired = 0,
+                ocr_status = 'completed',
+                ocr_text = 'invoice total',
+                ocr_words = '[]'
+            WHERE uuid = 'recapture'
+            "#,
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO clip_images (clip_uuid, full_content, storage_kind, mime_type)
+            VALUES ('recapture', x'89504E47', 'db', 'image/png')
+            "#,
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
+
+        let survivor: (String, Option<String>, Option<String>, i64) = sqlx::query_as(
+            "SELECT uuid, ocr_text, ocr_status, full_image_expired FROM clips",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(survivor.0, "original");
+        assert_eq!(survivor.1.as_deref(), Some("invoice total"));
+        assert_eq!(survivor.2.as_deref(), Some("completed"));
+        assert_eq!(survivor.3, 0);
+        let images: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM clip_images WHERE clip_uuid = 'original'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(images, 1, "the live original must move onto the surviving row");
     }
 
     /// Soft delete keeps the row, so a newer deleted duplicate must never win:
