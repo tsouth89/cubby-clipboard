@@ -398,11 +398,11 @@ impl SettingsManager {
                 *lock = new_settings;
                 return Ok(());
             }
-            if self.file_path.exists() {
+            if self.file_path.is_file() {
                 let _ = fs::remove_file(&tmp_path);
             } else {
                 log::error!(
-                    "SETTINGS: replacing settings.json failed ({error}) and the destination is gone; leaving {}",
+                    "SETTINGS: replacing settings.json failed ({error}) and the destination is not a file; leaving {}",
                     tmp_path.display()
                 );
             }
@@ -513,6 +513,35 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(on_disk.auto_delete_days, 365);
         assert!(!path.with_extension("json.tmp").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// If settings.json is a directory, replace cannot succeed. Deleting the
+    /// temp would throw away the only copy of the new preferences.
+    #[test]
+    fn save_leaves_tmp_when_destination_is_a_directory() {
+        let dir =
+            std::env::temp_dir().join(format!("cubby-settings-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::create_dir_all(&path).unwrap();
+
+        let manager = SettingsManager {
+            file_path: path.clone(),
+            settings: RwLock::new(AppSettings::default()),
+        };
+        let updated = AppSettings {
+            auto_delete_days: 365,
+            ..AppSettings::default()
+        };
+        manager
+            .save(updated)
+            .expect_err("replacing a directory must fail");
+        assert!(
+            settings_tmp_path(&path).exists(),
+            "the new preferences must remain in the temp"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
