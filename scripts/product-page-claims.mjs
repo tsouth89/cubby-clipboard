@@ -1,13 +1,27 @@
-// Shared wording guard for the public product pages.
+// Shared wording guard for public docs (SBS-780, SBS-832).
 //
-// Cubby stopped storing copied files as history in v1.2.4, so the pages must
-// not advertise file-list history again. The guard has to tell a claim apart
-// from a disclaimer: "Cubby does not store file lists" is a sentence we *want*
-// to be free to write, so a bare keyword match would fail the release for
-// saying the true thing.
+// Cubby stopped storing copied files as history in v1.2.4, so README,
+// SECURITY.md, and the product pages must not advertise file-list history
+// again. The guard has to tell a claim apart from a disclaimer: "Cubby does
+// not store file lists" is a sentence we *want* to be free to write, so a
+// bare keyword match would fail the release for saying the true thing.
+//
+// The original README lie was a table cell with no verb ("...and file lists").
+// The original SECURITY.md lie used "file-drop lists" / "retained". Both
+// have to count as mentions.
 
-/** Matches "file list(s)", "file-list(s)", and "copied file(s)". */
-const FILE_LIST_MENTION = /\b(?:file[\s-]*lists?|copied files?)\b/gi;
+/**
+ * Matches "file list(s)", "file-list(s)", "file-drop list(s)", and "copied
+ * file(s)".
+ *
+ * "list" is required after "drop" on purpose. A bare "file drop" mention was
+ * both too wide and self-cancelling: `NEGATION` contains `\bdrops\b`, so a
+ * no-verb cell such as "Text, HTML, RTF, images, and file drops" negated
+ * itself and reported nothing, while "Windows file-drop (CF_HDROP) is a path
+ * list" was reported as a claim.
+ */
+const FILE_LIST_MENTION =
+  /\b(?:file[\s-]*lists?|file[\s-]*drop[\s-]*lists?|copied files?)\b/gi;
 
 /** Verbs that assert support for whatever noun follows them. */
 const CLAIM_VERB =
@@ -22,7 +36,16 @@ const CLAUSE_BOUNDARY = /,|\b(?:but|and)\b/gi;
 /**
  * Split a page into sentence-sized pieces. Block tags are boundaries; inline
  * tags become spaces so "file <strong>lists</strong>" stays one mention.
+ *
+ * Exported because the weaker `\bfiles?\b` scan in check-release.mjs needs
+ * the same boundaries: splitting on `[.!?]` alone does not break at `.</p>`
+ * or `disk."`, which joined a whole install-steps section of start.html into
+ * one span and made an unrelated sentence in it fail the release.
  */
+export function claimSegments(source) {
+  return segments(source);
+}
+
 function segments(source) {
   const decoded = source
     .replace(/&nbsp;|&#160;|&#x0*A0;/gi, ' ')
@@ -98,4 +121,24 @@ export function findFileListHistoryClaims(source) {
     }
   }
   return claims;
+}
+
+/**
+ * Weaker scan used by the release check: a sentence that says files are
+ * retained or supported without also negating that. Broader than
+ * `findFileListHistoryClaims` so "Cubby stores files" still fails even when
+ * it never says "file lists". `no`/`without`/`none`/`neither` have to count
+ * as negation or a disclaimer such as "No files are retained" false-fails.
+ */
+export function findWeakerFileRetentionClaim(source) {
+  const fileMentionPattern = /\bfiles?\b/i;
+  const retentionClaimPattern =
+    /\b(?:retained|stores?|supports?|includes?|records?(?:ed)?)\b/i;
+  const negationPattern = /\b(?:no|not|never|without|none|neither|ignor\w*)\b/i;
+  return claimSegments(source).find(
+    (sentence) =>
+      fileMentionPattern.test(sentence) &&
+      retentionClaimPattern.test(sentence) &&
+      !negationPattern.test(sentence)
+  );
 }

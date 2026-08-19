@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { findFileListHistoryClaims } from './product-page-claims.mjs';
+import {
+  claimSegments,
+  findFileListHistoryClaims,
+  findWeakerFileRetentionClaim,
+} from './product-page-claims.mjs';
 
 test('a positive support claim is reported', () => {
   const claims = findFileListHistoryClaims(
@@ -100,4 +107,87 @@ test('gerund disclaimers are not reported', () => {
     findFileListHistoryClaims('<p>Ignoring file lists since v1.2.4.</p>'),
     []
   );
+});
+
+// SBS-780: the claims that were on main at cf916e9. The weak sentence
+// scan in check-release.mjs misses the README table cell (no verb). The
+// helper missed "file-drop lists" until the mention pattern included it.
+
+test('the original README table cell is a claim even without a verb', () => {
+  const row =
+    '| Text, HTML, RTF, images, and file lists | AES-256-GCM encryption for stored clipboard payloads |';
+  const claims = findFileListHistoryClaims(row);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0], /file lists/);
+});
+
+test('the original SECURITY.md file-drop sentence is a claim', () => {
+  const sentence =
+    'Core Windows clipboard representations are retained together: Unicode text, HTML, RTF, file-drop lists, and images.';
+  const claims = findFileListHistoryClaims(sentence);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0], /file-drop lists/);
+});
+
+test('a negated file-drop sentence is not a claim', () => {
+  assert.deepEqual(
+    findFileListHistoryClaims(
+      'Cubby does not retain file-drop lists as clipboard history.'
+    ),
+    []
+  );
+});
+
+test('live README.md and SECURITY.md do not claim file-list history', async () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  for (const relative of ['README.md', 'SECURITY.md']) {
+    const source = await readFile(path.join(root, relative), 'utf8');
+    assert.deepEqual(findFileListHistoryClaims(source), [], relative);
+  }
+});
+
+// The mention needs "list" after "drop". A bare "file drop" was both too wide
+// and self-cancelling: NEGATION contains \bdrops\b, so the plural negated its
+// own no-verb cell while the singular reported a false claim.
+
+test('a bare file-drop mention is not a claim', () => {
+  assert.deepEqual(
+    findFileListHistoryClaims(
+      'Windows file-drop (CF_HDROP) is a path list, not clipboard content.'
+    ),
+    []
+  );
+  assert.deepEqual(findFileListHistoryClaims('<p>Use the file drop-down.</p>'), []);
+});
+
+test('a no-verb cell naming file-drop lists is still a claim', () => {
+  const row = '| Text, HTML, RTF, images, and file-drop lists | Encrypted at rest |';
+  const claims = findFileListHistoryClaims(row);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0], /file-drop lists/);
+});
+
+// claimSegments is what the weaker \bfiles?\b scan in check-release.mjs uses.
+// A [.!?] split alone does not break at `.</p>` or `disk.",`, which joined a
+// whole install-steps section into one span.
+
+test('claimSegments breaks at markup and JSON boundaries', () => {
+  const page =
+    '<p>A file will save to your computer.</p>\n<p>This includes a SmartScreen warning.</p>';
+  const found = claimSegments(page).find(
+    (segment) => /\bfiles?\b/i.test(segment) && /\bincludes?\b/i.test(segment)
+  );
+  assert.equal(found, undefined, 'the install steps must not read as one sentence');
+
+  const locale = '{\n  "a": "Leftover files stay on disk.",\n  "b": "This includes the log."\n}';
+  const joined = claimSegments(locale).find(
+    (segment) => /\bfiles?\b/i.test(segment) && /\bincludes?\b/i.test(segment)
+  );
+  assert.equal(joined, undefined, 'two locale strings must not read as one sentence');
+});
+
+test('weaker file-retention scan treats no/without as negation', () => {
+  assert.equal(findWeakerFileRetentionClaim('No files are retained.'), undefined);
+  assert.equal(findWeakerFileRetentionClaim('Without storing files.'), undefined);
+  assert.match(findWeakerFileRetentionClaim('Cubby stores files.') ?? '', /stores files/);
 });
