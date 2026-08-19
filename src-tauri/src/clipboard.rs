@@ -79,6 +79,11 @@ pub static CLIPBOARD_SYNC: Lazy<Arc<tokio::sync::Mutex<()>>> =
 /// Password-manager extensions typically clear within tens of seconds. Keep this
 /// short so a deliberate later clear does not erase an intentional keep.
 const CLIPBOARD_CLEAR_FORGET_WINDOW: Duration = Duration::from_secs(90);
+/// SQLITE_BUSY during forget-on-clear used to restore the marker and wait for
+/// another clear that never comes. Retry the same clear a few times instead
+/// (SBS-1003).
+const FORGET_ON_CLEAR_ATTEMPTS: u8 = 3;
+const FORGET_ON_CLEAR_RETRY_DELAY: Duration = Duration::from_millis(80);
 /// How long a self-write marker stays valid. The capture of our own write
 /// normally arrives within milliseconds, so this is generous. It exists because
 /// an unbounded marker is never cleaned up when that capture never arrives at
@@ -102,7 +107,7 @@ struct RecentCapture {
 }
 
 mod forget_on_clear;
-use forget_on_clear::ForgetClipLookup;
+use forget_on_clear::{next_forget_attempts, ForgetClipLookup};
 
 /// Pure helper for SOU-316 unit tests: only empty clears within the window
 /// forget the last clip. A later clear must leave history alone.
@@ -269,6 +274,7 @@ pub fn init(app: &AppHandle, db: Arc<Database>) {
                         app_for_consumer.clone(),
                         db_for_consumer.clone(),
                         sequence,
+                        FORGET_ON_CLEAR_ATTEMPTS,
                     )
                     .await;
                 }
@@ -2500,7 +2506,12 @@ async fn process_clipboard_snapshot(
 /// ignored-apps list cannot help) and almost always empty the clipboard a few
 /// seconds later. Only empty/clear events trigger this — never a new non-empty
 /// copy. Pinned items are never removed.
-async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u32) {
+async fn process_clipboard_clear(
+    app: AppHandle,
+    db: Arc<Database>,
+    sequence: u32,
+    attempts_left: u8,
+) {
     use crate::settings_manager::SettingsManager;
     use tauri::Manager;
 
@@ -2545,12 +2556,18 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
         return;
     }
 
-    let restore_marker = |recent: RecentCapture| {
+    // Reports whether the marker went back. A newer capture landing while we
+    // held it means this clear no longer describes what is in history, so the
+    // caller must not retry: the retry would take that newer marker and delete
+    // a clip the user never cleared.
+    let restore_marker = |recent: RecentCapture| -> bool {
         let mut lock = LAST_ACCEPTED_CAPTURE.lock();
         // Only restore if nothing newer was captured while we held the marker.
         if lock.is_none() {
             *lock = Some(recent);
+            return true;
         }
+        false
     };
 
     let _guard = CLIPBOARD_SYNC.lock().await;
@@ -2592,7 +2609,9 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
                 "CLIPBOARD: forget-on-clear skipped for sequence {sequence} (clip {}); lookup failed, so the retry marker was restored: {error}",
                 taken.uuid
             );
-            restore_marker(taken);
+            if restore_marker(taken) {
+                schedule_forget_retry(app, db, sequence, attempts_left);
+            }
             return;
         }
     };
@@ -2615,7 +2634,9 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
         Ok(tx) => tx,
         Err(error) => {
             log::error!("CLIPBOARD: Failed to begin clear-forget transaction: {error}");
-            restore_marker(recent);
+            if restore_marker(recent) {
+                schedule_forget_retry(app, db, sequence, attempts_left);
+            }
             return;
         }
     };
@@ -2655,7 +2676,9 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
                 "CLIPBOARD: Failed to forget cleared capture {}: {error}",
                 recent.uuid
             );
-            restore_marker(recent);
+            if restore_marker(recent) {
+                schedule_forget_retry(app, db, sequence, attempts_left);
+            }
             return;
         }
     };
@@ -2676,7 +2699,9 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
             "CLIPBOARD: Failed to commit clear-forget for {}: {error}",
             recent.uuid
         );
-        restore_marker(recent);
+        if restore_marker(recent) {
+            schedule_forget_retry(app, db, sequence, attempts_left);
+        }
         return;
     }
 
@@ -2700,6 +2725,20 @@ async fn process_clipboard_clear(app: AppHandle, db: Arc<Database>, sequence: u3
         }),
     );
 }
+
+/// SBS-1003: a password manager clears once. Restoring the marker without a
+/// follow-up attempt left the password in history whenever SQLITE_BUSY won
+/// that single SELECT/DELETE.
+fn schedule_forget_retry(app: AppHandle, db: Arc<Database>, sequence: u32, attempts_left: u8) {
+    let Some(remaining) = next_forget_attempts(attempts_left) else {
+        return;
+    };
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(FORGET_ON_CLEAR_RETRY_DELAY).await;
+        process_clipboard_clear(app, db, sequence, remaining).await;
+    });
+}
+
 pub(crate) fn calculate_hash(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);

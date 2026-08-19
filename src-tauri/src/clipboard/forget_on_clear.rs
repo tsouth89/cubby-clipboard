@@ -27,6 +27,12 @@ impl<T, M, E> ForgetClipLookup<T, M, E> {
     }
 }
 
+/// Remaining attempts after this one failed. `None` means stop restoring and
+/// waiting — a password manager only clears once (SBS-1003).
+pub(crate) fn next_forget_attempts(attempts_left: u8) -> Option<u8> {
+    attempts_left.checked_sub(1).filter(|left| *left > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::ForgetClipLookup;
@@ -59,5 +65,13 @@ mod tests {
             ForgetClipLookup::Found { row: (0, 0), taken } => assert_eq!(taken, "clip-uuid"),
             other => panic!("found row must keep the marker for the delete path, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_failed_forget_retries_twice_then_stops() {
+        assert_eq!(super::next_forget_attempts(3), Some(2));
+        assert_eq!(super::next_forget_attempts(2), Some(1));
+        assert_eq!(super::next_forget_attempts(1), None);
+        assert_eq!(super::next_forget_attempts(0), None);
     }
 }
