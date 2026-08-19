@@ -80,8 +80,7 @@ export function toggleSelectAll(state: SelectionState, order: readonly string[])
 export function pruneSelection(state: SelectionState, order: readonly string[]): SelectionState {
   const present = new Set(order);
   const ids = new Set([...state.ids].filter((id) => present.has(id)));
-  const anchorId =
-    state.anchorId !== null && present.has(state.anchorId) ? state.anchorId : null;
+  const anchorId = state.anchorId !== null && present.has(state.anchorId) ? state.anchorId : null;
   if (ids.size === state.ids.size && anchorId === state.anchorId) return state;
   return { ids, anchorId: ids.size === 0 ? null : anchorId };
 }

@@ -751,8 +751,7 @@ export function HistoryWindow() {
         // Search is an INPUT, so isEditing is true there; Escape still clears
         // the query / closes. Notes and other fields must not close the window
         // even if they forget to stopPropagation (SBS-1008).
-        const isSearch =
-          target?.getAttribute('data-el') === 'history-search-input';
+        const isSearch = target?.getAttribute('data-el') === 'history-search-input';
         if (isEditing && !isSearch) return;
         if (searchQuery) {
           setSearchQuery('');
