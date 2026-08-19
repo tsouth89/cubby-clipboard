@@ -15,7 +15,7 @@ import { useLanguage } from '../hooks/useLanguage';
 import { useSystemAccent } from '../hooks/useSystemAccent';
 import { useRevealedClips } from '../hooks/useRevealedClips';
 import { collectBulkCopyText } from '../utils/bulkCopy';
-import { isImeKey } from '../utils/flyoutSearch';
+import { shortcutsSuspended } from '../utils/flyoutSearch';
 import { ClipDetails } from '../utils/clipPreviewState';
 import { customRange, DATE_PRESET_LABELS, DatePreset, presetRange } from '../utils/dateRange';
 import { folderSelectionAfterReload } from '../utils/folderSelection';
@@ -742,7 +742,12 @@ export function HistoryWindow() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (isImeKey(event) || event.isComposing) return;
+      // While the bulk-delete confirm is up, every shortcut here is wrong:
+      // Delete would hard-delete the previewed clip mid-question, Escape would
+      // close the whole window, and Enter would preventDefault the dialog's own
+      // buttons. App.tsx stands down the same way with useKeyboard's disabled
+      // flag.
+      if (shortcutsSuspended(event, bulkDeleteOpen)) return;
       const target = event.target as HTMLElement | null;
       const isEditing =
         target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
@@ -794,7 +799,7 @@ export function HistoryWindow() {
 
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [handleClose, handleCopy, handleDelete, searchQuery, selectedClipId]);
+  }, [bulkDeleteOpen, handleClose, handleCopy, handleDelete, searchQuery, selectedClipId]);
 
   const hasNarrowingFilter =
     Boolean(sourceApp) || dateFrom !== null || dateTo !== null || contentFilter !== 'all';

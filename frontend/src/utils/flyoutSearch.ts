@@ -7,6 +7,22 @@ export function isImeKey(event: { isComposing: boolean; key: string; keyCode?: n
   return event.isComposing || event.key === 'Process' || event.keyCode === 229;
 }
 
+/**
+ * Whether a window-level shortcut handler should stand down for this event.
+ *
+ * Composition belongs to the IME candidate window. A modal confirm owns the
+ * keyboard outright: ConfirmDialog listens on `window`, which runs after
+ * `document`, so a document handler that keeps acting beats the dialog and
+ * answers the question on the user's behalf -- Delete hard-deleting the
+ * previewed clip while the bulk confirm is still up (SBS-1007).
+ */
+export function shortcutsSuspended(
+  event: { isComposing: boolean; key: string; keyCode?: number },
+  modalOpen: boolean
+): boolean {
+  return isImeKey(event) || modalOpen;
+}
+
 /** Printable keys that should steal focus into the flyout search box. */
 export function shouldCaptureTypeToSearch(event: {
   isComposing: boolean;
