@@ -148,6 +148,7 @@ export function HistoryWindow() {
               filterId: selectedFolder,
               limit: PAGE_SIZE,
               offset,
+              previewOnly: true,
               contentFilter,
               dateFrom,
               dateTo,
@@ -441,7 +442,7 @@ export function HistoryWindow() {
       const chosen = selectedIds
         .map((id) => clipsRef.current.find((clip) => clip.id === id))
         .filter((clip): clip is ClipboardItem => Boolean(clip));
-      // Fetch each text clip's body by uuid. This list is loaded with
+      // Fetch each text clip's body by uuid. List and search both load with
       // `previewOnly: true`, so a text row's `content` is empty and its
       // `preview` is only the stored prefix — copying either would ship the
       // wrong text under a success toast. Images have no text to concatenate

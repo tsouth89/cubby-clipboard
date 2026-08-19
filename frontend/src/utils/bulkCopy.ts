@@ -1,9 +1,9 @@
 /**
  * Text gathering for the History window's bulk Copy (SBS-829).
  *
- * The rows in that list come from `get_clips` with `previewOnly: true`, so a
- * text row's `content` is an empty string and its `preview` is a truncated
- * prefix. Neither is the clip. Every text clip's body is therefore fetched by
+ * The rows in that list come from `get_clips` or `search_clips` with
+ * `previewOnly: true`, so a text row's `content` is an empty string and
+ * its `preview` is a truncated prefix. Neither is the clip. Every text clip's body is therefore fetched by
  * uuid, and the row is deliberately never used as a fallback: copying the
  * prefix under a "Copied 3 clips" toast is worse than reporting the failure.
  *
