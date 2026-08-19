@@ -6,6 +6,9 @@ export const PRIVILEGED_WORKFLOWS = [
   '.github/workflows/release.yml',
   '.github/workflows/publish-store-packages.yml',
   '.github/workflows/validate-store-submission.yml',
+  // pull_request_target + pull-requests:write. An unpinned third-party
+  // action here runs in the base-repo context with those permissions (SBS-984).
+  '.github/workflows/pr-review.yml',
 ];
 
 const FIRST_PARTY_OWNERS = new Set(['actions']);

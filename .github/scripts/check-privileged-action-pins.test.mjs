@@ -14,6 +14,13 @@ import {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
+test('privileged workflow list includes pr-review.yml', () => {
+  assert.ok(
+    PRIVILEGED_WORKFLOWS.includes('.github/workflows/pr-review.yml'),
+    'pr-review.yml is pull_request_target and must be pin-checked (SBS-984)',
+  );
+});
+
 test('SHA pin with a version comment is accepted', () => {
   const result = classifyUses(
     'azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca',
