@@ -40,7 +40,30 @@ pub struct WinVReplacementManager {
 }
 
 impl WinVReplacementManager {
-    pub fn new(app: AppHandle) -> Result<Self, String> {
+    pub fn new(app: AppHandle) -> Self {
+        match Self::bind_channel(app) {
+            Ok(manager) => manager,
+            Err(error) => {
+                log::error!(
+                    "WIN_V: Shortcut channel unavailable; Win+V replacement is off this session: {error}"
+                );
+                Self::without_channel()
+            }
+        }
+    }
+
+    fn without_channel() -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                state: Mutex::new(HelperState::default()),
+                watchdog_started: AtomicBool::new(false),
+                activation_port: 0,
+                activation_token: String::new(),
+            }),
+        }
+    }
+
+    fn bind_channel(app: AppHandle) -> Result<Self, String> {
         // Fail closed if we cannot mint a token: an unauthenticated bind is
         // the SBS-809 bug. Do not bind first and "add a token later".
         let activation_token = crate::win_v_activation::generate_token()?;
@@ -106,6 +129,9 @@ impl WinVReplacementManager {
     }
 
     pub fn configure(&self, enabled: bool, hotkey: Option<String>) -> Result<(), String> {
+        if enabled && self.inner.activation_port == 0 {
+            return Err("Cubby shortcut channel is unavailable this session".to_string());
+        }
         let mut state = self
             .inner
             .state
@@ -243,5 +269,20 @@ fn stop_child(child: &mut Option<Child>) {
     if let Some(mut running) = child.take() {
         let _ = running.kill();
         let _ = running.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WinVReplacementManager;
+
+    #[test]
+    fn missing_channel_refuses_enable_and_allows_disable() {
+        let manager = WinVReplacementManager::without_channel();
+        assert!(
+            manager.configure(true, None).is_err(),
+            "Win+V replacement must not start without a shortcut channel"
+        );
+        assert!(manager.configure(false, None).is_ok());
     }
 }

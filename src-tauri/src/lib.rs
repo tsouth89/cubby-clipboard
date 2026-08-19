@@ -318,10 +318,10 @@ pub fn run_app() {
                 SettingsManager::new(app.handle(), &db_for_settings).await
             });
             app.manage(Arc::new(settings_manager));
-            let shortcut_manager =
-                win_v_replacement::WinVReplacementManager::new(app.handle().clone())
-                    .map_err(std::io::Error::other)?;
-            app.manage(Arc::new(shortcut_manager));
+            let shortcut_manager = Arc::new(win_v_replacement::WinVReplacementManager::new(
+                app.handle().clone(),
+            ));
+            app.manage(shortcut_manager);
 
             let handle = app.handle().clone();
             let db_for_clipboard = db_arc.clone();
