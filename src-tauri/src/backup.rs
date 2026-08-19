@@ -464,6 +464,18 @@ async fn attach_export_full_image(
             Ok(clip)
         }
         Err(error) => {
+            let now_expired = sqlx::query_scalar::<_, bool>(
+                "SELECT full_image_expired FROM clips WHERE uuid = ?",
+            )
+            .bind(uuid)
+            .fetch_optional(&db.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+            if now_expired {
+                return Ok(clip);
+            }
             log::warn!("BACKUP: clip {uuid} full-resolution original could not be read: {error}");
             Err(vec!["full_image"])
         }
@@ -509,11 +521,15 @@ async fn load_export_full_image(db: &Database, uuid: &str) -> Result<Vec<u8>, St
 
     if let Some((_, full_content)) = index {
         if !full_content.is_empty() {
-            return if db.crypto.is_encrypted(&full_content) {
-                db.crypto.decrypt(&full_content)
+            let bytes = if db.crypto.is_encrypted(&full_content) {
+                db.crypto.decrypt(&full_content)?
             } else {
-                Ok(full_content)
+                full_content
             };
+            if bytes.is_empty() {
+                return Err("decrypted original was empty".to_string());
+            }
+            return Ok(bytes);
         }
     }
 
@@ -839,6 +855,14 @@ pub async fn import_backup(
         // first-class expired state so Copy image stays disabled.
         let full_image_expired =
             i64::from(clip.clip_type == "image" && restored_original.is_none());
+        // Visible history date stays the source created_at. last_accessed is
+        // the dest keep-for clock for live originals, so a 60-day-old
+        // screenshot is not age-swept on the next capture after a PC migration.
+        let last_accessed = if restored_original.is_some() {
+            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+        } else {
+            clip.created_at.clone()
+        };
         let ocr_status = if clip.ocr_text.is_some() {
             Some("completed")
         } else {
@@ -869,7 +893,7 @@ pub async fn import_backup(
         .bind(ocr_status)
         .bind(full_image_expired)
         .bind(&clip.created_at)
-        .bind(&clip.created_at)
+        .bind(&last_accessed)
         .bind(i64::from(clip.is_pinned))
         // Restored hidden. A clip the user chose to hide must not come back
         // visible: the column defaults to 0, so omitting this would silently
@@ -891,7 +915,6 @@ pub async fn import_backup(
                     )
                     .await
                     {
-                        remove_imported_original(&file_path);
                         if let Err(cleanup) = sqlx::query("DELETE FROM clips WHERE uuid = ?")
                             .bind(&new_uuid)
                             .execute(&db.pool)
@@ -900,6 +923,8 @@ pub async fn import_backup(
                             log::error!(
                                 "BACKUP: failed to roll back clip {new_uuid} after image index error: {cleanup}"
                             );
+                        } else {
+                            remove_imported_original(&file_path);
                         }
                         result.errors.push(error);
                         continue;
@@ -1759,6 +1784,161 @@ mod tests {
             restored_thumb, thumbnail,
             "clips.content must stay the thumbnail, not the original"
         );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&target.image_dir);
+        let _ = std::fs::remove_dir_all(&source.image_dir);
+    }
+
+    /// A restore of a screenshot older than dest keep-for must not age-sweep
+    /// the original on the next retention pass. created_at stays the source
+    /// date; last_accessed is the dest keep-for clock.
+    #[tokio::test]
+    async fn restored_live_original_survives_dest_keep_for_window() {
+        let source = test_database().await;
+        let original = b"full-res-png-bytes-sbs-919-keep-for";
+        insert_image_clip(&source, b"thumb-keep-for", Some(original), false).await;
+
+        let path = temp_path("keep-for-restore");
+        export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .unwrap();
+
+        let target = test_database().await;
+        import_backup(&target, path.to_str().unwrap(), "correct horse", false)
+            .await
+            .unwrap();
+
+        crate::commands::enforce_retention_in_pool(&target.pool, 0, 30)
+            .await
+            .expect("retention should run");
+
+        let (expired, restored, _) = restored_image_state(&target).await;
+        assert!(
+            !expired,
+            "a just-imported live original must stay full_image_expired=0"
+        );
+        assert_eq!(
+            restored.as_deref(),
+            Some(original.as_slice()),
+            "the .cubby original must still exist after dest 30-day retention"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&target.image_dir);
+        let _ = std::fs::remove_dir_all(&source.image_dir);
+    }
+
+    /// Retention can expire a live original after export has already snapshotted
+    /// full_image_expired=0. Re-read the flag and continue as thumbnail-only
+    /// instead of failing the whole backup.
+    #[tokio::test]
+    async fn export_treats_a_now_expired_original_as_thumbnail_only() {
+        let source = test_database().await;
+        let uuid = insert_image_clip(&source, b"stale-expired-thumb", Some(b"live-original"), false)
+            .await;
+        sqlx::query("UPDATE clips SET full_image_expired = 1 WHERE uuid = ?")
+            .bind(&uuid)
+            .execute(&source.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM clip_images WHERE clip_uuid = ?")
+            .bind(&uuid)
+            .execute(&source.pool)
+            .await
+            .unwrap();
+        let file = source.image_dir.join(format!("{uuid}.cubby"));
+        let _ = std::fs::remove_file(&file);
+
+        let clip = BackupClip {
+            clip_type: "image".to_string(),
+            content_b64: BASE64.encode(b"stale-expired-thumb"),
+            text_preview: "[Image]".to_string(),
+            is_pinned: false,
+            is_hidden: false,
+            notes: None,
+            source_app: None,
+            source_icon: None,
+            metadata: None,
+            ocr_text: None,
+            created_at: "2026-05-01 09:00:00".to_string(),
+            folder: None,
+            full_image_b64: None,
+        };
+        let exported = attach_export_full_image(&source, &uuid, clip, false)
+            .await
+            .expect("a now-expired original must not fail the export");
+        assert!(
+            exported.full_image_b64.is_none(),
+            "the bundle should stay thumbnail-only"
+        );
+        let _ = std::fs::remove_dir_all(&source.image_dir);
+    }
+
+    /// Decrypting a legacy blob to empty is not a valid original. Export must
+    /// refuse rather than write a bundle import would silently skip.
+    #[tokio::test]
+    async fn export_refuses_a_legacy_original_that_decrypts_empty() {
+        let source = test_database().await;
+        let uuid = insert_image_clip(&source, b"empty-decrypt-thumb", Some(b"not-empty"), false)
+            .await;
+        let file = source.image_dir.join(format!("{uuid}.cubby"));
+        let _ = std::fs::remove_file(&file);
+        sqlx::query(
+            "UPDATE clip_images SET full_content = ?, file_path = '' WHERE clip_uuid = ?",
+        )
+        .bind(source.crypto.encrypt(&[]).unwrap())
+        .bind(&uuid)
+        .execute(&source.pool)
+        .await
+        .unwrap();
+
+        let path = temp_path("empty-decrypt-original");
+        export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .expect_err("an empty decrypted original must fail the export");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&source.image_dir);
+    }
+
+    /// Index insert can fail while the clipboard loop holds the database.
+    /// Delete the clips row first so a leftover live-looking row cannot make a
+    /// retry look like a duplicate of a thumbnail.
+    #[tokio::test]
+    async fn index_failure_does_not_leave_a_clip_that_blocks_retry() {
+        let source = test_database().await;
+        insert_image_clip(&source, b"index-fail-thumb", Some(b"index-fail-original"), false)
+            .await;
+        let path = temp_path("index-fail-retry");
+        export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .unwrap();
+
+        let target = test_database().await;
+        sqlx::query(
+            "CREATE TRIGGER fail_index BEFORE INSERT ON clip_images BEGIN SELECT RAISE(ABORT, 'injected'); END",
+        )
+        .execute(&target.pool)
+        .await
+        .unwrap();
+
+        let failed = import_backup(&target, path.to_str().unwrap(), "correct horse", false)
+            .await
+            .unwrap();
+        assert_eq!(failed.imported, 0, "the failed index must not count as imported");
+        let leftover: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM clips")
+            .fetch_one(&target.pool)
+            .await
+            .unwrap();
+        assert_eq!(leftover, 0, "the clips row must be gone so a retry can restore");
+
+        sqlx::query("DROP TRIGGER fail_index")
+            .execute(&target.pool)
+            .await
+            .unwrap();
+        let retry = import_backup(&target, path.to_str().unwrap(), "correct horse", false)
+            .await
+            .unwrap();
+        assert_eq!(retry.imported, 1, "retry must not be treated as a duplicate");
+        assert_eq!(retry.duplicates, 0);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         let _ = std::fs::remove_dir_all(&target.image_dir);
         let _ = std::fs::remove_dir_all(&source.image_dir);
