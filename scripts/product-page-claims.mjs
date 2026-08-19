@@ -10,9 +10,18 @@
 // The original SECURITY.md lie used "file-drop lists" / "retained". Both
 // have to count as mentions.
 
-/** Matches "file list(s)", "file-list(s)", "file-drop list(s)", and "copied file(s)". */
+/**
+ * Matches "file list(s)", "file-list(s)", "file-drop list(s)", and "copied
+ * file(s)".
+ *
+ * "list" is required after "drop" on purpose. A bare "file drop" mention was
+ * both too wide and self-cancelling: `NEGATION` contains `\bdrops\b`, so a
+ * no-verb cell such as "Text, HTML, RTF, images, and file drops" negated
+ * itself and reported nothing, while "Windows file-drop (CF_HDROP) is a path
+ * list" was reported as a claim.
+ */
 const FILE_LIST_MENTION =
-  /\b(?:file[\s-]*lists?|file[\s-]*drops?(?:\s+lists?)?|copied files?)\b/gi;
+  /\b(?:file[\s-]*lists?|file[\s-]*drop[\s-]*lists?|copied files?)\b/gi;
 
 /** Verbs that assert support for whatever noun follows them. */
 const CLAIM_VERB =
@@ -27,7 +36,16 @@ const CLAUSE_BOUNDARY = /,|\b(?:but|and)\b/gi;
 /**
  * Split a page into sentence-sized pieces. Block tags are boundaries; inline
  * tags become spaces so "file <strong>lists</strong>" stays one mention.
+ *
+ * Exported because the weaker `\bfiles?\b` scan in check-release.mjs needs
+ * the same boundaries: splitting on `[.!?]` alone does not break at `.</p>`
+ * or `disk."`, which joined a whole install-steps section of start.html into
+ * one span and made an unrelated sentence in it fail the release.
  */
+export function claimSegments(source) {
+  return segments(source);
+}
+
 function segments(source) {
   const decoded = source
     .replace(/&nbsp;|&#160;|&#x0*A0;/gi, ' ')

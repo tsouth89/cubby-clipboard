@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { findFileListHistoryClaims } from './product-page-claims.mjs';
+import { claimSegments, findFileListHistoryClaims } from './product-page-claims.mjs';
 
 test('a positive support claim is reported', () => {
   const claims = findFileListHistoryClaims(
@@ -140,4 +140,44 @@ test('live README.md and SECURITY.md do not claim file-list history', async () =
     const source = await readFile(path.join(root, relative), 'utf8');
     assert.deepEqual(findFileListHistoryClaims(source), [], relative);
   }
+});
+
+// The mention needs "list" after "drop". A bare "file drop" was both too wide
+// and self-cancelling: NEGATION contains \bdrops\b, so the plural negated its
+// own no-verb cell while the singular reported a false claim.
+
+test('a bare file-drop mention is not a claim', () => {
+  assert.deepEqual(
+    findFileListHistoryClaims(
+      'Windows file-drop (CF_HDROP) is a path list, not clipboard content.'
+    ),
+    []
+  );
+  assert.deepEqual(findFileListHistoryClaims('<p>Use the file drop-down.</p>'), []);
+});
+
+test('a no-verb cell naming file-drop lists is still a claim', () => {
+  const row = '| Text, HTML, RTF, images, and file-drop lists | Encrypted at rest |';
+  const claims = findFileListHistoryClaims(row);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0], /file-drop lists/);
+});
+
+// claimSegments is what the weaker \bfiles?\b scan in check-release.mjs uses.
+// A [.!?] split alone does not break at `.</p>` or `disk.",`, which joined a
+// whole install-steps section into one span.
+
+test('claimSegments breaks at markup and JSON boundaries', () => {
+  const page =
+    '<p>A file will save to your computer.</p>\n<p>This includes a SmartScreen warning.</p>';
+  const found = claimSegments(page).find(
+    (segment) => /\bfiles?\b/i.test(segment) && /\bincludes?\b/i.test(segment)
+  );
+  assert.equal(found, undefined, 'the install steps must not read as one sentence');
+
+  const locale = '{\n  "a": "Leftover files stay on disk.",\n  "b": "This includes the log."\n}';
+  const joined = claimSegments(locale).find(
+    (segment) => /\bfiles?\b/i.test(segment) && /\bincludes?\b/i.test(segment)
+  );
+  assert.equal(joined, undefined, 'two locale strings must not read as one sentence');
 });

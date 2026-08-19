@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { checkPrivilegedActionPins } from '../.github/scripts/check-privileged-action-pins.mjs';
-import { findFileListHistoryClaims } from './product-page-claims.mjs';
+import { claimSegments, findFileListHistoryClaims } from './product-page-claims.mjs';
 import { extractDefaultSkipLikelySecrets, evaluateSecretHeuristicsDoc, saysDefaultOff } from './release-check-helpers.mjs';
 import {
   assertAllowlistNotWideOpen,
@@ -264,15 +264,16 @@ const fileMentionPattern = /\bfiles?\b/i;
 const retentionClaimPattern = /\b(?:retained|stores?|supports?|includes?|records?(?:ed)?)\b/i;
 const negationPattern = /\b(?:not|never|ignor\w*)\b/i;
 for (const [docName, doc] of userFacingHistoryDocs) {
-  const fileClaim = doc
-    .replace(/\r?\n/g, ' ')
-    .split(/(?<=[.!?])\s+/)
-    .find(
-      (sentence) =>
-        fileMentionPattern.test(sentence) &&
-        retentionClaimPattern.test(sentence) &&
-        !negationPattern.test(sentence)
-    );
+  // claimSegments, not a bare [.!?] split: markup ends a sentence at `.</p>`
+  // and JSON at `disk.",`, neither of which that split sees. Without it the
+  // install steps in start.html and a whole block of en.json read as one
+  // sentence, so any ordinary "includes" nearby failed the release.
+  const fileClaim = claimSegments(doc).find(
+    (sentence) =>
+      fileMentionPattern.test(sentence) &&
+      retentionClaimPattern.test(sentence) &&
+      !negationPattern.test(sentence)
+  );
   if (fileClaim) {
     throw new Error(
       `${docName} claims file clipboard history is retained or supported, which capture policy deliberately ignores: ${fileClaim.trim()}`
