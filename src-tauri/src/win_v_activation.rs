@@ -102,6 +102,25 @@ pub fn token_matches(payload: &[u8], token: &str) -> bool {
     constant_time_eq(payload, &expected)
 }
 
+/// Whether a `recv_from` failure should stop the shortcut listener.
+///
+/// On Windows, a datagram larger than the recv buffer is `WSAEMSGSIZE`
+/// (10040), not a truncated `Ok`. Treating that as fatal killed the only
+/// reader thread for the rest of the session (SBS-989). Oversized packets
+/// and the usual transient socket errors are discarded; a dead socket is not.
+pub fn activation_recv_error_is_fatal(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::TimedOut
+    ) {
+        return false;
+    }
+    // WSAEMSGSIZE. Matched by raw code so Linux tests can construct it.
+    error.raw_os_error() != Some(10040)
+}
+
 pub fn decide_activation(
     payload: &[u8],
     source: SocketAddr,
@@ -276,5 +295,34 @@ mod tests {
         assert_eq!(token_from_args(["--activation-token", "activate"]), None);
         assert_eq!(token_from_args(["--activation-port", "1234"]), None);
         assert_eq!(token_from_args(["--activation-token"]), None);
+    }
+
+    #[test]
+    fn oversized_datagram_does_not_kill_the_listener() {
+        let error = std::io::Error::from_raw_os_error(10040);
+        assert!(
+            !activation_recv_error_is_fatal(&error),
+            "WSAEMSGSIZE must keep the shortcut listener running"
+        );
+    }
+
+    #[test]
+    fn interrupted_and_would_block_are_not_fatal() {
+        assert!(!activation_recv_error_is_fatal(&std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "interrupted"
+        )));
+        assert!(!activation_recv_error_is_fatal(&std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "would block"
+        )));
+    }
+
+    #[test]
+    fn a_dead_socket_is_still_fatal() {
+        assert!(activation_recv_error_is_fatal(&std::io::Error::new(
+            std::io::ErrorKind::ConnectionAborted,
+            "closed"
+        )));
     }
 }

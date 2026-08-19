@@ -82,6 +82,12 @@ impl WinVReplacementManager {
                         }
                     }
                     Err(error) => {
+                        if !crate::win_v_activation::activation_recv_error_is_fatal(&error) {
+                            log::debug!(
+                                "WIN_V: Ignored oversized or transient shortcut datagram: {error}"
+                            );
+                            continue;
+                        }
                         log::error!("WIN_V: Shortcut activation listener failed: {error}");
                         return;
                     }
