@@ -8,12 +8,14 @@ import { Toaster, toast } from 'sonner';
 import { ClipboardItem, FolderItem, Settings } from '../types';
 import { ClipList } from '../components/ClipList';
 import { ClipPreview } from '../components/ClipPreview';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ContentFilter } from '../components/FlyoutHeader';
 import { useTheme } from '../hooks/useTheme';
 import { useLanguage } from '../hooks/useLanguage';
 import { useSystemAccent } from '../hooks/useSystemAccent';
 import { useRevealedClips } from '../hooks/useRevealedClips';
 import { collectBulkCopyText } from '../utils/bulkCopy';
+import { isImeKey } from '../utils/flyoutSearch';
 import { ClipDetails } from '../utils/clipPreviewState';
 import { customRange, DATE_PRESET_LABELS, DatePreset, presetRange } from '../utils/dateRange';
 import { folderSelectionAfterReload } from '../utils/folderSelection';
@@ -70,6 +72,7 @@ export function HistoryWindow() {
   const [loadError, setLoadError] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [totalClipCount, setTotalClipCount] = useState(0);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [sourceApps, setSourceApps] = useState<SourceAppCount[]>([]);
   const [sourceApp, setSourceApp] = useState<string | null>(null);
@@ -739,11 +742,18 @@ export function HistoryWindow() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (isImeKey(event) || event.isComposing) return;
       const target = event.target as HTMLElement | null;
       const isEditing =
         target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
 
       if (event.key === 'Escape') {
+        // Search is an INPUT, so isEditing is true there; Escape still clears
+        // the query / closes. Notes and other fields must not close the window
+        // even if they forget to stopPropagation (SBS-1008).
+        const isSearch =
+          target?.getAttribute('data-el') === 'history-search-input';
+        if (isEditing && !isSearch) return;
         if (searchQuery) {
           setSearchQuery('');
           return;
@@ -989,7 +999,7 @@ export function HistoryWindow() {
           className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border bg-primary/[0.08] px-4 py-2"
         >
           <span className="mr-1 text-[11px] font-medium text-foreground">
-            {selectionCount} of {totalClipCount.toLocaleString()} selected
+            {selectionCount} of {clips.length.toLocaleString()} selected
           </span>
           <button type="button" className={bulkActionClass} onClick={handleBulkCopy}>
             <Copy size={12} />
@@ -1023,7 +1033,7 @@ export function HistoryWindow() {
           <button
             type="button"
             className={`${bulkActionClass} text-destructive`}
-            onClick={handleBulkDelete}
+            onClick={() => setBulkDeleteOpen(true)}
           >
             <Trash2 size={12} />
             Delete
@@ -1105,6 +1115,17 @@ export function HistoryWindow() {
         </div>
       </footer>
       <Toaster richColors position="bottom-center" theme={effectiveTheme} />
+      <ConfirmDialog
+        isOpen={bulkDeleteOpen}
+        title={selectionCount === 1 ? 'Delete this clip?' : `Delete ${selectionCount} clips?`}
+        message="Cubby has no trash. Deleted clips cannot be recovered."
+        confirmText={selectionCount === 1 ? 'Delete clip' : `Delete ${selectionCount} clips`}
+        onConfirm={() => {
+          setBulkDeleteOpen(false);
+          void handleBulkDelete();
+        }}
+        onCancel={() => setBulkDeleteOpen(false)}
+      />
     </div>
   );
 }
