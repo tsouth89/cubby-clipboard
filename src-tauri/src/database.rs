@@ -304,8 +304,11 @@ impl Database {
                 for loser in losers {
                     if clip_has_live_image(&mut transaction, &loser.uuid, loser.full_image_expired)
                         .await?
+                        && adopt_live_image(&mut transaction, &survivor.uuid, &loser.uuid).await?
                     {
-                        adopt_live_image(&mut transaction, &survivor.uuid, &loser.uuid).await?;
+                        // Only a real adoption ends the search. Stopping on a
+                        // no-op would leave the survivor expired and then
+                        // delete the next duplicate's readable original with it.
                         break;
                     }
                 }
@@ -1351,6 +1354,12 @@ fn ocr_quality(status: &Option<String>, text: &Option<String>) -> u8 {
     }
 }
 
+/// Whether this clip's original can actually be read back.
+///
+/// A `clip_images` row is not enough. File-backed originals keep an empty blob
+/// and a path, and that file can be deleted or evicted by OneDrive without the
+/// row noticing. Counting such a row as live let a survivor with a dangling
+/// path block adoption from a duplicate that still had a readable original.
 async fn clip_has_live_image(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     uuid: &str,
@@ -1359,22 +1368,35 @@ async fn clip_has_live_image(
     if expired != 0 {
         return Ok(false);
     }
-    let present: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM clip_images WHERE clip_uuid = ?)")
+    let row: Option<(Vec<u8>, Option<String>)> =
+        sqlx::query_as("SELECT full_content, file_path FROM clip_images WHERE clip_uuid = ?")
             .bind(uuid)
-            .fetch_one(&mut **transaction)
+            .fetch_optional(&mut **transaction)
             .await
             .map_err(|error| format!("could not check a duplicate clip's image: {error}"))?;
-    Ok(present)
+    let Some((full_content, file_path)) = row else {
+        return Ok(false);
+    };
+    if !full_content.is_empty() {
+        return Ok(true);
+    }
+    Ok(file_path
+        .as_deref()
+        .is_some_and(|path| std::path::Path::new(path).exists()))
 }
 
 type AdoptedImageRow = (Vec<u8>, Option<String>, Option<i64>, String, String);
 
+/// Move a duplicate's readable original onto the survivor.
+///
+/// Reports whether anything was actually adopted. A caller that stops looking
+/// after a no-op would skip a later duplicate that still has a readable
+/// original, and then delete it along with its file.
 async fn adopt_live_image(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     survivor_uuid: &str,
     loser_uuid: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let row: Option<AdoptedImageRow> = sqlx::query_as(
         r#"
         SELECT full_content, file_path, file_size, storage_kind, mime_type
@@ -1387,7 +1409,7 @@ async fn adopt_live_image(
     .await
     .map_err(|error| format!("could not read a duplicate clip's image: {error}"))?;
     let Some((full_content, file_path, file_size, storage_kind, mime_type)) = row else {
-        return Ok(());
+        return Ok(false);
     };
 
     let adopted_path = match file_path.as_deref() {
@@ -1399,7 +1421,7 @@ async fn adopt_live_image(
             log::warn!(
                 "STORAGE: duplicate clip {loser_uuid} lists an original at {path} that is missing; leaving {survivor_uuid} expired"
             );
-            return Ok(());
+            return Ok(false);
         }
         Some(path) if std::path::Path::new(path).exists() => {
             let source = std::path::Path::new(path);
@@ -1431,12 +1453,19 @@ async fn adopt_live_image(
     .await
     .map_err(|error| format!("could not reattach the surviving clip's image: {error}"))?;
 
-    sqlx::query("UPDATE clips SET full_image_expired = 0 WHERE uuid = ?")
-        .bind(survivor_uuid)
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| format!("could not revive the surviving clip's original: {error}"))?;
-    Ok(())
+    // last_accessed is the keep-for clock retention reads, and it still holds
+    // the survivor's original capture date. Startup runs retention right after
+    // this migration, so an original adopted onto a months-old row would be
+    // expired again before the user could ever paste it. Import does the same
+    // thing when it restores a live original.
+    sqlx::query(
+        "UPDATE clips SET full_image_expired = 0, last_accessed = CURRENT_TIMESTAMP WHERE uuid = ?",
+    )
+    .bind(survivor_uuid)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| format!("could not revive the surviving clip's original: {error}"))?;
+    Ok(true)
 }
 
 async fn add_column_if_missing(pool: &SqlitePool, sql: &str) -> Result<(), sqlx::Error> {
@@ -1754,6 +1783,192 @@ mod tests {
             images, 1,
             "the live original must move onto the surviving row"
         );
+    }
+
+    /// Marks every clip in the fixture as an image, then makes one row live.
+    async fn make_image_clips(database: &Database) {
+        sqlx::query("UPDATE clips SET clip_type = 'image', full_image_expired = 1")
+            .execute(&database.pool)
+            .await
+            .unwrap();
+    }
+
+    fn missing_image_path(name: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("cubby-missing-{name}.cubby"))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[tokio::test]
+    async fn a_missing_file_duplicate_does_not_stop_the_search_for_a_live_original() {
+        // Three-way duplicates are a production input: the first uniqueness run
+        // on a real machine merged five clips. Stopping at the middle row left
+        // the survivor expired and then deleted the newest row's real original.
+        let database = migrated_database().await;
+        for (uuid, created) in [
+            ("original", "2026-03-01 09:00:00"),
+            ("evicted", "2026-05-01 09:00:00"),
+            ("recapture", "2026-08-01 09:00:00"),
+        ] {
+            insert_clip_with_hash(&database, uuid, "image-hash", false, None, created).await;
+        }
+        make_image_clips(&database).await;
+        sqlx::query(
+            "UPDATE clips SET full_image_expired = 0 WHERE uuid IN ('evicted', 'recapture')",
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO clip_images (clip_uuid, full_content, file_path, storage_kind, mime_type)
+             VALUES ('evicted', x'', ?, 'file', 'image/png')",
+        )
+        .bind(missing_image_path("evicted"))
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO clip_images (clip_uuid, full_content, storage_kind, mime_type)
+             VALUES ('recapture', x'89504E47', 'db', 'image/png')",
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 2);
+
+        let (uuid, expired): (String, i64) =
+            sqlx::query_as("SELECT uuid, full_image_expired FROM clips")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(uuid, "original");
+        assert_eq!(expired, 0, "the readable original must reach the survivor");
+        let blob: Vec<u8> =
+            sqlx::query_scalar("SELECT full_content FROM clip_images WHERE clip_uuid = 'original'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(blob, vec![0x89, 0x50, 0x4E, 0x47]);
+    }
+
+    #[tokio::test]
+    async fn a_survivor_whose_own_original_file_vanished_is_healed_from_a_duplicate() {
+        // full_image_expired = 0 plus a clip_images row is not proof the
+        // original can be read: a deleted or OneDrive-evicted file leaves both
+        // behind. Treating that as live blocked adoption entirely.
+        let database = migrated_database().await;
+        insert_clip_with_hash(
+            &database,
+            "original",
+            "image-hash",
+            false,
+            None,
+            "2026-03-01 09:00:00",
+        )
+        .await;
+        insert_clip_with_hash(
+            &database,
+            "recapture",
+            "image-hash",
+            false,
+            None,
+            "2026-08-01 09:00:00",
+        )
+        .await;
+        make_image_clips(&database).await;
+        sqlx::query("UPDATE clips SET full_image_expired = 0")
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO clip_images (clip_uuid, full_content, file_path, storage_kind, mime_type)
+             VALUES ('original', x'', ?, 'file', 'image/png')",
+        )
+        .bind(missing_image_path("survivor"))
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO clip_images (clip_uuid, full_content, storage_kind, mime_type)
+             VALUES ('recapture', x'89504E47', 'db', 'image/png')",
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
+
+        let blob: Vec<u8> =
+            sqlx::query_scalar("SELECT full_content FROM clip_images WHERE clip_uuid = 'original'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            blob,
+            vec![0x89, 0x50, 0x4E, 0x47],
+            "a dangling path must not count as a live original"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_adopted_original_survives_the_retention_sweep_on_the_same_boot() {
+        // Startup runs retention right after this migration. The survivor is
+        // the oldest row, so its last_accessed is months old and retention
+        // would expire the original again before the user could paste it.
+        let database = migrated_database().await;
+        insert_clip_with_hash(
+            &database,
+            "original",
+            "image-hash",
+            false,
+            None,
+            "2026-03-01 09:00:00",
+        )
+        .await;
+        insert_clip_with_hash(
+            &database,
+            "recapture",
+            "image-hash",
+            false,
+            None,
+            "2026-08-01 09:00:00",
+        )
+        .await;
+        make_image_clips(&database).await;
+        sqlx::query(
+            "UPDATE clips SET full_image_expired = 0, ocr_status = 'completed', ocr_text = 'x'
+             WHERE uuid = 'recapture'",
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO clip_images (clip_uuid, full_content, storage_kind, mime_type)
+             VALUES ('recapture', x'89504E47', 'db', 'image/png')",
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
+        crate::commands::enforce_retention_in_pool(&database.pool, 0, 30)
+            .await
+            .expect("retention should run");
+
+        let expired: i64 =
+            sqlx::query_scalar("SELECT full_image_expired FROM clips WHERE uuid = 'original'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        let images: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM clip_images WHERE clip_uuid = 'original'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(expired, 0, "the adopted original must not be re-expired");
+        assert_eq!(images, 1, "and its image row must still be there");
     }
 
     #[tokio::test]
