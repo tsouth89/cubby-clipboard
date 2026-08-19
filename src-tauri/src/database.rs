@@ -1391,6 +1391,16 @@ async fn adopt_live_image(
     };
 
     let adopted_path = match file_path.as_deref() {
+        // A file-backed original whose file is already gone is not a live
+        // image. Adopting the row would clear full_image_expired and leave the
+        // survivor claiming an original that cannot be read, which reads as
+        // damage rather than as the honest expired state it replaced.
+        Some(path) if !std::path::Path::new(path).exists() && full_content.is_empty() => {
+            log::warn!(
+                "STORAGE: duplicate clip {loser_uuid} lists an original at {path} that is missing; leaving {survivor_uuid} expired"
+            );
+            return Ok(());
+        }
         Some(path) if std::path::Path::new(path).exists() => {
             let source = std::path::Path::new(path);
             let destination = source.with_file_name(format!("{survivor_uuid}.cubby"));
@@ -1744,6 +1754,72 @@ mod tests {
             images, 1,
             "the live original must move onto the surviving row"
         );
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_whose_original_file_is_gone_does_not_revive_the_survivor() {
+        let database = migrated_database().await;
+        insert_clip_with_hash(
+            &database,
+            "original",
+            "image-hash",
+            false,
+            None,
+            "2026-03-01 09:00:00",
+        )
+        .await;
+        insert_clip_with_hash(
+            &database,
+            "recapture",
+            "image-hash",
+            false,
+            None,
+            "2026-08-01 09:00:00",
+        )
+        .await;
+        sqlx::query("UPDATE clips SET clip_type = 'image', full_image_expired = 1")
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE clips SET full_image_expired = 0 WHERE uuid = 'recapture'")
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        // File-backed original: an empty blob plus a path that no longer
+        // resolves, which is what a deleted or OneDrive-evicted file leaves.
+        sqlx::query(
+            r#"
+            INSERT INTO clip_images (clip_uuid, full_content, file_path, storage_kind, mime_type)
+            VALUES ('recapture', x'', ?, 'file', 'image/png')
+            "#,
+        )
+        .bind(
+            std::env::temp_dir()
+                .join("cubby-missing-original.cubby")
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
+
+        let (uuid, expired): (String, i64) =
+            sqlx::query_as("SELECT uuid, full_image_expired FROM clips")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(uuid, "original");
+        assert_eq!(
+            expired, 1,
+            "a missing original must leave the survivor expired, not claiming a dangling path"
+        );
+        let images: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM clip_images")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(images, 0, "no image row should survive the merge");
     }
 
     /// Soft delete keeps the row, so a newer deleted duplicate must never win:
