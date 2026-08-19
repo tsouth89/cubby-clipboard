@@ -117,7 +117,8 @@ issue. Do not paste clipboard contents into bug reports or logs.
    to something like `cubby.db.corrupt-YYYYMMDD-HHMMSS`. `storage.key` must
    still be present. History is empty (expected after quarantine).
 4. Logs under the app log dir mention quarantine/structural failure only; no
-   clip text or image payloads.
+   clip text or image payloads. The quarantine or restore line must appear in
+   the same log file as `Cubby starting...` (SBS-929).
 
 ### Single-instance and autostart
 

@@ -34,11 +34,16 @@ impl Database {
     /// DPAPI account mismatch (recoverable, explain it) apart from everything
     /// else (a bug or a broken disk). `From<String>` keeps the `?` on each
     /// String-producing step below unchanged.
-    pub async fn new(db_path: &str) -> Result<Self, crate::crypto::StorageError> {
+    /// Opens storage and returns any history-rewrite notices that happened
+    /// before the logger exists. The caller must flush those through the
+    /// existing `startup_log` buffer (SBS-929); `log::` here is discarded.
+    pub async fn new(
+        db_path: &str,
+    ) -> Result<(Self, Vec<(log::Level, String)>), crate::crypto::StorageError> {
         let path = Path::new(db_path);
         // Fail open for capture: a corrupt history is quarantined and replaced
         // with an empty database rather than blocking the app (SOU-218).
-        prepare_database_file(path).await?;
+        let notices = prepare_database_file(path).await?;
 
         let image_dir = path
             .parent()
@@ -77,12 +82,15 @@ impl Database {
             encryption_version.as_deref() != Some("1"),
         )?);
 
-        Ok(Self {
-            pool,
-            crypto,
-            image_dir,
-            search_index: Arc::new(crate::search_index::SearchIndex::default()),
-        })
+        Ok((
+            Self {
+                pool,
+                crypto,
+                image_dir,
+                search_index: Arc::new(crate::search_index::SearchIndex::default()),
+            },
+            notices,
+        ))
     }
 
     /// Collapse duplicate `content_hash` rows and make the constraint
@@ -269,7 +277,10 @@ impl Database {
         Ok(removed)
     }
 
-    pub async fn migrate(&self) -> Result<(), sqlx::Error> {
+    /// Schema setup. Returns notices for history it rewrote (legacy
+    /// file-reference rows). Those must be flushed through `startup_log`;
+    /// `log::` here is discarded (SBS-929).
+    pub async fn migrate(&self) -> Result<Vec<(log::Level, String)>, sqlx::Error> {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS folders (
@@ -491,15 +502,24 @@ impl Database {
                 .execute(&self.pool)
                 .await?
                 .rows_affected();
+        let mut notices = Vec::new();
         if removed_file_references > 0 {
-            log::info!(
-                "STORAGE: Removed {} legacy file-reference history items",
-                removed_file_references
-            );
+            notices.push(to_startup_line(
+                crate::startup_recovery_log::removed_file_references(removed_file_references),
+            ));
         }
 
-        Ok(())
+        Ok(notices)
     }
+}
+
+fn to_startup_line(notice: crate::startup_recovery_log::RecoveryNotice) -> (log::Level, String) {
+    let level = match notice.level {
+        crate::startup_recovery_log::RecoveryLevel::Error => log::Level::Error,
+        crate::startup_recovery_log::RecoveryLevel::Warn => log::Level::Warn,
+        crate::startup_recovery_log::RecoveryLevel::Info => log::Level::Info,
+    };
+    (level, notice.message)
 }
 
 /// Ensure `db_path` is either absent (will be created) or a healthy SQLite file.
@@ -508,35 +528,45 @@ impl Database {
 /// when SQLite proves the file is not a database. Transient open/query errors
 /// (BUSY, LOCKED, I/O, permissions) leave the original file untouched and
 /// surface a startup error instead (SBS-770).
-async fn prepare_database_file(db_path: &Path) -> Result<(), String> {
+///
+/// History-rewrite notices are returned so `run_app` can flush them through
+/// `startup_log` after the logger exists (SBS-929).
+async fn prepare_database_file(db_path: &Path) -> Result<Vec<(log::Level, String)>, String> {
     if !db_path.exists() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     apply_database_health(db_path, assess_database_file(db_path).await).await
 }
 
-async fn apply_database_health(db_path: &Path, health: DatabaseHealth) -> Result<(), String> {
+async fn apply_database_health(
+    db_path: &Path,
+    health: DatabaseHealth,
+) -> Result<Vec<(log::Level, String)>, String> {
     match health {
         DatabaseHealth::Healthy => {
             if let Err(error) = refresh_rolling_backup(db_path).await {
                 // Backup is best-effort; a full disk must not block capture.
-                log::warn!("STORAGE: Could not refresh history backup: {error}");
+                return Ok(vec![to_startup_line(
+                    crate::startup_recovery_log::backup_refresh_failed(&error),
+                )]);
             }
-            Ok(())
+            Ok(Vec::new())
         }
         DatabaseHealth::Corrupt { reason } => {
             // Structural diagnostics only: never log row contents.
-            log::error!(
-                "STORAGE: Clipboard history database is unusable ({}); quarantining",
-                sanitize_storage_diagnostic(&reason)
-            );
+            let sanitized = sanitize_storage_diagnostic(&reason);
             let path = db_path.to_path_buf();
             tokio::task::spawn_blocking(move || quarantine_database_files(&path))
                 .await
                 .map_err(|e| format!("quarantine task failed: {e}"))??;
-            restore_from_rolling_backup(db_path).await;
-            Ok(())
+            let restore = restore_from_rolling_backup(db_path).await;
+            Ok(
+                crate::startup_recovery_log::notices_for_corrupt(&sanitized, restore)
+                    .into_iter()
+                    .map(to_startup_line)
+                    .collect(),
+            )
         }
         DatabaseHealth::Unassessable { reason } => Err(format!(
             "could not assess clipboard history ({}); the existing database was left untouched",
@@ -549,37 +579,35 @@ async fn apply_database_health(db_path: &Path, health: DatabaseHealth) -> Result
 /// the user keeps up to 24h-old history instead of silently starting from
 /// zero. The backup file itself is kept (copy, not rename) as a second chance
 /// for manual recovery. Best-effort: any failure falls back to a fresh file.
-async fn restore_from_rolling_backup(db_path: &Path) {
+async fn restore_from_rolling_backup(
+    db_path: &Path,
+) -> crate::startup_recovery_log::RestoreOutcome {
     let backup = rolling_backup_path(db_path);
     if !backup.exists() {
-        log::warn!("STORAGE: No rolling backup found; starting with an empty history");
-        return;
+        return crate::startup_recovery_log::RestoreOutcome::NoBackup;
     }
 
     match assess_database_file(&backup).await {
         DatabaseHealth::Healthy => {}
         DatabaseHealth::Corrupt { reason } | DatabaseHealth::Unassessable { reason } => {
-            log::error!(
-                "STORAGE: Rolling backup failed verification ({}); starting with an empty history",
-                sanitize_storage_diagnostic(&reason)
-            );
-            return;
+            return crate::startup_recovery_log::RestoreOutcome::BackupUnusable {
+                reason: sanitize_storage_diagnostic(&reason),
+            };
         }
     }
 
     let source = backup.clone();
     let destination = db_path.to_path_buf();
     match tokio::task::spawn_blocking(move || std::fs::copy(&source, &destination)).await {
-        Ok(Ok(_)) => log::warn!(
-            "STORAGE: Restored clipboard history from rolling backup {}",
-            backup.display()
-        ),
-        Ok(Err(error)) => log::error!(
-            "STORAGE: Could not restore history backup: {error}; starting with an empty history"
-        ),
-        Err(error) => log::error!(
-            "STORAGE: Backup restore task failed: {error}; starting with an empty history"
-        ),
+        Ok(Ok(_)) => crate::startup_recovery_log::RestoreOutcome::Restored {
+            path: backup.display().to_string(),
+        },
+        Ok(Err(error)) => crate::startup_recovery_log::RestoreOutcome::CopyFailed {
+            error: error.to_string(),
+        },
+        Err(error) => crate::startup_recovery_log::RestoreOutcome::TaskFailed {
+            error: error.to_string(),
+        },
     }
 }
 
@@ -1257,6 +1285,16 @@ mod tests {
             std::env::temp_dir().join(format!("cubby-db-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         directory
+    }
+
+    /// SBS-929: a history rewrite that only `log::`'d would return no lines.
+    fn assert_has_notice(notices: &[(log::Level, String)], level: log::Level, needle: &str) {
+        assert!(
+            notices
+                .iter()
+                .any(|(got_level, message)| *got_level == level && message.contains(needle)),
+            "expected {level} notice containing {needle:?}, got {notices:?}"
+        );
     }
 
     /// uuid, is_pinned, is_hidden, folder_id, notes.
@@ -2246,9 +2284,11 @@ mod tests {
         std::fs::write(&database_path, b"this is not a sqlite database").unwrap();
         std::fs::write(&wal_path, b"wal-garbage").unwrap();
 
-        prepare_database_file(&database_path)
+        let notices = prepare_database_file(&database_path)
             .await
             .expect("corrupt history should be quarantined");
+        assert_has_notice(&notices, log::Level::Error, "quarantining");
+        assert_has_notice(&notices, log::Level::Warn, "empty history");
 
         assert!(!database_path.exists(), "main DB should be moved aside");
         assert!(!wal_path.exists(), "WAL sidecar should be moved aside");
@@ -2276,7 +2316,7 @@ mod tests {
         );
 
         // Fresh open after quarantine must create a usable database.
-        let db = Database::new(database_path.to_str().unwrap())
+        let (db, _notices) = Database::new(database_path.to_str().unwrap())
             .await
             .expect("fresh database should open after quarantine");
         db.migrate().await.expect("fresh schema should apply");
@@ -2311,9 +2351,21 @@ mod tests {
 
         std::fs::write(&database_path, b"this is not a sqlite database").unwrap();
 
-        prepare_database_file(&database_path)
+        let notices = prepare_database_file(&database_path)
             .await
             .expect("corrupt history should be quarantined and restored");
+        assert_has_notice(&notices, log::Level::Error, "quarantining");
+        assert_has_notice(
+            &notices,
+            log::Level::Warn,
+            "Restored clipboard history from rolling backup",
+        );
+        assert!(
+            !notices
+                .iter()
+                .any(|(_, message)| message.contains("empty history")),
+            "a successful restore must not also claim empty history, got {notices:?}"
+        );
 
         assert!(
             database_path.exists(),
@@ -2388,9 +2440,10 @@ mod tests {
         }
         std::fs::write(&database_path, bytes).unwrap();
 
-        prepare_database_file(&database_path)
+        let notices = prepare_database_file(&database_path)
             .await
             .expect("corrupt sqlite should quarantine rather than fail startup");
+        assert_has_notice(&notices, log::Level::Error, "quarantining");
         assert!(!database_path.exists());
         let _ = std::fs::remove_dir_all(directory);
     }
@@ -2493,5 +2546,133 @@ mod tests {
             b"key-bytes"
         );
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// SBS-929: an unusable rolling backup is an empty-history fallback, and
+    /// that line must be returned rather than only `log::`'d.
+    #[tokio::test]
+    async fn unusable_rolling_backup_reports_empty_history() {
+        let directory = temp_dir();
+        let database_path = directory.join("cubby.db");
+        let backup_path = rolling_backup_path(&database_path);
+        std::fs::write(&database_path, b"this is not a sqlite database").unwrap();
+        std::fs::write(&backup_path, b"this is not a sqlite backup").unwrap();
+
+        let notices = prepare_database_file(&database_path)
+            .await
+            .expect("corrupt history should fail open even when the backup is unusable");
+        assert_has_notice(&notices, log::Level::Error, "quarantining");
+        assert_has_notice(
+            &notices,
+            log::Level::Error,
+            "Rolling backup failed verification",
+        );
+        assert_has_notice(&notices, log::Level::Error, "empty history");
+        assert!(
+            !database_path.exists(),
+            "unusable backup must not be installed"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// SBS-929: `apply_database_health` itself must return the lines. A
+    /// `log::` inside this function is the discarded path the ticket names.
+    #[tokio::test]
+    async fn apply_database_health_returns_quarantine_notices() {
+        let directory = temp_dir();
+        let database_path = directory.join("cubby.db");
+        std::fs::write(&database_path, b"broken").unwrap();
+
+        let notices = apply_database_health(
+            &database_path,
+            DatabaseHealth::Corrupt {
+                reason: "file is not a database".to_string(),
+            },
+        )
+        .await
+        .expect("corrupt health should fail open");
+        assert_has_notice(&notices, log::Level::Error, "quarantining");
+        assert_has_notice(&notices, log::Level::Warn, "empty history");
+        assert!(
+            !notices.is_empty(),
+            "returning no notices is the pre-fix bug (log:: only)"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// SBS-929: the healthy path still has one thing to say. A refresh that
+    /// cannot write a copy is best-effort for capture, but the user must be
+    /// able to find out that the recovery copy is not current.
+    ///
+    /// The fixture is a database file that is gone by the time the refresh
+    /// opens it — the file-level failure a full disk or a revoked permission
+    /// produces at the same point. `apply_database_health` is called with
+    /// `Healthy` directly, which is the arm under test.
+    #[tokio::test]
+    async fn healthy_path_reports_a_failed_backup_refresh() {
+        let directory = temp_dir();
+        let database_path = directory.join("cubby.db");
+        assert!(
+            !database_path.exists(),
+            "the refresh must be the thing that fails, not the health check"
+        );
+
+        let notices = apply_database_health(&database_path, DatabaseHealth::Healthy)
+            .await
+            .expect("a failed backup refresh must not block startup");
+        assert_has_notice(
+            &notices,
+            log::Level::Warn,
+            "Could not refresh history backup",
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// SBS-929: `Database::new` must hand its caller the lines
+    /// `prepare_database_file` produced. Dropping that vec on the `Ok` tuple
+    /// is exactly the silent-startup bug, and every other test in this file
+    /// calls `prepare_database_file` directly, so nothing else would catch it.
+    #[tokio::test]
+    async fn database_new_returns_the_prepare_notices() {
+        let directory = temp_dir();
+        let database_path = directory.join("cubby.db");
+        std::fs::write(&database_path, b"this is not a sqlite database").unwrap();
+
+        let (_database, notices) = Database::new(database_path.to_str().unwrap())
+            .await
+            .expect("a quarantined history should still open a fresh database");
+        assert_has_notice(&notices, log::Level::Error, "quarantining");
+        assert_has_notice(&notices, log::Level::Warn, "empty history");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// SBS-929: the leftover migrate `log::info!` for file-reference rows
+    /// must come back as a collectable notice.
+    #[tokio::test]
+    async fn migrate_reports_removed_legacy_file_references() {
+        let database = migrated_database().await;
+        sqlx::query(
+            r#"INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash)
+               VALUES ('file-1', 'file', x'00', 'preview', 'file-hash')"#,
+        )
+        .execute(&database.pool)
+        .await
+        .expect("legacy file-reference row should insert");
+
+        let notices = database
+            .migrate()
+            .await
+            .expect("migrate should remove the leftover file row");
+        assert_has_notice(
+            &notices,
+            log::Level::Info,
+            "legacy file-reference history items",
+        );
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM clips WHERE clip_type = 'file'")
+                .fetch_one(&database.pool)
+                .await
+                .expect("count should query");
+        assert_eq!(remaining, 0);
     }
 }

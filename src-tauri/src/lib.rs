@@ -47,6 +47,7 @@ mod secrets;
 mod settings_commands;
 mod settings_manager;
 mod shortcuts;
+mod startup_recovery_log;
 pub mod win_v_activation;
 mod win_v_replacement;
 mod window_state;
@@ -97,8 +98,8 @@ pub fn run_app() {
     let rt = get_runtime().expect("Failed to get global tokio runtime");
     let _guard = rt.enter();
 
-    let db = match rt.block_on(async { Database::new(&db_path_str).await }) {
-        Ok(db) => db,
+    let (db, mut startup_log) = match rt.block_on(async { Database::new(&db_path_str).await }) {
+        Ok(pair) => pair,
         // The one storage failure a user can cause without anything being
         // broken, and the one they can undo. Panicking here produced a silent
         // launch failure: this runs before the logger exists, so the message
@@ -114,12 +115,13 @@ pub fn run_app() {
     //
     // `tauri_plugin_log` is not installed until the builder runs, far below, so
     // a `log::info!` or `log::error!` up here goes nowhere -- which silently
-    // cost the record of a migration that modified a real user's history. These
-    // messages are collected instead and flushed in `setup`, once the logger
-    // exists. Add to this rather than logging directly.
-    let mut startup_log: Vec<(log::Level, String)> = Vec::new();
+    // cost the record of a migration that modified a real user's history, and
+    // of a quarantine/restore that rewrote it (SBS-929). `Database::new`
+    // returns those lines; this buffer is that same vec, then migrations
+    // append. Flushed in `setup` once the logger exists. Add to this rather
+    // than logging directly.
     rt.block_on(async {
-        db.migrate().await.expect("Cubby database migration failed");
+        startup_log.extend(db.migrate().await.expect("Cubby database migration failed"));
         let migrated = commands::migrate_encrypted_storage(&db)
             .await
             .unwrap_or_else(|error| panic!("Cubby encrypted storage migration failed: {error}"));
