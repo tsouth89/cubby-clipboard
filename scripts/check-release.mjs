@@ -196,7 +196,7 @@ for (const encryptedStorageGate of [
 
 for (const clipboardFormatGate of [
   'clip_formats',
-  'get_html()',
+  'clipboard_html_document(',
   'get_rich_text()',
   'ClipboardContent::Html',
   'ClipboardContent::Rtf',

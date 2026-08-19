@@ -981,10 +981,8 @@ fn clipboard_is_cleared() -> bool {
             }
             // Empty plain text must not count as a clear if HTML/RTF still hold
             // content. Those copies are stored as rich clips (SBS-924).
-            if let Ok(html) = ctx.get_html() {
-                if !html.is_empty() {
-                    return false;
-                }
+            if clipboard_html_document(&ctx).is_some_and(|html| !html.is_empty()) {
+                return false;
             }
             if let Ok(rtf) = ctx.get_rich_text() {
                 if !rtf.is_empty() {
@@ -1192,7 +1190,7 @@ fn materialize_clipboard_content_once(attempt: u32) -> MaterializeOnce {
 
     if let Ok(ctx) = ClipboardContext::new() {
         let text = ctx.get_text().ok();
-        let html = ctx.get_html().ok();
+        let html = clipboard_html_document(&ctx);
         let rtf = ctx.get_rich_text().ok();
         let text_read = observed_payload(&text, clipboard_has_unicode_text_format());
         let html_read = observed_payload(&html, clipboard_has_html_format());
@@ -1276,6 +1274,17 @@ fn clipboard_has_html_format() -> bool {
     format != 0
         && unsafe { windows::Win32::System::DataExchange::IsClipboardFormatAvailable(format) }
             .is_ok()
+}
+
+/// HTML document from the clipboard, parsed without clipboard-rs `get_html`.
+///
+/// `get_html` slices StartHTML..EndHTML with `str[]` after only checking that
+/// `end - start <= len`. A header whose EndHTML is past the payload panics, and
+/// release builds abort the process (SBS-999). Raw bytes plus
+/// [`crate::cf_html::html_document_from_cf_html`] drop the format instead.
+fn clipboard_html_document(ctx: &ClipboardContext) -> Option<String> {
+    let bytes = ctx.get_buffer("HTML Format").ok()?;
+    crate::cf_html::html_document_from_cf_html(&bytes)
 }
 
 #[cfg(not(target_os = "windows"))]

@@ -1,14 +1,19 @@
-//! CF_HTML assembly for clipboard writes.
+//! CF_HTML assembly and capture parsing.
 //!
-//! Capture stores the *document* part of a CF_HTML payload (clipboard-rs
-//! `get_html` returns the StartHTML..EndHTML slice, header stripped). Writing
-//! that document back raw produces an invalid "HTML Format" entry that
-//! Office-class apps reject, so every restore must re-attach a header with
-//! correct byte offsets.
+//! Capture stores the *document* part of a CF_HTML payload (the StartHTML..EndHTML
+//! slice, header stripped). Writing that document back raw produces an invalid
+//! "HTML Format" entry that Office-class apps reject, so every restore must
+//! re-attach a header with correct byte offsets.
 //!
 //! Restores must hash the exact bytes a re-capture of our own write will read
 //! back, so [`document`] (the normalized StartHTML..EndHTML slice) feeds the
 //! ignore-hash material and [`to_cf_html`] produces the clipboard payload.
+//!
+//! Capture must not call clipboard-rs `get_html`: that helper slices the
+//! StartHTML..EndHTML range with `str[]` after only checking that
+//! `end - start <= len`, so a header whose `EndHTML` is past the payload
+//! panics. Release builds `panic = "abort"`, so that kills the process
+//! (SBS-999). [`html_document_from_cf_html`] reads raw bytes and uses `get`.
 
 const START_FRAGMENT_MARKER: &str = "<!--StartFragment-->";
 const END_FRAGMENT_MARKER: &str = "<!--EndFragment-->";
@@ -17,6 +22,39 @@ const END_FRAGMENT_MARKER: &str = "<!--EndFragment-->";
 /// should, but never double-wrap if one slips through.
 fn is_cf_html(payload: &str) -> bool {
     payload.starts_with("Version:") && payload.contains("StartHTML:")
+}
+
+/// Document slice from a raw CF_HTML clipboard payload.
+///
+/// Offsets are byte indexes from the start of the payload. Out-of-range,
+/// inverted, or non-UTF-8 ranges are discarded instead of sliced.
+pub(crate) fn html_document_from_cf_html(payload: &[u8]) -> Option<String> {
+    let start = cf_html_offset(payload, "StartHTML").unwrap_or(0);
+    let end = cf_html_offset(payload, "EndHTML").unwrap_or(payload.len());
+    let document = payload.get(start..end)?;
+    String::from_utf8(document.to_vec()).ok()
+}
+
+fn cf_html_offset(payload: &[u8], key: &str) -> Option<usize> {
+    let header_end = payload
+        .iter()
+        .position(|&byte| byte == b'<')
+        .unwrap_or(payload.len());
+    let header = std::str::from_utf8(payload.get(..header_end)?).ok()?;
+    for line in header.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name != key {
+            continue;
+        }
+        let digits = value.trim();
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        return digits.parse().ok();
+    }
+    None
 }
 
 /// Normalize stored HTML into the document that will sit between StartHTML and
@@ -77,7 +115,7 @@ pub(crate) fn to_cf_html(html: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{document, to_cf_html};
+    use super::{document, html_document_from_cf_html, to_cf_html};
 
     fn header_offset(payload: &str, key: &str) -> usize {
         payload
@@ -136,5 +174,47 @@ mod tests {
         let end_fragment = header_offset(&payload, "EndFragment");
         // No markers: the whole document is the fragment.
         assert_eq!(&payload[start_fragment..end_fragment], doc);
+    }
+
+    #[test]
+    fn html_document_from_cf_html_reads_a_well_formed_payload() {
+        let fragment = "<b>héllo</b>";
+        let payload = to_cf_html(fragment);
+        let parsed = html_document_from_cf_html(payload.as_bytes()).expect("valid CF_HTML");
+        assert_eq!(parsed, document(fragment));
+    }
+
+    #[test]
+    fn html_document_from_cf_html_rejects_the_sbs_999_oversize_end_offset() {
+        // Difference EndHTML-StartHTML is 60, payload is 83 bytes: clipboard-rs
+        // 0.2.4 treats that as valid, then panics on data[60..120].
+        let payload = concat!(
+            "Version:0.9\r\n",
+            "StartHTML:0000000060\r\n",
+            "EndHTML:0000000120\r\n",
+            "<html><body>hi</body></html>"
+        );
+        assert_eq!(payload.len(), 83);
+        assert!(html_document_from_cf_html(payload.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn html_document_from_cf_html_rejects_inverted_offsets() {
+        let payload = concat!(
+            "Version:0.9\r\n",
+            "StartHTML:0000000080\r\n",
+            "EndHTML:0000000040\r\n",
+            "<html></html>"
+        );
+        assert!(html_document_from_cf_html(payload.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn html_document_from_cf_html_rejects_a_slice_that_is_not_utf8() {
+        let header = "Version:0.9\r\nStartHTML:0000000055\r\nEndHTML:0000000057\r\n";
+        assert_eq!(header.len(), 55);
+        let mut payload = header.as_bytes().to_vec();
+        payload.extend_from_slice(&[0x80, 0x80]);
+        assert!(html_document_from_cf_html(&payload).is_none());
     }
 }
