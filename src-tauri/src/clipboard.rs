@@ -389,6 +389,14 @@ fn clipboard_history_opted_out() -> bool {
     if format == 0 || !clipboard_format_available("CanIncludeInClipboardHistory") {
         return false;
     }
+    // raw::get reads through GetClipboardData, which returns nothing unless
+    // this process holds the clipboard open. Without this the DWORD was never
+    // readable, so the marker silently never fired. The open is gated on the
+    // presence check above, so only apps that set the format pay for it.
+    let Ok(_clipboard) = clipboard_win::Clipboard::new_attempts(10) else {
+        log::debug!("CLIPBOARD: Could not open the clipboard to read CanIncludeInClipboardHistory");
+        return false;
+    };
     let mut buffer = [0_u8; 4];
     match clipboard_win::raw::get(format, &mut buffer) {
         Ok(written) if written >= 4 => u32::from_le_bytes(buffer) == 0,
