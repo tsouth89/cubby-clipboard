@@ -34,14 +34,6 @@ pub fn resolve_settings_disk_source(canonical: &Path) -> SettingsDiskSource {
     }
 }
 
-/// Retention after a missing canonical file when a leftover temp parsed.
-///
-/// Unreadable temp uses 0 — the same safe default as parse-failure quarantine.
-/// This function is not used for a true first run (no temp).
-pub fn auto_delete_days_from_interrupted_tmp(parsed_tmp_days: Option<i64>) -> i64 {
-    parsed_tmp_days.unwrap_or(0)
-}
-
 /// First-run `AppSettings::default()` (30-day) must not be written over a
 /// leftover `settings.json.tmp`.
 pub fn may_persist_first_run_defaults(source: SettingsDiskSource) -> bool {
@@ -112,7 +104,7 @@ mod tests {
         );
 
         let days = parse_auto_delete_days(&fs::read_to_string(&tmp).unwrap()).unwrap();
-        assert_eq!(auto_delete_days_from_interrupted_tmp(Some(days)), 0);
+        assert_eq!(days, 0, "the leftover temp is the keep-forever choice");
 
         // Production persist for an un-seeded interrupted write: promote the
         // leftover temp. The old path wrote AppSettings::default() (30) onto
@@ -131,12 +123,6 @@ mod tests {
         let on_disk = parse_auto_delete_days(&fs::read_to_string(&canonical).unwrap()).unwrap();
         assert_eq!(on_disk, 0);
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn unreadable_interrupted_tmp_uses_safe_zero_retention() {
-        assert_eq!(auto_delete_days_from_interrupted_tmp(None), 0);
-        assert_ne!(auto_delete_days_from_interrupted_tmp(None), 30);
     }
 
     #[test]
