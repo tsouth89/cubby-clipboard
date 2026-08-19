@@ -44,8 +44,15 @@ const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 const HEADER_LEN: usize = MAGIC.len() + SALT_LEN + NONCE_LEN;
 
-/// Rejects an obviously-wrong file before spending Argon2 time on it.
-const MAX_BUNDLE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Clipboard history is text plus thumbnails and the occasional full-resolution
+/// original. A few hundred MiB is already generous for that. The previous 4 GiB
+/// cap let an unauthenticated file allocate until the process aborted (SBS-981).
+const MAX_BUNDLE_BYTES: u64 = 256 * 1024 * 1024;
+const OVERSIZE_BUNDLE: &str = "That backup file is implausibly large";
+const NOT_A_BUNDLE: &str = "That does not look like a Cubby backup file";
+/// AES-256-GCM appends a 16-byte tag. Used to reject an export that could not
+/// be imported under `MAX_BUNDLE_BYTES` before the second allocation.
+const GCM_TAG_LEN: u64 = 16;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct BackupBundle {
@@ -322,6 +329,14 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
     Ok(count)
 }
 
+fn refuse_oversize_bundle(len: u64) -> Result<(), String> {
+    if len > MAX_BUNDLE_BYTES {
+        Err(OVERSIZE_BUNDLE.to_string())
+    } else {
+        Ok(())
+    }
+}
+
 /// Serialize and encrypt a bundle into the on-disk file bytes.
 ///
 /// Split out of `export_backup` so a test can seal a bundle this database would
@@ -330,6 +345,8 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
 fn seal_bundle(bundle: &BackupBundle, passphrase: &str) -> Result<Vec<u8>, String> {
     let plaintext =
         serde_json::to_vec(bundle).map_err(|e| format!("Could not build the backup: {e}"))?;
+    // Fail before encrypt allocates a second buffer the size of the payload.
+    refuse_oversize_bundle(HEADER_LEN as u64 + plaintext.len() as u64 + GCM_TAG_LEN)?;
 
     let mut salt = [0_u8; SALT_LEN];
     getrandom::fill(&mut salt).map_err(|e| format!("failed to generate a salt: {e}"))?;
@@ -566,6 +583,7 @@ fn read_export_image_file(
 /// Write `bytes` beside `path`, then replace the destination so a failed
 /// persist cannot leave a truncated backup in the user's chosen file.
 fn persist_backup_file(path: &str, bytes: &[u8]) -> Result<(), String> {
+    refuse_oversize_bundle(bytes.len() as u64)?;
     let dest = Path::new(path);
     if dest.file_name().is_none() {
         return Err("Could not save the backup: the destination path is not a file".to_string());
@@ -697,6 +715,64 @@ fn replace_exported_backup(source: &Path, destination: &Path) -> Result<(), Stri
     std::fs::rename(source, destination).map_err(|error| error.to_string())
 }
 
+/// Read at most `MAX_BUNDLE_BYTES` of a user-chosen backup.
+///
+/// The AEAD tag is at the end of the file, so authentication cannot happen
+/// until the ciphertext is in memory. The bound is what stops a 4 GiB
+/// unauthenticated file from being the thing that gets us there (SBS-981).
+fn read_backup_file(path: &str) -> Result<Vec<u8>, String> {
+    read_backup_file_limited(path, MAX_BUNDLE_BYTES)
+}
+
+/// Same as [`read_backup_file`], with the cap supplied so a test can pin the
+/// refusal without writing a 256 MiB file.
+fn read_backup_file_limited(path: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+    use std::io::{ErrorKind, Read};
+
+    if max_bytes < HEADER_LEN as u64 {
+        return Err(OVERSIZE_BUNDLE.to_string());
+    }
+
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("Could not open the backup file: {e}"))?;
+
+    // Fast-fail on the advertised size. The bounded read below is what
+    // actually stops a file that grows after this check, or a size that
+    // cannot be trusted.
+    match file.metadata() {
+        Ok(metadata) if metadata.len() > max_bytes => {
+            return Err(OVERSIZE_BUNDLE.to_string());
+        }
+        Ok(_) => {}
+        Err(e) => return Err(format!("Could not open the backup file: {e}")),
+    }
+
+    let mut header = vec![0_u8; HEADER_LEN];
+    match file.read_exact(&mut header) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+            return Err(NOT_A_BUNDLE.to_string());
+        }
+        Err(e) => return Err(format!("Could not read the backup file: {e}")),
+    }
+    if &header[..MAGIC.len()] != MAGIC {
+        return Err(NOT_A_BUNDLE.to_string());
+    }
+
+    let max_body = max_bytes - HEADER_LEN as u64;
+    let mut body = Vec::new();
+    let n = file
+        .take(max_body.saturating_add(1))
+        .read_to_end(&mut body)
+        .map_err(|e| format!("Could not read the backup file: {e}"))?;
+    if n as u64 > max_body {
+        return Err(OVERSIZE_BUNDLE.to_string());
+    }
+
+    header.extend_from_slice(&body);
+    Ok(header)
+}
+
 /// Read a bundle back in, skipping anything already present.
 ///
 /// Dedup runs through the same content-hash lookup as capture and the Ditto
@@ -709,14 +785,9 @@ pub async fn import_backup(
     passphrase: &str,
     dry_run: bool,
 ) -> Result<BackupImportResult, String> {
-    let metadata =
-        std::fs::metadata(path).map_err(|e| format!("Could not open the backup file: {e}"))?;
-    if metadata.len() > MAX_BUNDLE_BYTES {
-        return Err("That backup file is implausibly large".to_string());
-    }
-    let raw = std::fs::read(path).map_err(|e| format!("Could not read the backup file: {e}"))?;
+    let raw = read_backup_file(path)?;
     if raw.len() < HEADER_LEN || &raw[..MAGIC.len()] != MAGIC {
-        return Err("That does not look like a Cubby backup file".to_string());
+        return Err(NOT_A_BUNDLE.to_string());
     }
 
     let salt = &raw[MAGIC.len()..MAGIC.len() + SALT_LEN];
@@ -1351,6 +1422,95 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("does not look like a Cubby backup"));
         std::fs::remove_file(&path).ok();
+    }
+
+    /// SBS-981: a file that starts with the magic still must not be pulled
+    /// into memory past the cap. The AEAD tag is at the end, so reading first
+    /// is what used to make a 4 GiB random file abort the process.
+    #[test]
+    fn an_oversize_unauthenticated_file_is_refused_before_aead() {
+        let path = temp_path("oversize-unauth");
+        let mut bytes = Vec::from(*MAGIC);
+        bytes.extend_from_slice(&[0_u8; SALT_LEN + NONCE_LEN]);
+        bytes.extend_from_slice(&[0xAB_u8; 64]);
+        std::fs::write(&path, &bytes).unwrap();
+
+        // Cap is larger than the header and smaller than the file, so the
+        // refusal is the size bound — not a short-header or magic check.
+        let cap = (HEADER_LEN + 16) as u64;
+        let error = read_backup_file_limited(path.to_str().unwrap(), cap).unwrap_err();
+        assert!(
+            error.contains("implausibly large"),
+            "oversize unauthenticated file must fail closed before AEAD, got {error}"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(path.parent().unwrap());
+    }
+
+    /// A file that fits the supplied cap is still returned in full, so the
+    /// bound cannot be a "read nothing" stub that would make the oversize
+    /// test pass for the wrong reason.
+    #[test]
+    fn a_file_at_the_supplied_cap_is_still_read() {
+        let path = temp_path("at-cap");
+        let mut bytes = Vec::from(*MAGIC);
+        bytes.extend_from_slice(&[0_u8; SALT_LEN + NONCE_LEN]);
+        bytes.extend_from_slice(&[0xCD_u8; 8]);
+        std::fs::write(&path, &bytes).unwrap();
+        let read = read_backup_file_limited(path.to_str().unwrap(), bytes.len() as u64)
+            .expect("a file at the cap must be read");
+        assert_eq!(read, bytes, "the bounded reader must return the whole file");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(path.parent().unwrap());
+    }
+
+    /// Cheap pin of the shared cap so export and import refuse the same size
+    /// without writing a 256 MiB file in CI.
+    #[test]
+    fn the_import_cap_refuses_one_byte_over_and_accepts_the_cap() {
+        assert!(
+            refuse_oversize_bundle(MAX_BUNDLE_BYTES).is_ok(),
+            "a file at the cap must still import"
+        );
+        let error = refuse_oversize_bundle(MAX_BUNDLE_BYTES + 1).unwrap_err();
+        assert!(
+            error.contains("implausibly large"),
+            "one byte over the cap must fail closed, got {error}"
+        );
+        assert!(
+            MAX_BUNDLE_BYTES < 4 * 1024 * 1024 * 1024,
+            "the production cap must stay well under the old 4 GiB abort"
+        );
+    }
+
+    /// Production import uses `MAX_BUNDLE_BYTES`. A sparse file past that cap
+    /// must fail closed on the advertised size and never reach Argon2/AEAD.
+    #[tokio::test]
+    async fn import_refuses_a_file_over_the_bundle_cap_without_trying_the_passphrase() {
+        let path = temp_path("oversize-import");
+        let mut header = Vec::from(*MAGIC);
+        header.extend_from_slice(&[0_u8; SALT_LEN + NONCE_LEN]);
+        std::fs::write(&path, &header).unwrap();
+        {
+            let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.set_len(MAX_BUNDLE_BYTES + 1)
+                .expect("the oversize probe must be creatable");
+        }
+
+        let target = test_database().await;
+        let error = import_backup(&target, path.to_str().unwrap(), "pass", false)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("implausibly large"),
+            "import must refuse before Argon2/AEAD, got {error}"
+        );
+        assert!(
+            !error.contains("Wrong passphrase"),
+            "an oversize file must not reach decrypt"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(path.parent().unwrap());
     }
 
     fn clip_hash(db: &Database, text: &str) -> String {
