@@ -27,6 +27,39 @@ impl<T, M, E> ForgetClipLookup<T, M, E> {
     }
 }
 
+/// Which capture a forget-on-clear attempt acts on.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ForgetAttempt<T> {
+    /// A retry deletes the capture it was scheduled for, full stop.
+    Pinned(T),
+    /// A first attempt takes the marker, but only inside the forget window.
+    FromMarker(T),
+    /// Nothing to forget.
+    Nothing,
+}
+
+/// Pick the capture for this attempt.
+///
+/// A pinned capture wins outright. The first attempt holds CLIPBOARD_SYNC
+/// across its lookup, so queued snapshots land the moment it fails and
+/// overwrite the marker; a retry that re-read the marker would delete one of
+/// those copies instead of the password the clear was about. Re-checking the
+/// window is wrong for the same reason: a capture 89.9s old would age past 90s
+/// during the retry delay and escape a forget it had already earned.
+pub(crate) fn select_forget_attempt<T>(
+    pinned: Option<T>,
+    marker: Option<T>,
+    marker_within_window: bool,
+) -> ForgetAttempt<T> {
+    if let Some(capture) = pinned {
+        return ForgetAttempt::Pinned(capture);
+    }
+    match marker {
+        Some(capture) if marker_within_window => ForgetAttempt::FromMarker(capture),
+        _ => ForgetAttempt::Nothing,
+    }
+}
+
 /// Remaining attempts after this one failed. `None` means stop restoring and
 /// waiting — a password manager only clears once (SBS-1003).
 pub(crate) fn next_forget_attempts(attempts_left: u8) -> Option<u8> {
@@ -73,5 +106,41 @@ mod tests {
         assert_eq!(super::next_forget_attempts(2), Some(1));
         assert_eq!(super::next_forget_attempts(1), None);
         assert_eq!(super::next_forget_attempts(0), None);
+    }
+    #[test]
+    fn a_retry_deletes_its_own_capture_not_whatever_landed_since() {
+        // SQLITE_BUSY holds the first attempt with CLIPBOARD_SYNC taken, so a
+        // queued copy overwrites the marker the moment it fails. The retry must
+        // still delete the password, not that copy.
+        assert_eq!(
+            super::select_forget_attempt(Some("password"), Some("later-copy"), true),
+            super::ForgetAttempt::Pinned("password")
+        );
+    }
+
+    #[test]
+    fn a_retry_ignores_the_forget_window() {
+        // A capture 89.9s old ages past 90s during the retry delay. It earned
+        // the forget on the first attempt and must not lose it to the clock.
+        assert_eq!(
+            super::select_forget_attempt(Some("password"), None, false),
+            super::ForgetAttempt::Pinned("password")
+        );
+    }
+
+    #[test]
+    fn a_first_attempt_takes_the_marker_only_inside_the_window() {
+        assert_eq!(
+            super::select_forget_attempt(None, Some("recent"), true),
+            super::ForgetAttempt::FromMarker("recent")
+        );
+        assert_eq!(
+            super::select_forget_attempt(None, Some("stale"), false),
+            super::ForgetAttempt::Nothing
+        );
+        assert_eq!(
+            super::select_forget_attempt::<&str>(None, None, true),
+            super::ForgetAttempt::Nothing
+        );
     }
 }
