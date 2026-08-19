@@ -315,8 +315,21 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
         clips,
     };
     let count = bundle.clips.len();
+    let file = seal_bundle(&bundle, passphrase)?;
+
+    persist_backup_file(path, &file)?;
+    log::info!("BACKUP: Exported {count} clips to an encrypted bundle");
+    Ok(count)
+}
+
+/// Serialize and encrypt a bundle into the on-disk file bytes.
+///
+/// Split out of `export_backup` so a test can seal a bundle this database would
+/// never produce, which is the only way to exercise the import guards against a
+/// crafted file.
+fn seal_bundle(bundle: &BackupBundle, passphrase: &str) -> Result<Vec<u8>, String> {
     let plaintext =
-        serde_json::to_vec(&bundle).map_err(|e| format!("Could not build the backup: {e}"))?;
+        serde_json::to_vec(bundle).map_err(|e| format!("Could not build the backup: {e}"))?;
 
     let mut salt = [0_u8; SALT_LEN];
     getrandom::fill(&mut salt).map_err(|e| format!("failed to generate a salt: {e}"))?;
@@ -341,10 +354,7 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
     file.extend_from_slice(&salt);
     file.extend_from_slice(&nonce);
     file.extend_from_slice(&ciphertext);
-
-    persist_backup_file(path, &file)?;
-    log::info!("BACKUP: Exported {count} clips to an encrypted bundle");
-    Ok(count)
+    Ok(file)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -738,7 +748,16 @@ pub async fn import_backup(
                 continue;
             }
         };
-        let full_image = match decode_optional_full_image(clip.full_image_b64.as_deref()) {
+        // Only an image clip can own a full-resolution original. A bundle that
+        // pairs full_image_b64 with any other clip_type is crafted or buggy, so
+        // drop it here: that keeps a stray PNG out of the image directory, out
+        // of clip_images, and out of the content hash below. SBS-919.
+        let full_image_b64 = if clip.clip_type == "image" {
+            clip.full_image_b64.as_deref()
+        } else {
+            None
+        };
+        let full_image = match decode_optional_full_image(full_image_b64) {
             Ok(bytes) => bytes,
             Err(error) => {
                 result.errors.push(error);
@@ -1766,6 +1785,63 @@ mod tests {
         assert!(original.is_none(), "no original should have been written");
         assert_eq!(thumb, b"expired-thumb");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// SBS-919: only an image clip may carry a full-resolution original. A
+    /// crafted bundle that pairs `full_image_b64` with a text clip must not get
+    /// a PNG written into the image directory or a `clip_images` row the UI
+    /// never expects for text.
+    #[tokio::test]
+    async fn import_ignores_a_full_image_on_a_non_image_clip() {
+        let bundle = BackupBundle {
+            version: 1,
+            exported_at: "2026-05-01 09:00:00".to_string(),
+            clips: vec![BackupClip {
+                clip_type: "text".to_string(),
+                content_b64: BASE64.encode(b"just some text"),
+                text_preview: "just some text".to_string(),
+                is_pinned: false,
+                is_hidden: false,
+                notes: None,
+                source_app: None,
+                source_icon: None,
+                metadata: None,
+                ocr_text: None,
+                created_at: "2026-05-01 09:00:00".to_string(),
+                folder: None,
+                full_image_b64: Some(BASE64.encode(b"not really a screenshot")),
+            }],
+        };
+        let path = temp_path("full-image-on-text");
+        std::fs::write(
+            &path,
+            seal_bundle(&bundle, "correct horse").expect("the crafted bundle should seal"),
+        )
+        .unwrap();
+
+        let target = test_database().await;
+        let result = import_backup(&target, path.to_str().unwrap(), "correct horse", false)
+            .await
+            .expect("a text clip with a stray full image must still import");
+        assert_eq!(result.imported, 1, "the text clip itself must import");
+        assert!(
+            result.errors.is_empty(),
+            "the stray original is dropped, not reported: {:?}",
+            result.errors
+        );
+
+        let indexed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM clip_images")
+            .fetch_one(&target.pool)
+            .await
+            .unwrap();
+        assert_eq!(indexed, 0, "a text clip must not get a clip_images row");
+        let written = std::fs::read_dir(&target.image_dir)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(written, 0, "no original file should have been written");
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&target.image_dir);
     }
 
     /// SBS-919: a bundle written before this field existed still imports, as
