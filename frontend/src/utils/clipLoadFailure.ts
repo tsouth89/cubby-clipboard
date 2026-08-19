@@ -26,16 +26,23 @@ export interface ClipLoadFailure {
    */
   clearList: boolean;
   /**
-   * Say the load failed out of band. The error panel only renders on an empty
-   * list, so any failure that leaves rows on screen is otherwise silent.
+   * Say the load failed out of band. Used for pagination: the first page is
+   * still correct, the user is at the bottom, and a top-of-list banner would
+   * sit off screen.
    */
   notify: boolean;
+  /**
+   * Keep the rows but mark the list stale. ClipList only had an error panel
+   * for an empty list (SBS-805); a same-filter refresh that failed used to
+   * look like a healthy current page once the toast dismissed.
+   */
+  showBanner: boolean;
 }
 
 /**
- * The user always learns exactly once: either the list ends up empty and the
- * error panel takes over, or a message fires. Doing neither is the
- * silent-stale-list bug, and doing both talks over the panel.
+ * The user always learns exactly once: empty list → error panel, append →
+ * toast, same-filter replace → banner. Doing none is the silent-stale-list
+ * bug. Doing two talks over the panel.
  */
 export function clipLoadFailure({
   append,
@@ -43,5 +50,41 @@ export function clipLoadFailure({
   hasVisibleClips,
 }: ClipLoadAttempt): ClipLoadFailure {
   const clearList = !append && !visibleRowsStillApply;
-  return { clearList, notify: !clearList && hasVisibleClips };
+  const listEmptyAfter = clearList || !hasVisibleClips;
+  return {
+    clearList,
+    notify: !listEmptyAfter && append,
+    showBanner: !listEmptyAfter && !append,
+  };
+}
+
+/**
+ * How ClipList should present `loadError`. A populated list used to ignore
+ * the flag, which is the "hides the error" half of SBS-805.
+ */
+export function clipListErrorSurface(
+  loadError: boolean,
+  clipCount: number
+): 'none' | 'panel' | 'banner' {
+  if (!loadError) return 'none';
+  return clipCount === 0 ? 'panel' : 'banner';
+}
+
+/**
+ * A load that finished, a load that failed, and a load that no longer owns
+ * the view are three states. Callers that treat superseded as success
+ * announce work the user cannot see (SBS-805).
+ */
+export type ClipLoadResult = 'applied' | 'failed' | 'superseded';
+
+export function clipLoadAnnouncesSuccess(result: ClipLoadResult): boolean {
+  return result === 'applied';
+}
+
+/**
+ * Folders, source-app filters, and the history count are sidecar lists.
+ * A failed reload must not look like a fresh read of those lists.
+ */
+export function sidecarReloadFailure(): { keepPrevious: true; notify: true } {
+  return { keepPrevious: true, notify: true };
 }
