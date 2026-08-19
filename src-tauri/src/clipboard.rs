@@ -334,9 +334,8 @@ struct ClipboardSnapshot {
     content: CapturedContent,
     formats: Vec<CapturedFormat>,
     materialize_ms: u128,
-    /// The source application tagged this copy as sensitive (e.g. a password
-    /// manager) so clipboard monitors should skip it. See `clipboard_marked_sensitive`.
-    sensitive: bool,
+    /// Which do-not-retain markers this copy carried. See `SensitiveMarkers`.
+    sensitive: SensitiveMarkers,
 }
 
 enum ClipboardListenerEvent {
@@ -347,21 +346,51 @@ enum ClipboardListenerEvent {
     },
 }
 
-/// Returns true when the current clipboard contents are tagged so clipboard
-/// history tools should skip them.
+/// Which do-not-retain markers the current clipboard contents carry.
 ///
-/// Windows history honours three well-known formats (SBS-1002):
+/// Windows history honours three well-known formats (SBS-1002), and they do
+/// not mean the same thing once a remote session is in the path:
 /// - `ExcludeClipboardContentFromMonitorProcessing` — presence means skip
 /// - `Clipboard Viewer Ignore` — the KeePass 2.x convention
 /// - `CanIncludeInClipboardHistory` — a DWORD of 0 means skip
 ///
-/// Presence checks do not require opening the clipboard. The DWORD is
-/// best-effort: if the format is present but unreadable, we do not skip.
+/// A remote-control viewer sets the first on *everything* it forwards, because
+/// it cannot know what the far-end application meant. Honoring that dropped
+/// every remote-session copy and left a hole in history that reads as lost
+/// data (SBS-781). The other two are set by the application that owns the
+/// secret and are forwarded unchanged, so they still describe the content when
+/// it arrives over RDP — KeePass through mstsc has to keep being honored
+/// (SBS-1000). Keeping them apart is what lets both be true.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SensitiveMarkers {
+    /// `ExcludeClipboardContentFromMonitorProcessing`. A blanket tag: trusted
+    /// from a local application, not from a viewer relaying someone else's
+    /// clipboard.
+    monitor_exclusion: bool,
+    /// `Clipboard Viewer Ignore`, or `CanIncludeInClipboardHistory` = 0. Set by
+    /// the application that owns the content, so it survives the trip.
+    content_owner: bool,
+}
+
+impl SensitiveMarkers {
+    /// Any marker at all. Drives the marker Cubby re-applies when it rewrites
+    /// the clipboard, which must not silently drop a tag that was there.
+    fn any(self) -> bool {
+        self.monitor_exclusion || self.content_owner
+    }
+}
+
+/// Read the markers. Presence checks do not require opening the clipboard; the
+/// DWORD does, and is best-effort: present but unreadable does not skip.
 #[cfg(target_os = "windows")]
-fn clipboard_marked_sensitive() -> bool {
-    clipboard_format_available("ExcludeClipboardContentFromMonitorProcessing")
-        || clipboard_format_available("Clipboard Viewer Ignore")
-        || clipboard_history_opted_out()
+fn clipboard_marked_sensitive() -> SensitiveMarkers {
+    SensitiveMarkers {
+        monitor_exclusion: clipboard_format_available(
+            "ExcludeClipboardContentFromMonitorProcessing",
+        ),
+        content_owner: clipboard_format_available("Clipboard Viewer Ignore")
+            || clipboard_history_opted_out(),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1647,11 +1676,18 @@ fn should_relay_capture(relay_enabled: bool, remote_client: bool, app_ignored: b
 
 /// Whether a sensitive-tagged capture should be dropped instead of stored.
 ///
-/// The marker is about the *content*, not the process that last wrote it.
-/// A remote viewer that forwards KeePass still carries the tag, and skipping
-/// it stored passwords that Settings said would not be saved (SBS-1000).
-fn should_skip_sensitive_capture(skip_sensitive: bool, sensitive: bool) -> bool {
-    skip_sensitive && sensitive
+/// An owner-set marker describes the content, so it is honored wherever the
+/// content came from: KeePass forwarded through a remote viewer must not be
+/// stored when Settings says it will not be (SBS-1000). A viewer's blanket
+/// monitor-exclusion tag describes the viewer, not the content, so it is
+/// honored from a local application and ignored from a recognized remote
+/// client — otherwise every remote-session copy disappears (SBS-781).
+fn should_skip_sensitive_capture(
+    skip_sensitive: bool,
+    markers: SensitiveMarkers,
+    remote_client: bool,
+) -> bool {
+    skip_sensitive && (markers.content_owner || (markers.monitor_exclusion && !remote_client))
 }
 
 /// Outcome of the skip-likely-secrets capture gate.
@@ -1950,7 +1986,7 @@ async fn process_clipboard_snapshot(
 
     let materialize_ms = snapshot.materialize_ms;
     let sequence = snapshot.sequence;
-    let sensitive = snapshot.sensitive;
+    let markers = snapshot.sensitive;
     let source_app_info = resolve_source_app_info(snapshot.source_app_identity);
     let captured_formats = snapshot.formats;
     let (clip_type, clip_content, clip_preview, _primary_hash, full_image_content, metadata) =
@@ -2086,9 +2122,9 @@ async fn process_clipboard_snapshot(
 
     // Storage and relay both honor skip gates first. Relaying before skip
     // emptied the clipboard and republished text/html/rtf only, which stripped
-    // do-not-retain markers and Office private formats (SBS-1001). A tagged
-    // copy is never rewritten.
-    if should_skip_sensitive_capture(settings.skip_sensitive, sensitive) {
+    // do-not-retain markers and Office private formats (SBS-1001). Content the
+    // owning application tagged is never rewritten.
+    if should_skip_sensitive_capture(settings.skip_sensitive, markers, remote_client) {
         log::info!("CLIPBOARD: Skipping content the source app marked as sensitive");
         discard_clear_target();
         return;
@@ -2121,14 +2157,24 @@ async fn process_clipboard_snapshot(
         return;
     }
 
-    if should_relay_capture(settings.remote_clipboard_relay, remote_client, false) && !sensitive {
+    // `false` for app_ignored: the ignored-application return above already
+    // ran, so nothing ignored reaches here.
+    //
+    // An owner-marked copy is never republished — the rewrite carries only
+    // text/html/rtf plus the monitor-exclusion tag, so relaying KeePass would
+    // strip the very marker that protects it (SBS-1001). A viewer's blanket
+    // tag is re-applied on the way out, which is what keeps remote-session
+    // copies flowing (SBS-781).
+    if should_relay_capture(settings.remote_clipboard_relay, remote_client, false)
+        && !markers.content_owner
+    {
         relay_remote_capture(
             clip_type,
             &clip_content,
             full_image_content.as_deref(),
             &captured_formats,
             &clip_hash,
-            sensitive,
+            markers.any(),
         );
     }
 
@@ -3310,9 +3356,9 @@ mod tests {
         is_remote_client_owner, is_remote_client_process, likely_secret_decision,
         next_listener_backoff, relayed_clip_hash, rgba_to_cf_dib, set_ignore_hash,
         should_forget_recent_capture, should_relay_capture, should_skip_sensitive_capture,
-        CapturedContent, CapturedFormat, LikelySecretDecision, CAPTURE_STATE_LISTENING,
-        CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED, CLIPBOARD_CLEAR_FORGET_WINDOW,
-        IGNORE_HASH, IGNORE_HASH_TTL,
+        CapturedContent, CapturedFormat, LikelySecretDecision, SensitiveMarkers,
+        CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED,
+        CLIPBOARD_CLEAR_FORGET_WINDOW, IGNORE_HASH, IGNORE_HASH_TTL,
     };
     use std::time::{Duration, Instant};
 
@@ -3593,8 +3639,24 @@ mod tests {
             is_remote_client_owner(Some("ncplayer.exe"), false),
             false
         ));
-        assert!(should_skip_sensitive_capture(true, true));
+        // ...and its blanket tag is still honored, because it is not remote.
+        assert!(should_skip_sensitive_capture(
+            true,
+            MONITOR_EXCLUSION,
+            is_remote_client_owner(Some("ncplayer.exe"), false)
+        ));
     }
+
+    /// The viewer's own blanket tag.
+    const MONITOR_EXCLUSION: SensitiveMarkers = SensitiveMarkers {
+        monitor_exclusion: true,
+        content_owner: false,
+    };
+    /// What KeePass and friends set about content they own.
+    const OWNER_MARKED: SensitiveMarkers = SensitiveMarkers {
+        monitor_exclusion: false,
+        content_owner: true,
+    };
 
     #[cfg(target_os = "windows")]
     #[test]
@@ -3607,22 +3669,59 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_clients_sensitive_marker_still_suppresses_storage() {
-        // KeePass via mstsc still carries the do-not-retain tag. Treating a
-        // remote owner as a reason to ignore it stored passwords that Settings
-        // said would not be saved (SBS-1000).
-        assert!(should_skip_sensitive_capture(true, true));
+    fn a_remote_viewers_blanket_tag_never_suppresses_storage() {
+        // The viewer tags everything it forwards, so honoring it dropped every
+        // remote-session copy and left a hole in history (SBS-781). Remote
+        // clips going missing is the bug, not the fix.
+        assert!(!should_skip_sensitive_capture(
+            true,
+            MONITOR_EXCLUSION,
+            true
+        ));
+    }
+
+    #[test]
+    fn an_owner_marker_suppresses_storage_even_over_a_remote_session() {
+        // KeePass through mstsc forwards its own Clipboard Viewer Ignore tag.
+        // That one describes the content, so a remote owner is no reason to
+        // store a password Settings said would not be saved (SBS-1000).
+        assert!(should_skip_sensitive_capture(true, OWNER_MARKED, true));
+        assert!(should_skip_sensitive_capture(true, OWNER_MARKED, false));
     }
 
     #[test]
     fn a_local_apps_sensitive_marker_still_suppresses_storage() {
-        assert!(should_skip_sensitive_capture(true, true));
+        // The whole point of scoping the bypass: a password manager sets this
+        // deliberately, about content it owns, and must keep being honored.
+        assert!(should_skip_sensitive_capture(
+            true,
+            MONITOR_EXCLUSION,
+            false
+        ));
     }
 
     #[test]
     fn untagged_content_and_the_disabled_setting_never_skip() {
-        assert!(!should_skip_sensitive_capture(true, false));
-        assert!(!should_skip_sensitive_capture(false, true));
+        assert!(!should_skip_sensitive_capture(
+            true,
+            SensitiveMarkers::default(),
+            false
+        ));
+        assert!(!should_skip_sensitive_capture(false, OWNER_MARKED, false));
+        assert!(!should_skip_sensitive_capture(
+            false,
+            MONITOR_EXCLUSION,
+            true
+        ));
+    }
+
+    #[test]
+    fn any_reports_every_marker_so_a_rewrite_never_drops_the_tag() {
+        // relay_remote_capture re-applies the marker from `any()`. A viewer's
+        // tag that reported false here would republish tagged content untagged.
+        assert!(MONITOR_EXCLUSION.any());
+        assert!(OWNER_MARKED.any());
+        assert!(!SensitiveMarkers::default().any());
     }
 
     /// SBS-922: Skip likely secrets must refuse a 9 KiB paste that starts
