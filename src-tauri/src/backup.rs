@@ -28,6 +28,7 @@
 //! The magic doubles as the AEAD's associated data, so a bundle whose header
 //! was edited fails to decrypt rather than being parsed as something else.
 
+use crate::backup_import_optional::{encrypt_imported_optionals, OptionalImportPlaintexts};
 use crate::database::Database;
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -834,8 +835,25 @@ pub async fn import_backup(
                 continue;
             }
         };
-        let encrypt_optional =
-            |value: Option<&str>| db.crypto.encrypt_optional_text(value).ok().flatten();
+        // Optional fields are three-state: absent, encrypted, or failed.
+        // Collapsing fail into None stored SQL NULL for notes/source/OCR and
+        // still marked OCR completed from the bundle (SBS-980).
+        let optionals = match encrypt_imported_optionals(
+            |value| db.crypto.encrypt_optional_text(value),
+            OptionalImportPlaintexts {
+                source_app: clip.source_app.as_deref(),
+                source_icon: clip.source_icon.as_deref(),
+                metadata: clip.metadata.as_deref(),
+                ocr_text: clip.ocr_text.as_deref(),
+                notes: clip.notes.as_deref(),
+            },
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                result.errors.push(error);
+                continue;
+            }
+        };
 
         let new_uuid = Uuid::new_v4().to_string();
         // Persist the original before the row exists. A clip that lands without
@@ -863,12 +881,6 @@ pub async fn import_backup(
         } else {
             clip.created_at.clone()
         };
-        let ocr_status = if clip.ocr_text.is_some() {
-            Some("completed")
-        } else {
-            None
-        };
-
         let insert = sqlx::query(
             r#"
             INSERT INTO clips (
@@ -886,11 +898,11 @@ pub async fn import_backup(
         .bind(&encrypted_preview)
         .bind(&content_hash)
         .bind(folder_id)
-        .bind(encrypt_optional(clip.source_app.as_deref()))
-        .bind(encrypt_optional(clip.source_icon.as_deref()))
-        .bind(encrypt_optional(clip.metadata.as_deref()))
-        .bind(encrypt_optional(clip.ocr_text.as_deref()))
-        .bind(ocr_status)
+        .bind(optionals.source_app)
+        .bind(optionals.source_icon)
+        .bind(optionals.metadata)
+        .bind(optionals.ocr_text)
+        .bind(optionals.ocr_status)
         .bind(full_image_expired)
         .bind(&clip.created_at)
         .bind(&last_accessed)
@@ -900,7 +912,7 @@ pub async fn import_backup(
         // undo the protection on every round trip.
         .bind(i64::from(clip.is_hidden))
         // Encrypted on the way back in, like every other text column.
-        .bind(encrypt_optional(clip.notes.as_deref()))
+        .bind(optionals.notes)
         .execute(&db.pool)
         .await;
 
@@ -1028,13 +1040,17 @@ mod tests {
     }
 
     async fn test_database() -> Database {
+        test_database_with(crate::crypto::CryptoManager::ephemeral()).await
+    }
+
+    async fn test_database_with(crypto: crate::crypto::CryptoManager) -> Database {
         let database = Database {
             pool: sqlx::sqlite::SqlitePoolOptions::new()
                 .max_connections(1)
                 .connect("sqlite::memory:")
                 .await
                 .expect("in-memory database should open"),
-            crypto: std::sync::Arc::new(crate::crypto::CryptoManager::ephemeral()),
+            crypto: std::sync::Arc::new(crypto),
             image_dir: std::env::temp_dir().join(format!("cubby-backup-{}", Uuid::new_v4())),
             search_index: std::sync::Arc::new(crate::search_index::SearchIndex::default()),
         };
@@ -1209,6 +1225,49 @@ mod tests {
             raw.iter().flatten().all(|value| !value.contains("staging")),
             "the restored note must be encrypted at rest"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// SBS-980: optional-field encrypt failure must skip the clip. Storing it
+    /// with NULL notes/source/OCR and ocr_status = completed loses the note
+    /// and permanently skips the OCR queue.
+    #[tokio::test]
+    async fn optional_encrypt_error_skips_the_clip_and_does_not_mark_ocr_completed() {
+        let source = test_database().await;
+        insert_rich_clip(&source, "sbs-980-keep-note").await;
+
+        let path = temp_path("sbs-980");
+        export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .unwrap();
+
+        let target =
+            test_database_with(crate::crypto::CryptoManager::ephemeral_failing_optional_encrypt())
+                .await;
+        let result = import_backup(&target, path.to_str().unwrap(), "correct horse", false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.imported, 0, "the clip must not count as imported");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("encrypt failed")),
+            "the import must report the encrypt error, not succeed: {:?}",
+            result.errors
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM clips")
+            .fetch_one(&target.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "the clip must not be inserted");
+        let completed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM clips WHERE ocr_status = 'completed'")
+                .fetch_one(&target.pool)
+                .await
+                .unwrap();
+        assert_eq!(completed, 0, "OCR must not be marked completed");
         let _ = std::fs::remove_file(&path);
     }
 
