@@ -2430,7 +2430,9 @@ pub(crate) async fn enforce_retention_in_pool(
     // Images aged out by the keep-for window / overflow cap that still carry
     // OCR text. These are preserved (blob dropped, row + thumbnail + text kept),
     // not deleted. `full_image_expired = 0` keeps already-preserved clips out of
-    // this set so they're processed at most once.
+    // this set so they're processed at most once. Age uses last_accessed so a
+    // just-imported live original is not swept by the dest keep-for window
+    // while created_at (the visible history date) stays the source date.
     let preserve_query = r#"
         SELECT uuid FROM clips
         WHERE is_pinned = 0
@@ -2440,7 +2442,7 @@ pub(crate) async fn enforce_retention_in_pool(
           AND ocr_status = 'completed'
           AND ocr_text IS NOT NULL
           AND (
-              (? > 0 AND created_at < datetime('now', '-' || ? || ' days'))
+              (? > 0 AND last_accessed < datetime('now', '-' || ? || ' days'))
               OR (? > 0 AND uuid IN (
                   SELECT uuid FROM clips
                   WHERE is_deleted = 0 AND is_pinned = 0
@@ -2459,7 +2461,7 @@ pub(crate) async fn enforce_retention_in_pool(
         WHERE is_pinned = 0 AND (
             is_deleted = 1
             OR (full_image_expired = 0 AND (
-                (? > 0 AND created_at < datetime('now', '-' || ? || ' days'))
+                (? > 0 AND CASE WHEN clip_type = 'image' THEN last_accessed ELSE created_at END < datetime('now', '-' || ? || ' days'))
                 OR (? > 0 AND uuid IN (
                     SELECT uuid FROM clips
                     WHERE is_deleted = 0 AND is_pinned = 0
@@ -5473,8 +5475,9 @@ mod tests {
             r#"
             INSERT INTO clips
                 (uuid, clip_type, content, text_preview, content_hash, is_pinned,
-                 ocr_status, ocr_text, created_at)
+                 ocr_status, ocr_text, created_at, last_accessed)
             VALUES (?, 'image', x'89504e47', '[Image]', ?, ?, ?, ?,
+                    datetime('now', '-' || ? || ' days'),
                     datetime('now', '-' || ? || ' days'))
             "#,
         )
@@ -5483,6 +5486,7 @@ mod tests {
         .bind(is_pinned)
         .bind(ocr_status)
         .bind(ocr_text)
+        .bind(age_days)
         .bind(age_days)
         .execute(&database.pool)
         .await
