@@ -19,6 +19,7 @@ import { shortcutsSuspended } from '../utils/flyoutSearch';
 import { ClipDetails } from '../utils/clipPreviewState';
 import { customRange, DATE_PRESET_LABELS, DatePreset, presetRange } from '../utils/dateRange';
 import { folderSelectionAfterReload } from '../utils/folderSelection';
+import { clipListPageArgs } from '../utils/clipListPage';
 import {
   clipLoadAnnouncesSuccess,
   clipLoadFailure,
@@ -147,7 +148,7 @@ export function HistoryWindow() {
   const loadClips = useCallback(
     async (append: boolean): Promise<ClipLoadResult> => {
       const loadId = ++loadIdRef.current;
-      const offset = append ? clipsRef.current.length : 0;
+      const page = clipListPageArgs(clipsRef.current, append, PAGE_SIZE);
       const query = searchQuery.trim();
       const filterKey = JSON.stringify([
         selectedFolder,
@@ -168,8 +169,7 @@ export function HistoryWindow() {
               // while the box still looks like it holds a real query.
               query,
               filterId: selectedFolder,
-              limit: PAGE_SIZE,
-              offset,
+              ...page,
               previewOnly: true,
               contentFilter,
               dateFrom,
@@ -178,8 +178,7 @@ export function HistoryWindow() {
             })
           : await invoke<ClipboardItem[]>('get_clips', {
               filterId: selectedFolder,
-              limit: PAGE_SIZE,
-              offset,
+              ...page,
               previewOnly: true,
               contentFilter,
               dateFrom,
