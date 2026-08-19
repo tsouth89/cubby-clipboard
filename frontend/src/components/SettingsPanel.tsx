@@ -335,6 +335,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   // Which passphrase prompt is open, if any.
   const [backupPrompt, setBackupPrompt] = useState<'export' | 'import' | null>(null);
   const [backupPassphrase, setBackupPassphrase] = useState('');
+  const [backupPassphraseConfirm, setBackupPassphraseConfirm] = useState('');
   const [ocrStatus, setOcrStatus] = useState<OcrQueueStatus | null>(null);
   const [ocrActionBusy, setOcrActionBusy] = useState(false);
   const [storageUsage, setStorageUsage] = useState<StorageUsage | null>(null);
@@ -580,6 +581,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   const closeBackupPrompt = () => {
     setBackupPrompt(null);
     setBackupPassphrase('');
+    setBackupPassphraseConfirm('');
   };
 
   const handleExportBackup = async (passphrase: string) => {
@@ -891,13 +893,35 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
               placeholder="Passphrase"
               className="mt-3 w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm outline-none focus:border-primary"
             />
+            {backupPrompt === 'export' && (
+              <>
+                <input
+                  type="password"
+                  value={backupPassphraseConfirm}
+                  onChange={(event) => setBackupPassphraseConfirm(event.target.value)}
+                  placeholder="Confirm passphrase"
+                  className="mt-2 w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm outline-none focus:border-primary"
+                />
+                <p className="mt-2 text-[11px] text-muted-foreground">
+                  Use at least 12 characters. Cubby cannot recover a lost passphrase.
+                </p>
+              </>
+            )}
             <div className="mt-4 flex justify-end gap-2">
               <button type="button" onClick={closeBackupPrompt} className={ghostButton}>
                 {t('common.cancel')}
               </button>
               <button
                 type="submit"
-                disabled={backupPassphrase.length === 0}
+                disabled={
+                  backupPrompt === 'export'
+                    ? // Count characters, not UTF-16 units: the backend floor is
+                      // chars().count(), so .length would pass an 11-character
+                      // passphrase with one emoji and then be refused there.
+                      [...backupPassphrase].length < 12 ||
+                      backupPassphrase !== backupPassphraseConfirm
+                    : backupPassphrase.length === 0
+                }
                 className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
               >
                 {backupPrompt === 'export' ? 'Choose location…' : 'Choose file…'}

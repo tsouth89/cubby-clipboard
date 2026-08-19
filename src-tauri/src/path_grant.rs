@@ -377,7 +377,7 @@ mod tests {
         let path_str = path.to_string_lossy().to_string();
         grant_picker_path(PathGrantPurpose::BackupSave, path_str.clone()).unwrap();
 
-        let count = export_granted_backup(&db, path_str.clone(), "passphrase".into())
+        let count = export_granted_backup(&db, path_str.clone(), "correct horse".into())
             .await
             .expect("export_backup must accept a granted save path");
         assert_eq!(count, 1);
