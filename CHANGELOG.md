@@ -2,6 +2,11 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
+## Unreleased
+
+### Fixed
+- Portable first-run can install `storage.key` on FAT/exFAT: CreateHardLinkW is NTFS-only, and the previous hard-link-only install deleted the temp key and panicked (SBS-908)
+
 ## v1.3.2
 
 ### Security
