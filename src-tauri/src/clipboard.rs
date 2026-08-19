@@ -2418,7 +2418,10 @@ async fn process_clipboard_snapshot(
                                 .bind(&clip_uuid)
                                 .execute(pool)
                                 .await;
-                            remove_full_image_file(&file_path);
+                            crate::managed_image::remove_clip_image_files(
+                                &db.image_dir,
+                                vec![file_path],
+                            );
                             return;
                         }
                     }
@@ -2979,14 +2982,6 @@ pub fn read_full_image_file(
 ) -> Result<Vec<u8>, String> {
     let encrypted = std::fs::read(file_path).map_err(|e| e.to_string())?;
     crypto.decrypt(&encrypted)
-}
-
-pub fn remove_full_image_file(file_path: &str) {
-    if let Err(e) = std::fs::remove_file(file_path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            log::warn!("Failed to delete a stored clipboard image: {}", e);
-        }
-    }
 }
 
 #[cfg(target_os = "windows")]

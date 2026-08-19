@@ -924,7 +924,7 @@ pub async fn import_backup(
                                 "BACKUP: failed to roll back clip {new_uuid} after image index error: {cleanup}"
                             );
                         } else {
-                            remove_imported_original(&file_path);
+                            remove_imported_original(&db.image_dir, &file_path);
                         }
                         result.errors.push(error);
                         continue;
@@ -934,7 +934,7 @@ pub async fn import_backup(
             }
             Err(error) => {
                 if let Some(file_path) = restored_original {
-                    remove_imported_original(&file_path);
+                    remove_imported_original(&db.image_dir, &file_path);
                 }
                 result.errors.push(format!("insert failed: {error}"));
             }
@@ -1010,8 +1010,8 @@ async fn index_imported_original(
     .map_err(|error| format!("Could not index a restored screenshot original: {error}"))
 }
 
-fn remove_imported_original(file_path: &str) {
-    crate::clipboard::remove_full_image_file(file_path);
+fn remove_imported_original(image_dir: &std::path::Path, file_path: &str) {
+    crate::managed_image::remove_clip_image_files(image_dir, vec![file_path.to_string()]);
 }
 
 #[cfg(test)]

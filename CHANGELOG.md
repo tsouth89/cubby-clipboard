@@ -5,6 +5,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 ## Unreleased
 
 ### Security
+- Content-hash dedup no longer deletes a file named by `clip_images.file_path` unless it sits in the managed image directory, matching the other delete paths (SBS-987)
 - Search no longer ships full decrypted clip bodies on every keystroke; flyout and History search rows use the same preview-only contract as the list (SBS-912)
 
 ### Fixed
