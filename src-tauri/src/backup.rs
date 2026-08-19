@@ -470,7 +470,9 @@ async fn attach_export_formats(
                 content_b64: BASE64.encode(bytes),
             }),
             Err(error) => {
-                log::warn!("BACKUP: clip {uuid} auxiliary format {name} could not be decrypted: {error}");
+                log::warn!(
+                    "BACKUP: clip {uuid} auxiliary format {name} could not be decrypted: {error}"
+                );
                 return Err(vec!["formats"]);
             }
         }
@@ -489,15 +491,13 @@ async fn persist_imported_formats(
             .crypto
             .encrypt(bytes)
             .map_err(|error| format!("Could not encrypt restored clip format {name}: {error}"))?;
-        sqlx::query(
-            "INSERT INTO clip_formats (clip_uuid, format, content) VALUES (?, ?, ?)",
-        )
-        .bind(uuid)
-        .bind(name)
-        .bind(encrypted)
-        .execute(&db.pool)
-        .await
-        .map_err(|error| format!("Could not restore clip format {name}: {error}"))?;
+        sqlx::query("INSERT INTO clip_formats (clip_uuid, format, content) VALUES (?, ?, ?)")
+            .bind(uuid)
+            .bind(name)
+            .bind(encrypted)
+            .execute(&db.pool)
+            .await
+            .map_err(|error| format!("Could not restore clip format {name}: {error}"))?;
     }
     Ok(())
 }
@@ -1001,11 +1001,11 @@ pub async fn import_backup(
 
         match insert {
             Ok(_) => {
-                if let Some(file_path) = restored_original {
+                if let Some(file_path) = restored_original.as_ref() {
                     if let Err(error) = index_imported_original(
                         db,
                         &new_uuid,
-                        &file_path,
+                        file_path,
                         full_image.as_ref().map(Vec::len).unwrap_or(0) as i64,
                     )
                     .await
@@ -1019,14 +1019,13 @@ pub async fn import_backup(
                                 "BACKUP: failed to roll back clip {new_uuid} after image index error: {cleanup}"
                             );
                         } else {
-                            remove_imported_original(&file_path);
+                            remove_imported_original(file_path);
                         }
                         result.errors.push(error);
                         continue;
                     }
                 }
-                if let Err(error) =
-                    persist_imported_formats(db, &new_uuid, &decoded_formats).await
+                if let Err(error) = persist_imported_formats(db, &new_uuid, &decoded_formats).await
                 {
                     if let Err(cleanup) = sqlx::query("DELETE FROM clips WHERE uuid = ?")
                         .bind(&new_uuid)
@@ -1036,8 +1035,8 @@ pub async fn import_backup(
                         log::error!(
                             "BACKUP: failed to roll back clip {new_uuid} after format insert error: {cleanup}"
                         );
-                    } else if let Some(file_path) = restored_original {
-                        remove_imported_original(&file_path);
+                    } else if let Some(file_path) = restored_original.as_ref() {
+                        remove_imported_original(file_path);
                     }
                     result.errors.push(error);
                     continue;
@@ -1045,8 +1044,8 @@ pub async fn import_backup(
                 result.imported += 1;
             }
             Err(error) => {
-                if let Some(file_path) = restored_original {
-                    remove_imported_original(&file_path);
+                if let Some(file_path) = restored_original.as_ref() {
+                    remove_imported_original(file_path);
                 }
                 result.errors.push(format!("insert failed: {error}"));
             }
