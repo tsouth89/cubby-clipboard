@@ -2590,6 +2590,7 @@ pub(crate) fn remove_clip_image_files(image_dir: &std::path::Path, image_paths: 
 pub async fn clear_unpinned_clips(db: tauri::State<'_, Arc<Database>>) -> Result<u64, String> {
     let (deleted, image_paths) = clear_clips_in_pool(&db.pool, true).await?;
     remove_clip_image_files(&db.image_dir, image_paths);
+    crate::clipboard::reset_capture_dedup();
     if deleted > 0 {
         db.search_index.invalidate();
     }
