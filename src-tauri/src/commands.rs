@@ -3986,9 +3986,11 @@ mod tests {
     }
 
     /// Search path for SBS-912. A >2 KB dump with a unique suffix must not
-    /// appear in `search_clips` content when preview_only is true or omitted.
-    /// Full body stays on get_clip_details. Do not fold this into the
-    /// get_clips test above; that path was SBS-829.
+    /// appear in `search_clips` content, including when a caller explicitly
+    /// asks for `previewOnly: false` — search has no caller that needs a body,
+    /// and honoring that opt-out is the leak. Full body stays on
+    /// get_clip_details. Do not fold this into the get_clips test above; that
+    /// path was SBS-829.
     #[tokio::test]
     async fn preview_only_search_withholds_full_text() {
         let database = test_database().await;
@@ -4029,7 +4031,8 @@ mod tests {
         )
         .await;
 
-        for requested in [Some(true), None] {
+        // Some(false) is in the loop on purpose: search ignores the opt-out.
+        for requested in [Some(true), None, Some(false)] {
             let found = search_clips_in_database(
                 "copied log line".into(),
                 None,
@@ -4078,26 +4081,12 @@ mod tests {
             );
         }
 
-        let full = search_clips_in_database(
-            "copied log line".into(),
-            None,
-            10,
-            0,
-            Some(false),
-            None,
-            None,
-            None,
-            None,
-            &database,
-        )
-        .await
-        .unwrap();
-        let dump_full = full
-            .iter()
-            .find(|item| item.id == "dump")
-            .expect("the text dump should be a search hit");
-        assert_eq!(dump_full.content, full_body);
-        assert!(dump_full.content.contains(secret));
+        // The full body has exactly one path, and it is not search.
+        let details = get_clip_details_in_database(&database, "dump")
+            .await
+            .expect("details should return the full body");
+        assert_eq!(details.content, full_body);
+        assert!(details.content.contains(secret));
 
         toggle_clip_hidden_in_pool(&database.pool, "dump")
             .await

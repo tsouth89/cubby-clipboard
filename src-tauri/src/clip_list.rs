@@ -48,12 +48,18 @@ pub fn list_item_notes(notes: Option<&str>, is_hidden: bool) -> Option<String> {
     }
 }
 
-/// Search IPC `preview_only`. Flyout and History are the only callers, and
-/// both are list UIs, so a missing flag withholds the body. `get_clips` still
-/// defaults the other way for back-compat; a forgotten `previewOnly` on a
-/// keystroke path must not resurrect the SBS-912 leak.
-pub fn resolve_search_preview_only(preview_only: Option<bool>) -> bool {
-    preview_only.unwrap_or(true)
+/// Search IPC `preview_only`. Always true.
+///
+/// Flyout and History are the only callers and both are list UIs, so no search
+/// result ever needs a body. The argument stays so an existing caller that
+/// still sends `previewOnly` keeps working, but `Some(false)` is ignored rather
+/// than honored: any webview caller (DevTools, an injected script, a future
+/// caller that copies the wrong example) could otherwise put a full page of
+/// decrypted secrets in renderer memory, which is the SBS-912 leak. The
+/// one-id full-body path is `get_clip_details`; `get_clips` keeps its own
+/// back-compat default.
+pub fn resolve_search_preview_only(_preview_only: Option<bool>) -> bool {
+    true
 }
 
 /// Details/reveal always ships the full decrypted payload (or the surviving
@@ -149,7 +155,7 @@ mod tests {
         let body = dump_body();
         assert!(body.len() > 2000);
 
-        for requested in [Some(true), None] {
+        for requested in [Some(true), None, Some(false)] {
             let preview_only = resolve_search_preview_only(requested);
             let content = list_item_content("text", body.as_bytes(), preview_only, false);
             assert!(
@@ -165,14 +171,19 @@ mod tests {
             assert!(!preview.contains(SECRET));
         }
 
-        let full = list_item_content(
+        // Explicitly asking for full bodies does not get them. Search has no
+        // caller that needs one, and honoring the opt-out is the leak.
+        let opted_out = list_item_content(
             "text",
             body.as_bytes(),
             resolve_search_preview_only(Some(false)),
             false,
         );
-        assert_eq!(full, body);
-        assert!(full.contains(SECRET));
+        assert!(
+            opted_out.is_empty(),
+            "search must withhold the body even when previewOnly: false is requested"
+        );
+        assert!(!opted_out.contains(SECRET));
 
         let thumb = b"thumb-png-bytes";
         let image = list_item_content("image", thumb, resolve_search_preview_only(None), false);
