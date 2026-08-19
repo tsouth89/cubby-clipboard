@@ -82,6 +82,9 @@ impl Database {
             encryption_version.as_deref() != Some("1"),
         )?);
 
+        let _ = std::fs::create_dir_all(&image_dir);
+        Self::sweep_stale_image_temps(&image_dir);
+
         Ok((
             Self {
                 pool,
@@ -91,6 +94,31 @@ impl Database {
             },
             notices,
         ))
+    }
+
+    /// Staging writes `{uuid}.cubby.tmp` and only `StagedImageFile::drop` removes
+    /// it. A crash between the write and that drop leaves the encrypted original
+    /// on disk forever — including through Clear all history, which only deletes
+    /// paths recorded in `clip_images` (SBS-998).
+    fn sweep_stale_image_temps(image_dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(image_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !name.ends_with(".cubby.tmp") {
+                continue;
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => log::info!("IMAGE: removed leftover staging file {}", path.display()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => log::warn!(
+                    "IMAGE: could not remove leftover staging file {}: {error}",
+                    path.display()
+                ),
+            }
+        }
     }
 
     /// Collapse duplicate `content_hash` rows and make the constraint
@@ -2041,6 +2069,22 @@ mod tests {
             !temporary.exists(),
             "a failed copy must not leave partial backup bytes behind"
         );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn leftover_image_temps_are_removed_on_open() {
+        let directory = temp_dir();
+        let stale = directory.join("abc.cubby.tmp");
+        let keep = directory.join("abc.cubby");
+        std::fs::write(&stale, b"orphaned staging bytes").unwrap();
+        std::fs::write(&keep, b"live original").unwrap();
+        Database::sweep_stale_image_temps(&directory);
+        assert!(
+            !stale.exists(),
+            "a crash-left staging file must not survive"
+        );
+        assert!(keep.exists(), "committed originals must be left alone");
         let _ = std::fs::remove_dir_all(directory);
     }
 
