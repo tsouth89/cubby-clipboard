@@ -2600,6 +2600,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
+    /// SBS-929: the healthy path still has one thing to say. A refresh that
+    /// cannot write a copy is best-effort for capture, but the user must be
+    /// able to find out that the recovery copy is not current.
+    ///
+    /// The fixture is a database file that is gone by the time the refresh
+    /// opens it — the file-level failure a full disk or a revoked permission
+    /// produces at the same point. `apply_database_health` is called with
+    /// `Healthy` directly, which is the arm under test.
+    #[tokio::test]
+    async fn healthy_path_reports_a_failed_backup_refresh() {
+        let directory = temp_dir();
+        let database_path = directory.join("cubby.db");
+        assert!(
+            !database_path.exists(),
+            "the refresh must be the thing that fails, not the health check"
+        );
+
+        let notices = apply_database_health(&database_path, DatabaseHealth::Healthy)
+            .await
+            .expect("a failed backup refresh must not block startup");
+        assert_has_notice(
+            &notices,
+            log::Level::Warn,
+            "Could not refresh history backup",
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// SBS-929: `Database::new` must hand its caller the lines
+    /// `prepare_database_file` produced. Dropping that vec on the `Ok` tuple
+    /// is exactly the silent-startup bug, and every other test in this file
+    /// calls `prepare_database_file` directly, so nothing else would catch it.
+    #[tokio::test]
+    async fn database_new_returns_the_prepare_notices() {
+        let directory = temp_dir();
+        let database_path = directory.join("cubby.db");
+        std::fs::write(&database_path, b"this is not a sqlite database").unwrap();
+
+        let (_database, notices) = Database::new(database_path.to_str().unwrap())
+            .await
+            .expect("a quarantined history should still open a fresh database");
+        assert_has_notice(&notices, log::Level::Error, "quarantining");
+        assert_has_notice(&notices, log::Level::Warn, "empty history");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
     /// SBS-929: the leftover migrate `log::info!` for file-reference rows
     /// must come back as a collectable notice.
     #[tokio::test]
