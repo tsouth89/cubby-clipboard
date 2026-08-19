@@ -347,24 +347,53 @@ enum ClipboardListenerEvent {
     },
 }
 
-/// Returns true when the current clipboard contents are tagged with the
-/// well-known `ExcludeClipboardContentFromMonitorProcessing` format. Password
-/// managers and other secret-holding apps set this so clipboard history tools
-/// skip the copy. Its mere presence means "do not retain"; reading it does not
-/// require opening the clipboard, so this is cheap and contention-free.
+/// Returns true when the current clipboard contents are tagged so clipboard
+/// history tools should skip them.
+///
+/// Windows history honours three well-known formats (SBS-1002):
+/// - `ExcludeClipboardContentFromMonitorProcessing` — presence means skip
+/// - `Clipboard Viewer Ignore` — the KeePass 2.x convention
+/// - `CanIncludeInClipboardHistory` — a DWORD of 0 means skip
+///
+/// Presence checks do not require opening the clipboard. The DWORD is
+/// best-effort: if the format is present but unreadable, we do not skip.
 #[cfg(target_os = "windows")]
 fn clipboard_marked_sensitive() -> bool {
+    clipboard_format_available("ExcludeClipboardContentFromMonitorProcessing")
+        || clipboard_format_available("Clipboard Viewer Ignore")
+        || clipboard_history_opted_out()
+}
+
+#[cfg(target_os = "windows")]
+fn clipboard_format_available(name: &str) -> bool {
     use windows::core::PCWSTR;
     use windows::Win32::System::DataExchange::{
         IsClipboardFormatAvailable, RegisterClipboardFormatW,
     };
 
-    let name: Vec<u16> = "ExcludeClipboardContentFromMonitorProcessing"
+    let utf16: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let format = unsafe { RegisterClipboardFormatW(PCWSTR(utf16.as_ptr())) };
+    format != 0 && unsafe { IsClipboardFormatAvailable(format) }.is_ok()
+}
+
+#[cfg(target_os = "windows")]
+fn clipboard_history_opted_out() -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+
+    let utf16: Vec<u16> = "CanIncludeInClipboardHistory"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
-    let format = unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) };
-    format != 0 && unsafe { IsClipboardFormatAvailable(format) }.is_ok()
+    let format = unsafe { RegisterClipboardFormatW(PCWSTR(utf16.as_ptr())) };
+    if format == 0 || !clipboard_format_available("CanIncludeInClipboardHistory") {
+        return false;
+    }
+    let mut buffer = [0_u8; 4];
+    match clipboard_win::raw::get(format, &mut buffer) {
+        Ok(written) if written >= 4 => u32::from_le_bytes(buffer) == 0,
+        _ => false,
+    }
 }
 
 pub(crate) struct CapturedFormat {
@@ -1610,18 +1639,11 @@ fn should_relay_capture(relay_enabled: bool, remote_client: bool, app_ignored: b
 
 /// Whether a sensitive-tagged capture should be dropped instead of stored.
 ///
-/// A remote client tags everything it forwards, because it cannot know what the
-/// far-end application meant. Honoring that dropped every remote-session copy
-/// and left a hole in history that reads as lost data (SBS-781), so a
-/// recognized remote client's marker does not suppress storage. A local
-/// application's marker still does: it is set deliberately, about content that
-/// application owns.
-fn should_skip_sensitive_capture(
-    skip_sensitive: bool,
-    sensitive: bool,
-    remote_client: bool,
-) -> bool {
-    skip_sensitive && sensitive && !remote_client
+/// The marker is about the *content*, not the process that last wrote it.
+/// A remote viewer that forwards KeePass still carries the tag, and skipping
+/// it stored passwords that Settings said would not be saved (SBS-1000).
+fn should_skip_sensitive_capture(skip_sensitive: bool, sensitive: bool) -> bool {
+    skip_sensitive && sensitive
 }
 
 /// Outcome of the skip-likely-secrets capture gate.
@@ -2054,27 +2076,11 @@ async fn process_clipboard_snapshot(
                 .map(|_| "executable")
         });
 
-    // Re-announce a remote copy before the rest of capture policy runs. Relaying
-    // is clipboard transport; storing is history. Gating transport behind
-    // storage rules is what let a privacy preference silently break copy-
-    // between-sessions, and put the relay behind the whole encrypt-and-write
-    // path so a viewer could sample a stale clipboard first (SBS-781).
-    if should_relay_capture(
-        settings.remote_clipboard_relay,
-        remote_client,
-        ignored_match.is_some(),
-    ) {
-        relay_remote_capture(
-            clip_type,
-            &clip_content,
-            full_image_content.as_deref(),
-            &captured_formats,
-            &clip_hash,
-            sensitive,
-        );
-    }
-
-    if should_skip_sensitive_capture(settings.skip_sensitive, sensitive, remote_client) {
+    // Storage and relay both honor skip gates first. Relaying before skip
+    // emptied the clipboard and republished text/html/rtf only, which stripped
+    // do-not-retain markers and Office private formats (SBS-1001). A tagged
+    // copy is never rewritten.
+    if should_skip_sensitive_capture(settings.skip_sensitive, sensitive) {
         log::info!("CLIPBOARD: Skipping content the source app marked as sensitive");
         discard_clear_target();
         return;
@@ -2105,6 +2111,17 @@ async fn process_clipboard_snapshot(
         log::info!("CLIPBOARD: Ignoring content from configured application ({matched_on} match)");
         discard_clear_target();
         return;
+    }
+
+    if should_relay_capture(settings.remote_clipboard_relay, remote_client, false) && !sensitive {
+        relay_remote_capture(
+            clip_type,
+            &clip_content,
+            full_image_content.as_deref(),
+            &captured_formats,
+            &clip_hash,
+            sensitive,
+        );
     }
 
     // Only accepted content participates in consecutive duplicate suppression.
@@ -3568,11 +3585,7 @@ mod tests {
             is_remote_client_owner(Some("ncplayer.exe"), false),
             false
         ));
-        assert!(should_skip_sensitive_capture(
-            true,
-            true,
-            is_remote_client_owner(Some("ncplayer.exe"), false)
-        ));
+        assert!(should_skip_sensitive_capture(true, true));
     }
 
     #[cfg(target_os = "windows")]
@@ -3586,24 +3599,22 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_clients_sensitive_marker_does_not_suppress_storage() {
-        // The viewer tags everything it forwards, so honoring it here dropped
-        // every remote-session copy and left a hole in history (SBS-781).
-        assert!(!should_skip_sensitive_capture(true, true, true));
+    fn a_remote_clients_sensitive_marker_still_suppresses_storage() {
+        // KeePass via mstsc still carries the do-not-retain tag. Treating a
+        // remote owner as a reason to ignore it stored passwords that Settings
+        // said would not be saved (SBS-1000).
+        assert!(should_skip_sensitive_capture(true, true));
     }
 
     #[test]
     fn a_local_apps_sensitive_marker_still_suppresses_storage() {
-        // The whole point of scoping the bypass: a password manager sets this
-        // deliberately, about content it owns, and must keep being honored.
-        assert!(should_skip_sensitive_capture(true, true, false));
+        assert!(should_skip_sensitive_capture(true, true));
     }
 
     #[test]
     fn untagged_content_and_the_disabled_setting_never_skip() {
-        assert!(!should_skip_sensitive_capture(true, false, false));
-        assert!(!should_skip_sensitive_capture(false, true, false));
-        assert!(!should_skip_sensitive_capture(false, true, true));
+        assert!(!should_skip_sensitive_capture(true, false));
+        assert!(!should_skip_sensitive_capture(false, true));
     }
 
     /// SBS-922: Skip likely secrets must refuse a 9 KiB paste that starts
