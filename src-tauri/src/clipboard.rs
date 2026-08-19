@@ -1431,11 +1431,9 @@ fn capture_text(text: String) -> Option<CapturedContent> {
         return None;
     }
 
+    // Same bound as edit-in-place and Ditto import (SBS-994).
+    let preview = crate::clip_list::truncate_text_preview(&text);
     let content = text.into_bytes();
-    let preview = String::from_utf8_lossy(&content)
-        .chars()
-        .take(200)
-        .collect::<String>();
     let hash = calculate_hash(&content);
     Some(CapturedContent::Text {
         content,
@@ -3876,6 +3874,29 @@ mod tests {
     fn capture_text_ignores_only_truly_empty_content() {
         assert!(capture_text(String::new()).is_none());
         assert!(capture_text("   ".to_string()).is_some());
+    }
+
+    #[test]
+    fn capture_text_preview_uses_the_shared_limit() {
+        let secret = "UNIQUE-SBS-994-CAPTURE-TAIL-SHOULD-NOT-STORE";
+        let body = format!(
+            "{}{secret}",
+            "x".repeat(crate::clip_list::TEXT_PREVIEW_CHAR_LIMIT)
+        );
+        let captured = capture_text(body.clone()).expect("text should be captured");
+        match captured {
+            CapturedContent::Text {
+                content, preview, ..
+            } => {
+                assert_eq!(content, body.as_bytes());
+                assert_eq!(
+                    preview.chars().count(),
+                    crate::clip_list::TEXT_PREVIEW_CHAR_LIMIT
+                );
+                assert!(!preview.contains(secret));
+            }
+            CapturedContent::Image { .. } => panic!("expected text"),
+        }
     }
 
     #[test]
