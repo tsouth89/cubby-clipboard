@@ -348,12 +348,15 @@ export function HistoryWindow() {
   const clearSelection = useCallback(() => setSelection(EMPTY_SELECTION), []);
 
   /**
-   * Returns whether the list actually reloaded. loadClips reports failure
-   * rather than throwing, so callers must check this before announcing success:
-   * the rows on screen still describe the state before the bulk change.
+   * Returns the list reload's own result, not a boolean. loadClips reports
+   * failure rather than throwing, so callers must check this before announcing
+   * success: the rows on screen still describe the state before the bulk
+   * change. Collapsing this to a boolean turns `superseded` into `failed`, and
+   * a clipboard-change refresh supersedes this reload often enough that every
+   * bulk action would report an error it did not have.
    */
   const afterBulkChange = useCallback(
-    async (rowsStillApply = false) => {
+    async (rowsStillApply = false): Promise<ClipLoadResult> => {
       clearSelection();
       // Delete and move take rows out of this query. Pin does not, so a failed
       // reload must keep the still-matching list instead of wiping it.
@@ -366,7 +369,7 @@ export function HistoryWindow() {
         refreshTotalCount(),
         loadSourceApps(),
       ]);
-      return clipLoadAnnouncesSuccess(reloaded);
+      return reloaded;
     },
     [clearSelection, loadClips, loadFolders, refreshTotalCount, loadSourceApps]
   );
@@ -380,10 +383,10 @@ export function HistoryWindow() {
         ids: selectedIds,
         hardDelete: true,
       });
-      if (!(await afterBulkChange())) {
-        toast.error('Deleted, but the list could not be reloaded');
-        return;
-      }
+      // A failed reload already speaks: ClipList shows the error panel once
+      // these rows are dropped. A superseded reload belongs to a newer load.
+      // Either way this handler only withholds its success toast.
+      if (!clipLoadAnnouncesSuccess(await afterBulkChange())) return;
       toast.success(deleted === 1 ? 'Deleted 1 clip' : `Deleted ${deleted} clips`);
     } catch (error) {
       console.error('Failed to delete clips:', error);
@@ -396,10 +399,8 @@ export function HistoryWindow() {
       if (selectionCount === 0) return;
       try {
         await invoke<number>('set_clips_pinned', { ids: selectedIds, pinned });
-        if (!(await afterBulkChange(true))) {
-          toast.error('Pin state changed, but the list could not be reloaded');
-          return;
-        }
+        // Pin keeps the rows, so a failed reload shows the stale banner.
+        if (!clipLoadAnnouncesSuccess(await afterBulkChange(true))) return;
         toast.success(
           pinned ? `Pinned ${selectionCount} clips` : `Unpinned ${selectionCount} clips`
         );
@@ -416,10 +417,7 @@ export function HistoryWindow() {
       if (selectionCount === 0) return;
       try {
         await invoke<number>('move_clips_to_folder', { ids: selectedIds, folderId });
-        if (!(await afterBulkChange())) {
-          toast.error('Moved, but the list could not be reloaded');
-          return;
-        }
+        if (!clipLoadAnnouncesSuccess(await afterBulkChange())) return;
         toast.success(
           folderId
             ? `Moved ${selectionCount} clips to ${folders.find((f) => f.id === folderId)?.name ?? 'folder'}`
@@ -641,13 +639,10 @@ export function HistoryWindow() {
         forgetRevealed(clipId);
         // loadClips reports failure rather than throwing, so a stale list after
         // a failed reload would otherwise be announced as success.
-        const reloaded = await loadClips(false);
-        if (!clipLoadAnnouncesSuccess(reloaded)) {
-          if (reloaded === 'failed') {
-            toast.error('Visibility changed, but the list could not be reloaded');
-          }
-          return;
-        }
+        // Same-filter reload: a failure shows the stale banner over the rows,
+        // the way handleSaveText already relies on. A toast here would be a
+        // second channel for one failed reload.
+        if (!clipLoadAnnouncesSuccess(await loadClips(false))) return;
         toast.success(hidden ? 'Clip hidden' : 'Clip no longer hidden');
       } catch (error) {
         console.error('Failed to change clip visibility:', error);

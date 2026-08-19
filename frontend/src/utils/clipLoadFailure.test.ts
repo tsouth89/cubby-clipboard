@@ -97,6 +97,47 @@ describe('clipLoadAnnouncesSuccess', () => {
   });
 });
 
+describe('a handler that reloads the list after its own work', () => {
+  // The three bulk handlers, both handleToggleHidden implementations, and
+  // handleSaveText all follow one rule: check the result, withhold the success
+  // toast, and add nothing of their own. These cases are what that rule is for.
+
+  it('says nothing when a newer load superseded the reload', () => {
+    // History starts loadClips(false) from the clipboard-change listener
+    // whenever a new copy lands, which is common while the window is open.
+    // That newer load supersedes the bulk reload. Collapsing this to "not
+    // success" and toasting made every bulk action report a failure it did
+    // not have.
+    expect(clipLoadAnnouncesSuccess('superseded')).toBe(false);
+  });
+
+  it('leaves a failed same-filter reload to the banner', () => {
+    // Pin keeps the rows, so ClipList renders the stale banner. A handler
+    // toast on top of it is two channels for one failed reload.
+    const failure = clipLoadFailure({
+      append: false,
+      visibleRowsStillApply: true,
+      hasVisibleClips: true,
+    });
+    expect(failure.showBanner).toBe(true);
+    expect(failure.notify).toBe(false);
+    expect(clipListErrorSurface(true, 3)).toBe('banner');
+  });
+
+  it('leaves a failed delete or move reload to the empty-list panel', () => {
+    // Delete and move take rows out of the query, so the handler marks them
+    // stale first. The list empties and ClipList renders the panel.
+    const failure = clipLoadFailure({
+      append: false,
+      visibleRowsStillApply: false,
+      hasVisibleClips: true,
+    });
+    expect(failure.clearList).toBe(true);
+    expect(failure.notify).toBe(false);
+    expect(clipListErrorSurface(true, 0)).toBe('panel');
+  });
+});
+
 describe('sidecarReloadFailure', () => {
   it('keeps the last-known-good sidecar list and requires a notify', () => {
     // Folders, source apps, and the history count used to catch, log, and
