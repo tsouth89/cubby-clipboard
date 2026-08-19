@@ -2556,12 +2556,18 @@ async fn process_clipboard_clear(
         return;
     }
 
-    let restore_marker = |recent: RecentCapture| {
+    // Reports whether the marker went back. A newer capture landing while we
+    // held it means this clear no longer describes what is in history, so the
+    // caller must not retry: the retry would take that newer marker and delete
+    // a clip the user never cleared.
+    let restore_marker = |recent: RecentCapture| -> bool {
         let mut lock = LAST_ACCEPTED_CAPTURE.lock();
         // Only restore if nothing newer was captured while we held the marker.
         if lock.is_none() {
             *lock = Some(recent);
+            return true;
         }
+        false
     };
 
     let _guard = CLIPBOARD_SYNC.lock().await;
@@ -2603,8 +2609,9 @@ async fn process_clipboard_clear(
                 "CLIPBOARD: forget-on-clear skipped for sequence {sequence} (clip {}); lookup failed, so the retry marker was restored: {error}",
                 taken.uuid
             );
-            restore_marker(taken);
-            schedule_forget_retry(app, db, sequence, attempts_left);
+            if restore_marker(taken) {
+                schedule_forget_retry(app, db, sequence, attempts_left);
+            }
             return;
         }
     };
@@ -2627,8 +2634,9 @@ async fn process_clipboard_clear(
         Ok(tx) => tx,
         Err(error) => {
             log::error!("CLIPBOARD: Failed to begin clear-forget transaction: {error}");
-            restore_marker(recent);
-            schedule_forget_retry(app, db, sequence, attempts_left);
+            if restore_marker(recent) {
+                schedule_forget_retry(app, db, sequence, attempts_left);
+            }
             return;
         }
     };
@@ -2668,8 +2676,9 @@ async fn process_clipboard_clear(
                 "CLIPBOARD: Failed to forget cleared capture {}: {error}",
                 recent.uuid
             );
-            restore_marker(recent);
-            schedule_forget_retry(app, db, sequence, attempts_left);
+            if restore_marker(recent) {
+                schedule_forget_retry(app, db, sequence, attempts_left);
+            }
             return;
         }
     };
@@ -2690,8 +2699,9 @@ async fn process_clipboard_clear(
             "CLIPBOARD: Failed to commit clear-forget for {}: {error}",
             recent.uuid
         );
-        restore_marker(recent);
-        schedule_forget_retry(app, db, sequence, attempts_left);
+        if restore_marker(recent) {
+            schedule_forget_retry(app, db, sequence, attempts_left);
+        }
         return;
     }
 
