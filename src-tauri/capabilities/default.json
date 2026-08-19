@@ -26,10 +26,19 @@
           "url": "https://github.com/tsouth89/cubby-clipboard"
         },
         {
+          "url": "https://github.com/tsouth89/cubby-clipboard/*"
+        },
+        {
           "url": "https://cubbyclipboard.com"
         },
         {
-          "url": "https://cubbyclipboard.com/privacy"
+          "url": "https://cubbyclipboard.com/*"
+        },
+        {
+          "url": "https://www.cubbyclipboard.com"
+        },
+        {
+          "url": "https://www.cubbyclipboard.com/*"
         }
       ]
     }
