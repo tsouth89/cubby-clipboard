@@ -128,6 +128,12 @@ impl WinVReplacementManager {
         })
     }
 
+    /// Whether the shortcut channel bound this session. False means the helper
+    /// cannot be started at all until Cubby restarts.
+    pub fn is_available(&self) -> bool {
+        self.inner.activation_port != 0
+    }
+
     pub fn configure(&self, enabled: bool, hotkey: Option<String>) -> Result<(), String> {
         if enabled && self.inner.activation_port == 0 {
             return Err("Cubby shortcut channel is unavailable this session".to_string());
@@ -272,9 +278,20 @@ fn stop_child(child: &mut Option<Child>) {
     }
 }
 
+/// Whether a settings save must fail because Win+V replacement cannot start.
+///
+/// Only a fresh "turn it on" is worth refusing a save for. When the preference
+/// is already on from a previous session, a dead channel must not block an
+/// unrelated hotkey edit: the user would have to switch replacement off to
+/// save a hotkey, and that off value is a real preference that would then
+/// stick on the next good launch (SBS-991).
+pub fn shortcut_save_blocked(channel_available: bool, newly_enabled: bool) -> bool {
+    !channel_available && newly_enabled
+}
+
 #[cfg(test)]
 mod tests {
-    use super::WinVReplacementManager;
+    use super::{shortcut_save_blocked, WinVReplacementManager};
 
     #[test]
     fn missing_channel_refuses_enable_and_allows_disable() {
@@ -284,5 +301,17 @@ mod tests {
             "Win+V replacement must not start without a shortcut channel"
         );
         assert!(manager.configure(false, None).is_ok());
+        assert!(!manager.is_available());
+    }
+
+    #[test]
+    fn a_dead_channel_only_blocks_a_fresh_enable() {
+        // replace_win_v defaults to true and persists, so a hotkey-only save on
+        // a session whose channel failed to bind still arrives as enabled=true.
+        // Refusing it left the user unable to change their hotkey all session.
+        assert!(shortcut_save_blocked(false, true));
+        assert!(!shortcut_save_blocked(false, false));
+        assert!(!shortcut_save_blocked(true, true));
+        assert!(!shortcut_save_blocked(true, false));
     }
 }

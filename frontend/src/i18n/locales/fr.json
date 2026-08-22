@@ -8,7 +8,10 @@
     "loading": "Chargement...",
     "copied": "Copié dans le presse-papiers",
     "pause": "Pause",
-    "resume": "Reprendre"
+    "resume": "Reprendre",
+    "clipActions": "Actions du clip",
+    "folderActions": "Actions du dossier",
+    "historyActions": "Actions de l'historique"
   },
   "clipList": {
     "empty": "Aucun élément pour le moment",
