@@ -5,10 +5,19 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 ## Unreleased
 
 ### Security
+- An abandoned backup or Ditto file-dialog pick is no longer writable for the rest of the process: the grant expires after 60 seconds or when Settings closes (SBS-1015)
+- Edited clips now store the same 200-character `text_preview` as capture, so flyout and History search no longer ship 500 characters of an edited body (SBS-994)
+- Content-hash dedup no longer deletes a file named by `clip_images.file_path` unless it sits in the managed image directory, matching the other delete paths (SBS-987)
 - Backup import refuses a file larger than 256 MiB before reading it into memory or checking the AEAD tag, so a huge unauthenticated bundle cannot abort the process (SBS-981)
 - Search no longer ships full decrypted clip bodies on every keystroke; flyout and History search rows use the same preview-only contract as the list (SBS-912)
+- The opener release gate now models glob the way tauri-plugin-opener does (star and question-mark match slash) and refuses a host pattern that contains a wildcard, so a dropped-slash glob fails the release check instead of shipping (SBS-997)
 
 ### Fixed
+- Folder and History context menus are announced as folder or history actions, not as clip actions (SBS-1013)
+- Shift+wheel and Ctrl+wheel on a zoomed screenshot no longer also run the browser's native scroll, which had been panning twice and jumping the zoom anchor; React 19 registers `onWheel` as passive, so the viewer now attaches its own non-passive listener (SBS-1011)
+- Backup import no longer drops notes, source app, or OCR text on an encryption error, and no longer marks OCR completed for a clip it did not store (SBS-980)
+- Recapture no longer commits a clip that names a full-resolution original before that file is on disk; a failed rename keeps last-good or the expired state instead of a phantom original (SBS-996)
+- release:check treats every quoted http(s) URL in Settings as a link that must be on the opener allowlist, not only constants named `*URL` (SBS-1016)
 - Encrypted backup export now includes live full-resolution screenshot originals, and refuses the export if one cannot be read, instead of restoring every image as an expired thumbnail; a restore keeps those originals through the destination keep-for window without rewriting the visible capture date (SBS-919)
 - Empty Unicode text is no longer diagnosed as a clipboard lock, so a copy that still has HTML or RTF is stored instead of dropped; an advertised picture still retries before that HTML wrapper is stored (SBS-924)
 - Recover an interrupted settings.json replace from the leftover temp instead of treating it as a first-run 30-day retention (SBS-935)
@@ -16,6 +25,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Skip-likely-secrets now scans the first 8 KiB of a large paste, so a 9 KiB log or PEM starting with a known token or `-----BEGIN` marker is skipped instead of stored (SBS-922)
 - A failed clip reload no longer looks like a healthy current list: same-filter refresh shows a retry banner, superseded loads are not treated as success, and folder / app / count reloads toast instead of staying silent (SBS-805)
 - Portable first-run can install `storage.key` on FAT/exFAT: CreateHardLinkW is NTFS-only, and the previous hard-link-only install deleted the temp key and panicked (SBS-908)
+- German, French, Japanese, and Chinese users no longer see English for load-more, list-refresh, blocked Settings links, the portable-update note, or clip-actions (SBS-1014)
 
 ## v1.3.2
 

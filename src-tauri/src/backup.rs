@@ -28,6 +28,7 @@
 //! The magic doubles as the AEAD's associated data, so a bundle whose header
 //! was edited fails to decrypt rather than being parsed as something else.
 
+use crate::backup_import_optional::{encrypt_imported_optionals, OptionalImportPlaintexts};
 use crate::database::Database;
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -94,6 +95,16 @@ struct BackupClip {
     /// already expired, and for bundles written before SBS-919.
     #[serde(default)]
     full_image_b64: Option<String>,
+    /// HTML/RTF (and any other auxiliary) representations. Defaulted so a
+    /// bundle written before SBS-978 still imports; those clips had none.
+    #[serde(default)]
+    formats: Vec<BackupFormat>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BackupFormat {
+    name: String,
+    content_b64: String,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -238,6 +249,13 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_LEN], String> {
 /// stay thumbnail-only, which is the first-class SOU-244 state rather than
 /// damage.
 pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Result<usize, String> {
+    const MIN_EXPORT_PASSPHRASE: usize = 12;
+    if passphrase.chars().count() < MIN_EXPORT_PASSPHRASE {
+        return Err(format!(
+            "Choose a passphrase of at least {MIN_EXPORT_PASSPHRASE} characters"
+        ));
+    }
+
     let rows: Vec<ExportRow> = sqlx::query_as(
         r#"
         SELECT clips.uuid,
@@ -303,7 +321,10 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
             folder,
         ) {
             Ok(clip) => match attach_export_full_image(db, &uuid, clip, full_image_expired).await {
-                Ok(clip) => clips.push(clip),
+                Ok(clip) => match attach_export_formats(db, &uuid, clip).await {
+                    Ok(clip) => clips.push(clip),
+                    Err(fields) => failures.record(&uuid, &fields),
+                },
                 Err(fields) => failures.record(&uuid, &fields),
             },
             Err(fields) => failures.record(&uuid, &fields),
@@ -442,7 +463,61 @@ fn decrypt_export_clip(
         created_at,
         folder,
         full_image_b64: None,
+        formats: Vec::new(),
     })
+}
+
+async fn attach_export_formats(
+    db: &Database,
+    uuid: &str,
+    mut clip: BackupClip,
+) -> Result<BackupClip, Vec<&'static str>> {
+    let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        "SELECT format, content FROM clip_formats WHERE clip_uuid = ? ORDER BY rowid",
+    )
+    .bind(uuid)
+    .fetch_all(&db.pool)
+    .await
+    .map_err(|_| vec!["formats"])?;
+
+    let mut formats = Vec::with_capacity(rows.len());
+    for (name, content) in rows {
+        match db.crypto.decrypt(&content) {
+            Ok(bytes) => formats.push(BackupFormat {
+                name,
+                content_b64: BASE64.encode(bytes),
+            }),
+            Err(error) => {
+                log::warn!(
+                    "BACKUP: clip {uuid} auxiliary format {name} could not be decrypted: {error}"
+                );
+                return Err(vec!["formats"]);
+            }
+        }
+    }
+    clip.formats = formats;
+    Ok(clip)
+}
+
+async fn persist_imported_formats(
+    db: &Database,
+    uuid: &str,
+    formats: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    for (name, bytes) in formats {
+        let encrypted = db
+            .crypto
+            .encrypt(bytes)
+            .map_err(|error| format!("Could not encrypt restored clip format {name}: {error}"))?;
+        sqlx::query("INSERT INTO clip_formats (clip_uuid, format, content) VALUES (?, ?, ?)")
+            .bind(uuid)
+            .bind(name)
+            .bind(encrypted)
+            .execute(&db.pool)
+            .await
+            .map_err(|error| format!("Could not restore clip format {name}: {error}"))?;
+    }
+    Ok(())
 }
 
 fn decrypt_optional_export_field(
@@ -852,13 +927,34 @@ pub async fn import_backup(
             }
         };
 
-        // Capture hashes an image from the full PNG, not the thumbnail. A
-        // restored original has to use the same material or recopying that
-        // screenshot on the new machine stores a duplicate.
+        let mut decoded_formats: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut format_error = false;
+        for format in &clip.formats {
+            match BASE64.decode(format.content_b64.as_bytes()) {
+                Ok(bytes) => decoded_formats.push((format.name.clone(), bytes)),
+                Err(_) => {
+                    result
+                        .errors
+                        .push("A clip's auxiliary format was unreadable".to_string());
+                    format_error = true;
+                    break;
+                }
+            }
+        }
+        if format_error {
+            continue;
+        }
+
+        // Capture hashes an image from the full PNG, not the thumbnail, and
+        // folds HTML/RTF into a text clip's identity. Restore has to use the
+        // same material or recopying that clip on the new machine stores a
+        // duplicate (SBS-978).
         let hash_material = crate::clipboard::build_clip_hash_material(
             &clip.clip_type,
             full_image.as_deref().unwrap_or(&content),
-            std::iter::empty::<(&str, &[u8])>(),
+            decoded_formats
+                .iter()
+                .map(|(name, bytes)| (name.as_str(), bytes.as_slice())),
         );
         let content_hash = db.crypto.keyed_hash(&hash_material);
 
@@ -905,8 +1001,25 @@ pub async fn import_backup(
                 continue;
             }
         };
-        let encrypt_optional =
-            |value: Option<&str>| db.crypto.encrypt_optional_text(value).ok().flatten();
+        // Optional fields are three-state: absent, encrypted, or failed.
+        // Collapsing fail into None stored SQL NULL for notes/source/OCR and
+        // still marked OCR completed from the bundle (SBS-980).
+        let optionals = match encrypt_imported_optionals(
+            |value| db.crypto.encrypt_optional_text(value),
+            OptionalImportPlaintexts {
+                source_app: clip.source_app.as_deref(),
+                source_icon: clip.source_icon.as_deref(),
+                metadata: clip.metadata.as_deref(),
+                ocr_text: clip.ocr_text.as_deref(),
+                notes: clip.notes.as_deref(),
+            },
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                result.errors.push(error);
+                continue;
+            }
+        };
 
         let new_uuid = Uuid::new_v4().to_string();
         // Persist the original before the row exists. A clip that lands without
@@ -934,12 +1047,6 @@ pub async fn import_backup(
         } else {
             clip.created_at.clone()
         };
-        let ocr_status = if clip.ocr_text.is_some() {
-            Some("completed")
-        } else {
-            None
-        };
-
         let insert = sqlx::query(
             r#"
             INSERT INTO clips (
@@ -957,11 +1064,11 @@ pub async fn import_backup(
         .bind(&encrypted_preview)
         .bind(&content_hash)
         .bind(folder_id)
-        .bind(encrypt_optional(clip.source_app.as_deref()))
-        .bind(encrypt_optional(clip.source_icon.as_deref()))
-        .bind(encrypt_optional(clip.metadata.as_deref()))
-        .bind(encrypt_optional(clip.ocr_text.as_deref()))
-        .bind(ocr_status)
+        .bind(optionals.source_app)
+        .bind(optionals.source_icon)
+        .bind(optionals.metadata)
+        .bind(optionals.ocr_text)
+        .bind(optionals.ocr_status)
         .bind(full_image_expired)
         .bind(&clip.created_at)
         .bind(&last_accessed)
@@ -971,17 +1078,17 @@ pub async fn import_backup(
         // undo the protection on every round trip.
         .bind(i64::from(clip.is_hidden))
         // Encrypted on the way back in, like every other text column.
-        .bind(encrypt_optional(clip.notes.as_deref()))
+        .bind(optionals.notes)
         .execute(&db.pool)
         .await;
 
         match insert {
             Ok(_) => {
-                if let Some(file_path) = restored_original {
+                if let Some(file_path) = restored_original.as_ref() {
                     if let Err(error) = index_imported_original(
                         db,
                         &new_uuid,
-                        &file_path,
+                        file_path,
                         full_image.as_ref().map(Vec::len).unwrap_or(0) as i64,
                     )
                     .await
@@ -995,17 +1102,33 @@ pub async fn import_backup(
                                 "BACKUP: failed to roll back clip {new_uuid} after image index error: {cleanup}"
                             );
                         } else {
-                            remove_imported_original(&file_path);
+                            remove_imported_original(&db.image_dir, file_path);
                         }
                         result.errors.push(error);
                         continue;
                     }
                 }
+                if let Err(error) = persist_imported_formats(db, &new_uuid, &decoded_formats).await
+                {
+                    if let Err(cleanup) = sqlx::query("DELETE FROM clips WHERE uuid = ?")
+                        .bind(&new_uuid)
+                        .execute(&db.pool)
+                        .await
+                    {
+                        log::error!(
+                            "BACKUP: failed to roll back clip {new_uuid} after format insert error: {cleanup}"
+                        );
+                    } else if let Some(file_path) = restored_original.as_ref() {
+                        remove_imported_original(&db.image_dir, file_path);
+                    }
+                    result.errors.push(error);
+                    continue;
+                }
                 result.imported += 1;
             }
             Err(error) => {
-                if let Some(file_path) = restored_original {
-                    remove_imported_original(&file_path);
+                if let Some(file_path) = restored_original.as_ref() {
+                    remove_imported_original(&db.image_dir, file_path);
                 }
                 result.errors.push(format!("insert failed: {error}"));
             }
@@ -1081,8 +1204,8 @@ async fn index_imported_original(
     .map_err(|error| format!("Could not index a restored screenshot original: {error}"))
 }
 
-fn remove_imported_original(file_path: &str) {
-    crate::clipboard::remove_full_image_file(file_path);
+fn remove_imported_original(image_dir: &std::path::Path, file_path: &str) {
+    crate::managed_image::remove_clip_image_files(image_dir, vec![file_path.to_string()]);
 }
 
 #[cfg(test)]
@@ -1099,13 +1222,17 @@ mod tests {
     }
 
     async fn test_database() -> Database {
+        test_database_with(crate::crypto::CryptoManager::ephemeral()).await
+    }
+
+    async fn test_database_with(crypto: crate::crypto::CryptoManager) -> Database {
         let database = Database {
             pool: sqlx::sqlite::SqlitePoolOptions::new()
                 .max_connections(1)
                 .connect("sqlite::memory:")
                 .await
                 .expect("in-memory database should open"),
-            crypto: std::sync::Arc::new(crate::crypto::CryptoManager::ephemeral()),
+            crypto: std::sync::Arc::new(crypto),
             image_dir: std::env::temp_dir().join(format!("cubby-backup-{}", Uuid::new_v4())),
             search_index: std::sync::Arc::new(crate::search_index::SearchIndex::default()),
         };
@@ -1283,6 +1410,49 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// SBS-980: optional-field encrypt failure must skip the clip. Storing it
+    /// with NULL notes/source/OCR and ocr_status = completed loses the note
+    /// and permanently skips the OCR queue.
+    #[tokio::test]
+    async fn optional_encrypt_error_skips_the_clip_and_does_not_mark_ocr_completed() {
+        let source = test_database().await;
+        insert_rich_clip(&source, "sbs-980-keep-note").await;
+
+        let path = temp_path("sbs-980");
+        export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .unwrap();
+
+        let target =
+            test_database_with(crate::crypto::CryptoManager::ephemeral_failing_optional_encrypt())
+                .await;
+        let result = import_backup(&target, path.to_str().unwrap(), "correct horse", false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.imported, 0, "the clip must not count as imported");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("encrypt failed")),
+            "the import must report the encrypt error, not succeed: {:?}",
+            result.errors
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM clips")
+            .fetch_one(&target.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "the clip must not be inserted");
+        let completed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM clips WHERE ocr_status = 'completed'")
+                .fetch_one(&target.pool)
+                .await
+                .unwrap();
+        assert_eq!(completed, 0, "OCR must not be marked completed");
+        let _ = std::fs::remove_file(&path);
+    }
+
     async fn clip_texts(db: &Database) -> Vec<String> {
         let rows: Vec<Vec<u8>> =
             sqlx::query_scalar("SELECT content FROM clips WHERE is_deleted = 0 ORDER BY id")
@@ -1349,7 +1519,7 @@ mod tests {
         insert_clip(&source, "swordfish token 8821", false, None).await;
 
         let path = temp_path("secrecy");
-        export_backup(&source, path.to_str().unwrap(), "right one")
+        export_backup(&source, path.to_str().unwrap(), "right passphrase")
             .await
             .unwrap();
 
@@ -1373,7 +1543,7 @@ mod tests {
         let source = test_database().await;
         insert_clip(&source, "alpha", false, None).await;
         let path = temp_path("tamper");
-        export_backup(&source, path.to_str().unwrap(), "pass")
+        export_backup(&source, path.to_str().unwrap(), "passphrase12x")
             .await
             .unwrap();
 
@@ -1384,7 +1554,7 @@ mod tests {
 
         let target = test_database().await;
         assert!(
-            import_backup(&target, path.to_str().unwrap(), "pass", false)
+            import_backup(&target, path.to_str().unwrap(), "passphrase12x", false)
                 .await
                 .is_err()
         );
@@ -1397,18 +1567,76 @@ mod tests {
         let source = test_database().await;
         insert_clip(&source, "alpha", false, None).await;
         let path = temp_path("dryrun");
-        export_backup(&source, path.to_str().unwrap(), "pass")
+        export_backup(&source, path.to_str().unwrap(), "passphrase12x")
             .await
             .unwrap();
 
         let target = test_database().await;
-        let result = import_backup(&target, path.to_str().unwrap(), "pass", true)
+        let result = import_backup(&target, path.to_str().unwrap(), "passphrase12x", true)
             .await
             .unwrap();
         assert!(result.dry_run);
         assert_eq!(result.imported, 1);
         assert_eq!(clip_texts(&target).await.len(), 0);
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn export_refuses_a_short_passphrase() {
+        let source = test_database().await;
+        insert_clip(&source, "alpha", false, None).await;
+        let path = temp_path("short-pass");
+        let error = export_backup(&source, path.to_str().unwrap(), "short")
+            .await
+            .expect_err("five characters is below the export floor");
+        assert!(error.contains("12"));
+        assert!(!path.exists(), "a refused export must not write a file");
+    }
+
+    #[tokio::test]
+    async fn html_and_rtf_survive_a_round_trip() {
+        let source = test_database().await;
+        insert_clip(&source, "styled table", false, None).await;
+        let uuid: String = sqlx::query_scalar("SELECT uuid FROM clips")
+            .fetch_one(&source.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO clip_formats (clip_uuid, format, content) VALUES (?, 'html', ?), (?, 'rtf', ?)",
+        )
+        .bind(&uuid)
+        .bind(source.crypto.encrypt(b"<table>hi</table>").unwrap())
+        .bind(&uuid)
+        .bind(source.crypto.encrypt(b"{\\rtf1 hi}").unwrap())
+        .execute(&source.pool)
+        .await
+        .unwrap();
+
+        let path = temp_path("formats");
+        export_backup(&source, path.to_str().unwrap(), "passphrase12x")
+            .await
+            .unwrap();
+
+        let target = test_database().await;
+        let result = import_backup(&target, path.to_str().unwrap(), "passphrase12x", false)
+            .await
+            .unwrap();
+        assert_eq!(result.imported, 1);
+        assert!(result.errors.is_empty());
+
+        let restored: Vec<(String, Vec<u8>)> =
+            sqlx::query_as("SELECT format, content FROM clip_formats ORDER BY format")
+                .fetch_all(&target.pool)
+                .await
+                .unwrap();
+        assert_eq!(restored.len(), 2);
+        let html = target.crypto.decrypt(&restored[0].1).unwrap();
+        let rtf = target.crypto.decrypt(&restored[1].1).unwrap();
+        assert_eq!(restored[0].0, "html");
+        assert_eq!(html, b"<table>hi</table>");
+        assert_eq!(restored[1].0, "rtf");
+        assert_eq!(rtf, b"{\\rtf1 hi}");
         std::fs::remove_file(&path).ok();
     }
 
@@ -2027,6 +2255,7 @@ mod tests {
             created_at: "2026-05-01 09:00:00".to_string(),
             folder: None,
             full_image_b64: None,
+            formats: Vec::new(),
         };
         let exported = attach_export_full_image(&source, &uuid, clip, false)
             .await
@@ -2167,6 +2396,7 @@ mod tests {
                 created_at: "2026-05-01 09:00:00".to_string(),
                 folder: None,
                 full_image_b64: Some(BASE64.encode(b"not really a screenshot")),
+                formats: Vec::new(),
             }],
         };
         let path = temp_path("full-image-on-text");

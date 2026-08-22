@@ -8,12 +8,16 @@
 //! accept a path the dialog did not produce.
 //!
 //! Grants are in-memory only, keyed by purpose, and compared as the exact
-//! string the picker returned. The library functions in `backup` and
-//! `ditto_import` stay callable from their own tests without a grant.
+//! string the picker returned. SBS-1015: they also expire after
+//! [`GRANT_TTL`] and are dropped when the Settings window is destroyed, so
+//! an abandoned pick cannot stay writable until process exit. The library
+//! functions in `backup` and `ditto_import` stay callable from their own
+//! tests without a grant.
 
 use crate::database::Database;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 
 /// Why a path was picked. A save grant must not authorize import, and a Ditto
 /// pick must not authorize backup export.
@@ -27,9 +31,28 @@ pub enum PathGrantPurpose {
 const UNTRUSTED_PATH: &str = "That path was not selected in the file dialog";
 const EMPTY_PATH: &str = "A file path is required";
 const GRANT_TABLE_UNREADABLE: &str = "Could not verify the selected file path";
+const GRANT_EXPIRED: &str = "That file selection expired. Pick the file again";
+
+/// Label of the Settings window that creates backup/import grants.
+pub const SETTINGS_WINDOW_LABEL: &str = "settings";
+
+/// SBS-1015: an abandoned picker result must not stay usable for hours.
+///
+/// Sixty seconds covers passphrase-then-pick export and a preview-then-confirm
+/// import without leaving a grant sitting until process exit. A user who
+/// leaves the confirm dialog open longer than this must pick the file again.
+pub const GRANT_TTL: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone)]
+struct PathGrant {
+    path: String,
+    issued_at: SystemTime,
+}
+
+type GrantMap = HashMap<PathGrantPurpose, PathGrant>;
 
 pub struct PathGrantTable {
-    grants: Mutex<HashMap<PathGrantPurpose, String>>,
+    grants: Mutex<GrantMap>,
 }
 
 impl PathGrantTable {
@@ -44,7 +67,13 @@ impl PathGrantTable {
             return Err(EMPTY_PATH.to_string());
         }
         let mut grants = lock_grants(&self.grants)?;
-        grants.insert(purpose, path.clone());
+        grants.insert(
+            purpose,
+            PathGrant {
+                path: path.clone(),
+                issued_at: SystemTime::now(),
+            },
+        );
         Ok(path)
     }
 
@@ -54,9 +83,16 @@ impl PathGrantTable {
     /// canonicalize a renderer-supplied path into a grant, and do not accept a
     /// different string that happens to resolve to the same file.
     ///
-    /// A dry-run (`consume == false`) leaves the grant in place so preview
-    /// then confirm can reuse the same path. The first mutating attempt
-    /// consumes the grant whether the later read or write succeeds or fails.
+    /// A dry-run (`consume == false`) leaves a still-fresh grant in place so
+    /// preview then confirm can reuse the same path. The first mutating
+    /// attempt consumes the grant whether the later read or write succeeds
+    /// or fails.
+    ///
+    /// SBS-1015: a grant older than [`GRANT_TTL`] is its own state, not
+    /// "never picked". It is dropped on sight (including dry-run) so a later
+    /// call cannot revive it. A matching expired path returns the expired
+    /// message; a non-matching path stays the untrusted-path message so a
+    /// lookalike does not learn that a grant existed.
     pub fn authorize(
         &self,
         purpose: PathGrantPurpose,
@@ -67,15 +103,37 @@ impl PathGrantTable {
             return Err(EMPTY_PATH.to_string());
         }
         let mut grants = lock_grants(&self.grants)?;
-        match grants.get(&purpose) {
-            Some(granted) if granted == path => {
-                if consume {
-                    grants.remove(&purpose);
-                }
-                Ok(())
-            }
-            _ => Err(UNTRUSTED_PATH.to_string()),
+        let Some(granted) = grants.get(&purpose).cloned() else {
+            return Err(UNTRUSTED_PATH.to_string());
+        };
+        // Wall clock, not Instant: a laptop that sleeps from 09:00 to 17:00
+        // with Settings still open must not keep a 09:00 pick writable.
+        // duration_since Err means the clock went backwards — freshness is
+        // unknown, so fail closed and treat the grant as expired.
+        let expired = match SystemTime::now().duration_since(granted.issued_at) {
+            Ok(age) => age >= GRANT_TTL,
+            Err(_) => true,
+        };
+        if expired {
+            grants.remove(&purpose);
         }
+        if granted.path != path {
+            return Err(UNTRUSTED_PATH.to_string());
+        }
+        if expired {
+            return Err(GRANT_EXPIRED.to_string());
+        }
+        if consume {
+            grants.remove(&purpose);
+        }
+        Ok(())
+    }
+
+    /// Drop every grant. Settings close is the session end for picker flow.
+    pub fn clear(&self) -> Result<(), String> {
+        let mut grants = lock_grants(&self.grants)?;
+        grants.clear();
+        Ok(())
     }
 }
 
@@ -85,9 +143,7 @@ impl Default for PathGrantTable {
     }
 }
 
-fn lock_grants(
-    grants: &Mutex<HashMap<PathGrantPurpose, String>>,
-) -> Result<std::sync::MutexGuard<'_, HashMap<PathGrantPurpose, String>>, String> {
+fn lock_grants(grants: &Mutex<GrantMap>) -> Result<std::sync::MutexGuard<'_, GrantMap>, String> {
     // Poison and any other unreadable table are unknown, not empty. Fail closed.
     grants
         .lock()
@@ -110,6 +166,15 @@ pub fn authorize_picker_path(
     consume: bool,
 ) -> Result<(), String> {
     grants().authorize(purpose, path, consume)
+}
+
+/// SBS-1015: Settings is the only surface that creates these grants.
+/// Destroying it means the user walked away from the picker flow.
+pub fn drop_grants_if_settings_window(label: &str) -> Result<(), String> {
+    if label != SETTINGS_WINDOW_LABEL {
+        return Ok(());
+    }
+    grants().clear()
 }
 
 /// IPC body for `export_backup`. The grant is checked before any write.
@@ -152,6 +217,46 @@ pub(crate) fn reset_grants_for_tests() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     grants.clear();
+}
+
+#[cfg(test)]
+fn age_grants_for_tests(age: Duration) {
+    let issued_at = SystemTime::now()
+        .checked_sub(age)
+        .expect("test age must fit SystemTime");
+    let mut grants = grants()
+        .grants
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for grant in grants.values_mut() {
+        grant.issued_at = issued_at;
+    }
+}
+
+#[cfg(test)]
+impl PathGrantTable {
+    fn age_grant(&self, purpose: PathGrantPurpose, age: Duration) {
+        let issued_at = SystemTime::now()
+            .checked_sub(age)
+            .expect("test age must fit SystemTime");
+        let mut grants = self
+            .grants
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(grant) = grants.get_mut(&purpose) {
+            grant.issued_at = issued_at;
+        }
+    }
+
+    fn set_issued_at(&self, purpose: PathGrantPurpose, issued_at: SystemTime) {
+        let mut grants = self
+            .grants
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(grant) = grants.get_mut(&purpose) {
+            grant.issued_at = issued_at;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -377,7 +482,7 @@ mod tests {
         let path_str = path.to_string_lossy().to_string();
         grant_picker_path(PathGrantPurpose::BackupSave, path_str.clone()).unwrap();
 
-        let count = export_granted_backup(&db, path_str.clone(), "passphrase".into())
+        let count = export_granted_backup(&db, path_str.clone(), "correct horse".into())
             .await
             .expect("export_backup must accept a granted save path");
         assert_eq!(count, 1);
@@ -527,5 +632,153 @@ mod tests {
             )
             .expect_err("granting into a poisoned table must fail closed");
         assert_eq!(grant_error, GRANT_TABLE_UNREADABLE);
+        let clear_error = table
+            .clear()
+            .expect_err("clearing a poisoned table must fail closed");
+        assert_eq!(clear_error, GRANT_TABLE_UNREADABLE);
+    }
+
+    /// SBS-1015: a grant older than GRANT_TTL is expired, not a live pick.
+    #[test]
+    fn stale_matching_grant_is_rejected_and_dropped() {
+        let table = PathGrantTable::new();
+        let path = "C:\\Users\\me\\backup.cubbybak";
+        table
+            .grant(PathGrantPurpose::BackupSave, path.into())
+            .unwrap();
+        table.age_grant(PathGrantPurpose::BackupSave, GRANT_TTL);
+
+        let expired = table
+            .authorize(PathGrantPurpose::BackupSave, path, false)
+            .expect_err("an expired grant must not authorize a dry-run");
+        assert_eq!(expired, GRANT_EXPIRED);
+
+        let gone = table
+            .authorize(PathGrantPurpose::BackupSave, path, true)
+            .expect_err("expiry must drop the grant so a later call cannot revive it");
+        assert_eq!(gone, UNTRUSTED_PATH);
+    }
+
+    /// A lookalike against an expired grant must not learn that a grant existed.
+    #[test]
+    fn stale_lookalike_is_untrusted_and_still_drops_the_grant() {
+        let table = PathGrantTable::new();
+        table
+            .grant(
+                PathGrantPurpose::BackupSave,
+                "C:\\Users\\me\\backup.cubbybak".into(),
+            )
+            .unwrap();
+        table.age_grant(
+            PathGrantPurpose::BackupSave,
+            GRANT_TTL + Duration::from_secs(1),
+        );
+
+        let lookalike = table
+            .authorize(
+                PathGrantPurpose::BackupSave,
+                "C:/Users/me/backup.cubbybak",
+                true,
+            )
+            .expect_err("a lookalike must stay untrusted even when the real grant is stale");
+        assert_eq!(lookalike, UNTRUSTED_PATH);
+
+        let matching = table
+            .authorize(
+                PathGrantPurpose::BackupSave,
+                "C:\\Users\\me\\backup.cubbybak",
+                true,
+            )
+            .expect_err("the stale grant must already have been dropped");
+        assert_eq!(matching, UNTRUSTED_PATH);
+    }
+
+    /// A grant just inside the window is still a live pick.
+    #[test]
+    fn grant_younger_than_ttl_is_still_accepted() {
+        let table = PathGrantTable::new();
+        let path = "C:\\Users\\me\\backup.cubbybak";
+        table
+            .grant(PathGrantPurpose::BackupSave, path.into())
+            .unwrap();
+        table.age_grant(PathGrantPurpose::BackupSave, Duration::from_secs(1));
+        table
+            .authorize(PathGrantPurpose::BackupSave, path, false)
+            .expect("a grant younger than GRANT_TTL must still authorize");
+    }
+
+    /// A clock that jumps backwards makes freshness unknown; fail closed.
+    #[test]
+    fn backwards_clock_treats_the_grant_as_expired() {
+        let table = PathGrantTable::new();
+        let path = "C:\\Users\\me\\backup.cubbybak";
+        table
+            .grant(PathGrantPurpose::BackupSave, path.into())
+            .unwrap();
+        table.set_issued_at(
+            PathGrantPurpose::BackupSave,
+            SystemTime::now() + Duration::from_secs(120),
+        );
+        let expired = table
+            .authorize(PathGrantPurpose::BackupSave, path, false)
+            .expect_err("a grant from the future is unknown freshness, not live");
+        assert_eq!(expired, GRANT_EXPIRED);
+    }
+
+    /// Picking again replaces the clock, so a previously stale purpose is live.
+    #[test]
+    fn granting_again_resets_the_ttl() {
+        let table = PathGrantTable::new();
+        let path = "C:\\Users\\me\\backup.cubbybak";
+        table
+            .grant(PathGrantPurpose::BackupSave, path.into())
+            .unwrap();
+        table.age_grant(PathGrantPurpose::BackupSave, GRANT_TTL);
+        table
+            .grant(PathGrantPurpose::BackupSave, path.into())
+            .unwrap();
+        table
+            .authorize(PathGrantPurpose::BackupSave, path, false)
+            .expect("a new pick must replace the expired grant");
+    }
+
+    /// SBS-1015: closing Settings drops unused grants; other windows do not.
+    #[tokio::test]
+    async fn closing_settings_drops_unused_grants() {
+        let _lock = isolated_grants().await;
+        let path = "C:\\Users\\me\\backup.cubbybak".to_string();
+        grant_picker_path(PathGrantPurpose::BackupSave, path.clone()).unwrap();
+
+        drop_grants_if_settings_window("main")
+            .expect("a non-Settings window must not touch the table");
+        authorize_picker_path(PathGrantPurpose::BackupSave, &path, false)
+            .expect("closing main must leave the grant in place");
+
+        drop_grants_if_settings_window(SETTINGS_WINDOW_LABEL)
+            .expect("Settings close must be able to clear a readable table");
+        let dropped = authorize_picker_path(PathGrantPurpose::BackupSave, &path, true)
+            .expect_err("an abandoned pick must not survive Settings close");
+        assert_eq!(dropped, UNTRUSTED_PATH);
+    }
+
+    /// An export after the TTL must fail closed and must not write the file.
+    #[tokio::test]
+    async fn expired_export_grant_does_not_write() {
+        let _lock = isolated_grants().await;
+        let db = test_database().await;
+        insert_text_clip(&db, "secret history").await;
+        let dest = temp_path("expired-export");
+        let path_str = dest.to_string_lossy().to_string();
+        grant_picker_path(PathGrantPurpose::BackupSave, path_str.clone()).unwrap();
+        age_grants_for_tests(GRANT_TTL);
+
+        let error = export_granted_backup(&db, path_str, "correct horse".into())
+            .await
+            .expect_err("export_backup must reject an expired save grant");
+        assert_eq!(error, GRANT_EXPIRED);
+        assert!(
+            !dest.exists(),
+            "an expired export grant must not create the destination"
+        );
     }
 }

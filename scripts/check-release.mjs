@@ -11,6 +11,7 @@ import { extractDefaultSkipLikelySecrets, evaluateSecretHeuristicsDoc, saysDefau
 import {
   assertAllowlistNotWideOpen,
   extractAllowlistPatterns,
+  extractHttpUrlLiterals,
   extractOpenedUrls,
   isUrlAllowed,
   urlSlashVariants,
@@ -275,12 +276,17 @@ for (const [docName, doc] of userFacingHistoryDocs) {
 
 // SBS-810: a URL the frontend opens but the capability does not allow is
 // rejected at the Tauri boundary, which reads as a button that does nothing.
-// Match the way tauri-plugin-opener does (Rust glob), including the
-// trailing-slash homepage the live site actually uses. Exact JSON equality
-// was how cubbyclipboard.com sat in the allowlist and still failed.
+// Match tauri-plugin-opener (glob Pattern::matches defaults, so star and
+// question-mark cross slash; SBS-997). Including the trailing-slash homepage
+// the live site actually uses. Exact JSON equality was how cubbyclipboard.com
+// sat in the allowlist and still failed. assertAllowlistNotWideOpen refuses a
+// pattern whose scheme or authority contains a wildcard.
 const openerPatterns = extractAllowlistPatterns(capability);
 assertAllowlistNotWideOpen(openerPatterns);
-const settingsOpenedUrls = extractOpenedUrls(settingsPanelSource);
+// SBS-1016: Settings links are every quoted http(s) URL in that file, not
+// only `const *URL` / inline openUrl(. A `const DISCORD_LINK = 'https://…'`
+// is still a dead button if the capability does not allow it.
+const settingsOpenedUrls = extractHttpUrlLiterals(settingsPanelSource);
 if (settingsOpenedUrls.length === 0) {
   throw new Error('Could not find the Settings link URL constants to check against the allowlist');
 }

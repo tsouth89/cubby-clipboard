@@ -1,4 +1,5 @@
 use crate::database::Database;
+pub(crate) use crate::managed_image::remove_clip_image_files;
 use crate::models::{Clip, ClipboardItem, Folder, FolderItem, OcrHighlights, OcrMatch, OcrRect};
 use clipboard_rs::common::RustImage;
 use clipboard_rs::{Clipboard, ClipboardContent, ClipboardContext, RustImageData};
@@ -519,19 +520,6 @@ fn encrypt_existing_optional_text(
         .transpose()
 }
 
-fn is_managed_image_path(image_dir: &std::path::Path, file_path: &str) -> bool {
-    let Ok(managed_dir) = image_dir.canonicalize() else {
-        return false;
-    };
-    let Some(parent) = std::path::Path::new(file_path).parent() else {
-        return false;
-    };
-    parent
-        .canonicalize()
-        .map(|candidate| candidate == managed_dir)
-        .unwrap_or(false)
-}
-
 async fn image_bytes_for_encryption_migration(
     db: &Database,
     clip: &Clip,
@@ -657,8 +645,8 @@ pub async fn migrate_encrypted_storage(db: &Database) -> Result<u64, String> {
         transaction.commit().await.map_err(|e| e.to_string())?;
 
         if let (Some(old_path), Some((new_path, _))) = (old_image_path, &new_image_path) {
-            if old_path != *new_path && is_managed_image_path(&db.image_dir, &old_path) {
-                crate::clipboard::remove_full_image_file(&old_path);
+            if old_path != *new_path {
+                remove_clip_image_files(&db.image_dir, vec![old_path]);
             }
         }
         migrated += 1;
@@ -1763,10 +1751,9 @@ fn is_unique_constraint_error(error: &sqlx::Error) -> bool {
 }
 
 /// Preview text stored on the row, bounded so a huge clip does not bloat every
-/// list query. Mirrors the capture path's limit.
+/// list query. Same helper and limit as capture and Ditto import (SBS-994).
 fn truncate_preview(text: &str) -> String {
-    const PREVIEW_LIMIT: usize = 500;
-    text.chars().take(PREVIEW_LIMIT).collect()
+    crate::clip_list::truncate_text_preview(text)
 }
 
 /// Attach or clear a clip's note (SOU-588). An empty note clears the field
@@ -2574,16 +2561,6 @@ fn bind_retention<'q, O>(
         .bind(auto_delete_days)
         .bind(max_items)
         .bind(max_items.max(0))
-}
-
-pub(crate) fn remove_clip_image_files(image_dir: &std::path::Path, image_paths: Vec<String>) {
-    for path in image_paths {
-        if !path.is_empty() && is_managed_image_path(image_dir, &path) {
-            crate::clipboard::remove_full_image_file(&path);
-        } else if !path.is_empty() {
-            log::warn!("Skipped deleting an unmanaged clipboard image path");
-        }
-    }
 }
 
 #[tauri::command]
@@ -3506,6 +3483,79 @@ mod tests {
             .unwrap();
         assert!(database.search_index.matches("quick").contains("editable"));
         assert!(database.search_index.matches("teh").is_empty());
+    }
+
+    /// SBS-994: a ~450-character edit used to persist 450 characters of
+    /// `text_preview`. Every preview-only list and search then shipped that
+    /// prefix into the WebView. Capture stores 200; the edit path must too.
+    #[tokio::test]
+    async fn editing_a_long_clip_stores_the_capture_preview_limit() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("editable", "short original", "2026-06-01 09:00:00"),
+        )
+        .await;
+
+        let prefix = "a".repeat(crate::clip_list::TEXT_PREVIEW_CHAR_LIMIT);
+        let secret = "UNIQUE-SBS-994-EDITED-TAIL-SHOULD-NOT-SHIP";
+        let edited = format!("{prefix}{secret}");
+        update_clip_text_in_database(&database, "editable", &edited)
+            .await
+            .expect("edit should apply");
+
+        let stored: String = sqlx::query_scalar("SELECT text_preview FROM clips WHERE uuid = ?")
+            .bind("editable")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        let decrypted = database.crypto.decrypt_text(&stored).unwrap();
+        assert_eq!(
+            decrypted.chars().count(),
+            crate::clip_list::TEXT_PREVIEW_CHAR_LIMIT
+        );
+        assert_eq!(decrypted, prefix);
+        assert!(
+            !decrypted.contains(secret),
+            "stored text_preview must not keep the tail past the capture limit"
+        );
+
+        let listed =
+            get_clips_in_database(None, 10, 0, Some(true), None, None, None, None, &database)
+                .await
+                .unwrap();
+        let row = listed
+            .iter()
+            .find(|clip| clip.id == "editable")
+            .expect("edited clip should list");
+        assert!(
+            row.content.is_empty(),
+            "preview_only must withhold the body"
+        );
+        assert_eq!(row.preview, prefix);
+        assert!(!row.preview.contains(secret));
+
+        let searched = search_clips_in_database(
+            "UNIQUE-SBS-994".to_string(),
+            None,
+            10,
+            0,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            &database,
+        )
+        .await
+        .unwrap();
+        let search_row = searched
+            .iter()
+            .find(|clip| clip.id == "editable")
+            .expect("the full body is still searchable");
+        assert!(search_row.content.is_empty());
+        assert_eq!(search_row.preview, prefix);
+        assert!(!search_row.preview.contains(secret));
     }
 
     #[tokio::test]

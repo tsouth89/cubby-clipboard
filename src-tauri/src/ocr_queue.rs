@@ -1,4 +1,5 @@
 use crate::database::Database;
+use crate::managed_image::is_managed_image_path;
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use sqlx::{Row, SqlitePool};
@@ -472,19 +473,6 @@ fn load_image(
     } else {
         Ok(full_content.to_vec())
     }
-}
-
-fn is_managed_image_path(image_dir: &std::path::Path, file_path: &str) -> bool {
-    let Ok(managed_dir) = image_dir.canonicalize() else {
-        return false;
-    };
-    let Some(parent) = std::path::Path::new(file_path).parent() else {
-        return false;
-    };
-    parent
-        .canonicalize()
-        .map(|candidate| candidate == managed_dir)
-        .unwrap_or(false)
 }
 
 async fn mark_completed(
