@@ -1493,7 +1493,14 @@ fn join_distinct_notes(notes: &[String], limit: usize) -> (String, u64) {
             out.push_str(note);
             continue;
         }
-        let sep = "\n\n";
+        // Single-line, because every consumer of a note is: the only editor is
+        // an <input> (ClipPreview.tsx), whose value sanitization strips CR and
+        // LF outright, and ClipRowNote renders with `truncate`. A "\n\n"
+        // separator was invisible in the editor -- merged notes showed glued
+        // together, and any edit saved that glued form back over the preserved
+        // text. " · " matches ClipCard's existing metadata join; an em dash
+        // would collide with the em dashes users already write inside notes.
+        let sep = " · ";
         let combined = out.chars().count() + sep.chars().count() + note.chars().count();
         if combined > limit {
             discarded += 1;
@@ -2013,8 +2020,34 @@ mod tests {
         assert_eq!(merged, first);
         assert_eq!(discarded, 2);
         let (merged, discarded) = join_distinct_notes(&["one".to_string(), "two".to_string()], 500);
-        assert_eq!(merged, "one\n\ntwo");
+        assert_eq!(merged, "one · two");
         assert_eq!(discarded, 0);
+    }
+
+    /// The merged note has to survive the only editor it has. `<input>` value
+    /// sanitization drops CR and LF, so a separator containing either was
+    /// invisible on screen and was written back glued together the moment the
+    /// user touched the field.
+    #[test]
+    fn a_merged_note_survives_the_single_line_note_input() {
+        let (merged, _) = join_distinct_notes(
+            &[
+                "staging — expires June".to_string(),
+                "prod — do not use".to_string(),
+            ],
+            500,
+        );
+        assert!(
+            !merged.contains('\n') && !merged.contains('\r'),
+            "an <input> strips these, so the note would not round-trip: {merged:?}"
+        );
+        assert_eq!(merged, "staging — expires June · prod — do not use");
+        // The separator must not be something notes already contain, or the
+        // boundary between two merged notes reads as part of one of them.
+        assert!(
+            merged.matches(" · ").count() == 1,
+            "the separator must be unambiguous against note text: {merged:?}"
+        );
     }
 
     #[test]
