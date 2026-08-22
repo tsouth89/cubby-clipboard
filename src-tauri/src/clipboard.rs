@@ -59,10 +59,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 // GLOBAL STATE: Store the hash of the clip we just pasted ourselves.
 // If the next clipboard change matches this hash, we ignore it (don't update timestamp).
 /// Hash of a clipboard write Cubby made itself, with the time it was written.
-/// A snapshot queued while this marker is live carries the hash so a backed-up
-/// consumer still ignores the echo after the wall-clock TTL (SBS-1022).
-/// Consumed by the matching capture so a self-paste is not re-recorded.
-static IGNORE_HASH: Lazy<parking_lot::Mutex<Option<(String, Instant)>>> =
+/// A snapshot queued while this marker is live carries the hash and generation
+/// so a backed-up consumer still ignores the echo after the wall-clock TTL
+/// (SBS-1022) without consuming a later paste of the same content.
+static IGNORE_HASH: Lazy<parking_lot::Mutex<Option<ignore_hash::IgnoreMarker>>> =
     Lazy::new(|| parking_lot::Mutex::new(None));
 static LAST_STABLE_HASH: Lazy<parking_lot::Mutex<Option<String>>> =
     Lazy::new(|| parking_lot::Mutex::new(None));
@@ -110,7 +110,8 @@ use forget_on_clear::{
 use snapshot_queue::SizedPayload;
 mod ignore_hash;
 use ignore_hash::{
-    bind_ignore_hash_for_queued_work, should_ignore_queued_self_paste, IGNORE_HASH_TTL,
+    bind_ignore_hash_for_queued_work, consume_ignore_marker_after_self_paste,
+    should_ignore_queued_self_paste, IGNORE_HASH_TTL,
 };
 
 /// Pure helper for SOU-316 unit tests: only empty clears within the window
@@ -170,12 +171,12 @@ pub struct ClipboardCaptureStatus {
 
 pub fn set_ignore_hash(hash: String) {
     let mut lock = IGNORE_HASH.lock();
-    *lock = Some((hash, Instant::now()));
+    *lock = Some(ignore_hash::IgnoreMarker::new(hash));
 }
 
 pub(crate) fn clear_ignore_hash_if_matches(hash: &str) {
     let mut lock = IGNORE_HASH.lock();
-    if lock.as_ref().is_some_and(|(marked, _)| marked == hash) {
+    if lock.as_ref().is_some_and(|marked| marked.hash == hash) {
         lock.take();
     }
 }
@@ -325,10 +326,11 @@ struct ClipboardSnapshot {
     materialize_ms: u128,
     /// Which do-not-retain markers this copy carried. See `SensitiveMarkers`.
     sensitive: SensitiveMarkers,
-    /// Ignore hash that was still live when this snapshot entered the queue.
+    /// Ignore marker that was still live when this snapshot entered the queue.
     /// Honoured at process time even if the wall-clock TTL has since elapsed
-    /// (SBS-1022): a backed-up consumer must not persist a self-paste echo.
-    ignore_hash: Option<String>,
+    /// (SBS-1022). Carries the generation so consuming this echo cannot wipe
+    /// a later paste of the same content.
+    ignore: Option<ignore_hash::QueuedIgnore>,
 }
 
 enum ClipboardListenerEvent {
@@ -833,7 +835,7 @@ fn capture_one_bound_sequence(
 
     if let Some(MaterializeAttempt::Captured(content, formats)) = materialized {
         note_clipboard_event(sequence);
-        let ignore_hash = bind_ignore_hash_for_queued_work(
+        let ignore = bind_ignore_hash_for_queued_work(
             IGNORE_HASH.lock().as_ref(),
             Instant::now(),
             IGNORE_HASH_TTL,
@@ -845,7 +847,7 @@ fn capture_one_bound_sequence(
             formats,
             materialize_ms: started.elapsed().as_millis(),
             sensitive,
-            ignore_hash,
+            ignore,
         };
         return enqueue_listener_event(event_tx, ClipboardListenerEvent::Content(snapshot))
             .map(|_| CaptureAttempt::Handled)
@@ -2032,7 +2034,7 @@ async fn process_clipboard_snapshot(
     let materialize_ms = snapshot.materialize_ms;
     let sequence = snapshot.sequence;
     let markers = snapshot.sensitive;
-    let queued_ignore_hash = snapshot.ignore_hash;
+    let queued_ignore = snapshot.ignore;
     let source_app_info = resolve_source_app_info(snapshot.source_app_identity);
     let captured_formats = snapshot.formats;
     let (clip_type, clip_content, clip_preview, _primary_hash, full_image_content, metadata) =
@@ -2115,23 +2117,22 @@ async fn process_clipboard_snapshot(
     {
         let mut lock = IGNORE_HASH.lock();
         if should_ignore_queued_self_paste(
-            queued_ignore_hash.as_deref(),
+            queued_ignore.as_ref(),
             lock.as_ref(),
             clip_hash.as_str(),
             Instant::now(),
             IGNORE_HASH_TTL,
         ) {
-            // Only consume the marker on a match. Clearing it for an
-            // intermediate, non-matching snapshot would lose it before our own
-            // write arrives, letting the self-paste be persisted after all.
-            // Consume even after TTL so a later real copy of the same content
-            // is not held against a marker that already did its job.
-            if lock
-                .as_ref()
-                .is_some_and(|(marked, _)| marked == clip_hash.as_str())
-            {
-                lock.take();
-            }
+            // Only consume the marker this work item owns (same generation),
+            // or a live TTL match on an unbound snapshot. Clearing by hash
+            // alone would drop a newer paste of the same content.
+            consume_ignore_marker_after_self_paste(
+                &mut *lock,
+                queued_ignore.as_ref(),
+                clip_hash.as_str(),
+                Instant::now(),
+                IGNORE_HASH_TTL,
+            );
             log::info!("CLIPBOARD: Ignoring self-paste (own clipboard write)");
             return;
         }
@@ -4052,7 +4053,10 @@ mod tests {
         set_ignore_hash("expected".to_string());
         clear_ignore_hash_if_matches("different");
         assert_eq!(
-            IGNORE_HASH.lock().as_ref().map(|(hash, _)| hash.as_str()),
+            IGNORE_HASH
+                .lock()
+                .as_ref()
+                .map(|marked| marked.hash.as_str()),
             Some("expected")
         );
 
