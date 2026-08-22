@@ -334,17 +334,17 @@ mod tests {
     #[test]
     fn test_ignored_apps_add() {
         let mut current = AppSettings::default();
-        
+
         assert!(apply_add_ignored_app("testapp", &mut current));
         assert!(current.ignored_apps.contains("testapp"));
-        
+
         // Duplicate
         assert!(!apply_add_ignored_app("testapp", &mut current));
-        
+
         // Whitespace and empty
         assert!(!apply_add_ignored_app("   ", &mut current));
         assert!(!apply_add_ignored_app("", &mut current));
-        
+
         // Trimming
         assert!(apply_add_ignored_app("  app2  ", &mut current));
         assert!(current.ignored_apps.contains("app2"));
@@ -354,13 +354,13 @@ mod tests {
     fn test_ignored_apps_remove() {
         let mut current = AppSettings::default();
         current.ignored_apps.insert("testapp".to_string());
-        
+
         assert!(apply_remove_ignored_app("testapp", &mut current));
         assert!(!current.ignored_apps.contains("testapp"));
-        
+
         // Does not exist
         assert!(!apply_remove_ignored_app("testapp", &mut current));
-        
+
         // Whitespace and empty
         assert!(!apply_remove_ignored_app("   ", &mut current));
         assert!(!apply_remove_ignored_app("", &mut current));
@@ -369,24 +369,47 @@ mod tests {
     #[test]
     fn test_prepare_settings_for_save_roundtrip() {
         let current = AppSettings::default();
-        let mut new_settings = AppSettings::default();
-        new_settings.theme = "dark".to_string();
-        new_settings.startup_with_windows = true;
-        
+        let new_settings = AppSettings {
+            theme: "dark".to_string(),
+            startup_with_windows: true,
+            ..AppSettings::default()
+        };
+
         let json = serde_json::to_value(&new_settings).unwrap();
-        
+
         // Normal save
-        let (saved, changed) = prepare_settings_for_save(json.clone(), None, &current, false, false).unwrap();
+        let (saved, changed) =
+            prepare_settings_for_save(json.clone(), None, &current, false, false).unwrap();
         assert_eq!(saved.theme, "dark");
         assert!(saved.startup_with_windows);
         assert!(changed);
-        
+
         // Portable prevents startup
-        let (saved_port, _) = prepare_settings_for_save(json.clone(), None, &current, true, false).unwrap();
+        let (saved_port, _) =
+            prepare_settings_for_save(json.clone(), None, &current, true, false).unwrap();
         assert!(!saved_port.startup_with_windows);
-        
+
         // Store build prevents startup
-        let (saved_store, _) = prepare_settings_for_save(json.clone(), None, &current, false, true).unwrap();
+        let (saved_store, _) =
+            prepare_settings_for_save(json.clone(), None, &current, false, true).unwrap();
         assert!(!saved_store.startup_with_windows);
+    }
+
+    #[test]
+    fn test_prepare_settings_for_save_preserves_server_owned_privacy_state() {
+        // The frontend does not round-trip ignored_apps or the seed flag, so a save must not
+        // let their absence from the incoming JSON erase them -- a missing/false seed flag
+        // would re-insert default password managers on the next startup.
+        let mut current = AppSettings::default();
+        current.ignored_apps.insert("keepass".to_string());
+        current.default_sensitive_apps_seeded = true;
+
+        // The frontend's own default omits both fields entirely.
+        let incoming = AppSettings::default();
+        let json = serde_json::to_value(&incoming).unwrap();
+
+        let (saved, _) = prepare_settings_for_save(json, None, &current, false, false).unwrap();
+        assert!(saved.ignored_apps.contains("keepass"));
+        assert!(saved.default_sensitive_apps_seeded);
     }
 }
