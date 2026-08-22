@@ -813,17 +813,13 @@ fn replace_exported_backup(source: &Path, destination: &Path) -> Result<(), Stri
     std::fs::rename(source, destination).map_err(|error| error.to_string())
 }
 
-/// Read at most `MAX_BUNDLE_BYTES` of a user-chosen backup.
+/// Read at most `max_bytes` of a user-chosen backup. Production passes
+/// `MAX_BUNDLE_BYTES`; a test passes a small cap so it can pin the refusal
+/// without writing a 256 MiB file.
 ///
 /// The AEAD tag is at the end of the file, so authentication cannot happen
 /// until the ciphertext is in memory. The bound is what stops a 4 GiB
 /// unauthenticated file from being the thing that gets us there (SBS-981).
-fn read_backup_file(path: &str) -> Result<Vec<u8>, String> {
-    read_backup_file_limited(path, MAX_BUNDLE_BYTES)
-}
-
-/// Same as [`read_backup_file`], with the cap supplied so a test can pin the
-/// refusal without writing a 256 MiB file.
 fn read_backup_file_limited(path: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
     use std::io::{ErrorKind, Read};
 
