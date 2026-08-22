@@ -8,7 +8,10 @@
     "loading": "読み込み中...",
     "copied": "クリップボードにコピーしました",
     "pause": "一時停止",
-    "resume": "再開"
+    "resume": "再開",
+    "clipActions": "クリップ操作",
+    "folderActions": "フォルダー操作",
+    "historyActions": "履歴操作"
   },
   "clipList": {
     "empty": "まだクリップがありません",
