@@ -357,10 +357,11 @@ impl Database {
             .map_err(|error| format!("could not commit the deduplication: {error}"))?;
 
         // Only after the rows are durably gone: a rollback must not leave a
-        // surviving clip pointing at a file that has been deleted.
-        for path in orphaned_images {
-            crate::clipboard::remove_full_image_file(&path);
-        }
+        // surviving clip pointing at a file that has been deleted. Same
+        // managed-path guard as every other bulk delete (SBS-987): a restored
+        // or hand-edited `clip_images.file_path` must not be unlinked if it
+        // sits outside the image directory.
+        crate::managed_image::remove_clip_image_files(&self.image_dir, orphaned_images);
 
         if removed > 0 {
             // The in-memory index is built from `clips`, so entries for the
@@ -2168,6 +2169,106 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(orphans, 0, "child rows must not outlive their clip");
+    }
+
+    async fn attach_image_path(database: &Database, uuid: &str, path: &std::path::Path) {
+        sqlx::query(
+            r#"
+            INSERT INTO clip_images (clip_uuid, full_content, file_path, file_size, storage_kind, mime_type)
+            VALUES (?, x'', ?, ?, 'file', 'image/png')
+            "#,
+        )
+        .bind(uuid)
+        .bind(path.to_string_lossy().into_owned())
+        .bind(path.metadata().map(|meta| meta.len() as i64).unwrap_or(0))
+        .execute(&database.pool)
+        .await
+        .expect("clip_images row should insert");
+    }
+
+    /// SBS-987: a duplicate's `clip_images.file_path` can name any file. Dedup
+    /// used to pass that string to a bare unlink. An unmanaged path must survive.
+    #[tokio::test]
+    async fn content_hash_dedup_does_not_delete_an_unmanaged_image_file() {
+        let database = migrated_database().await;
+        std::fs::create_dir_all(&database.image_dir).unwrap();
+        insert_clip_with_hash(
+            &database,
+            "keeper",
+            "same-image",
+            false,
+            None,
+            "2026-05-01 09:00:00",
+        )
+        .await;
+        insert_clip_with_hash(
+            &database,
+            "loser",
+            "same-image",
+            false,
+            None,
+            "2026-05-02 09:00:00",
+        )
+        .await;
+
+        let unmanaged_dir =
+            std::env::temp_dir().join(format!("cubby-unmanaged-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&unmanaged_dir).unwrap();
+        let unmanaged = unmanaged_dir.join("taxes.pdf");
+        std::fs::write(&unmanaged, b"do-not-delete").unwrap();
+        attach_image_path(&database, "loser", &unmanaged).await;
+
+        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
+        assert!(
+            unmanaged.exists(),
+            "content-hash dedup must not delete a file outside image_dir"
+        );
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM clips")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 1, "the duplicate clip row must still be removed");
+
+        let _ = std::fs::remove_dir_all(&database.image_dir);
+        let _ = std::fs::remove_dir_all(&unmanaged_dir);
+    }
+
+    /// The other half of SBS-987: a loser whose original actually lives in the
+    /// managed directory is still cleaned up, same as retention and hard-delete.
+    #[tokio::test]
+    async fn content_hash_dedup_deletes_a_managed_loser_image() {
+        let database = migrated_database().await;
+        std::fs::create_dir_all(&database.image_dir).unwrap();
+        insert_clip_with_hash(
+            &database,
+            "keeper",
+            "same-image",
+            false,
+            None,
+            "2026-05-01 09:00:00",
+        )
+        .await;
+        insert_clip_with_hash(
+            &database,
+            "loser",
+            "same-image",
+            false,
+            None,
+            "2026-05-02 09:00:00",
+        )
+        .await;
+
+        let managed = database.image_dir.join("loser.cubby");
+        std::fs::write(&managed, b"managed-loser").unwrap();
+        attach_image_path(&database, "loser", &managed).await;
+
+        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
+        assert!(
+            !managed.exists(),
+            "content-hash dedup should still delete a managed loser original"
+        );
+
+        let _ = std::fs::remove_dir_all(&database.image_dir);
     }
 
     #[tokio::test]

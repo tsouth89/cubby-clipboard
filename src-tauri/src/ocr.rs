@@ -173,7 +173,7 @@ pub fn recognize_png(png_bytes: &[u8]) -> Result<OcrRecognition, String> {
     let image = decode_for_ocr(png_bytes, max_ocr_dimension)?;
     let (width, height) = image.dimensions();
     let mut bgra = image.into_raw();
-    for pixel in bgra.chunks_exact_mut(4) {
+    for pixel in bgra.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
 

@@ -28,6 +28,7 @@
 //! The magic doubles as the AEAD's associated data, so a bundle whose header
 //! was edited fails to decrypt rather than being parsed as something else.
 
+use crate::backup_import_optional::{encrypt_imported_optionals, OptionalImportPlaintexts};
 use crate::database::Database;
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -44,8 +45,26 @@ const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 const HEADER_LEN: usize = MAGIC.len() + SALT_LEN + NONCE_LEN;
 
-/// Rejects an obviously-wrong file before spending Argon2 time on it.
-const MAX_BUNDLE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Clipboard history is text plus thumbnails and the occasional full-resolution
+/// original. A few hundred MiB is already generous for that. The previous 4 GiB
+/// cap let an unauthenticated file allocate until the process aborted (SBS-981).
+const MAX_BUNDLE_BYTES: u64 = 256 * 1024 * 1024;
+const OVERSIZE_BUNDLE: &str = "That backup file is implausibly large";
+
+/// Export failed because the user's own history is too big, not because they
+/// picked a bad file. OVERSIZE_BUNDLE names "that backup file", which after a
+/// save dialog reads as a problem with the destination they just chose.
+/// Derived from the cap so the number cannot drift away from MAX_BUNDLE_BYTES.
+fn oversize_export_error(max_bytes: u64) -> String {
+    format!(
+        "This clipboard history is too large to export: the backup would exceed the {} MiB limit",
+        max_bytes / (1024 * 1024)
+    )
+}
+const NOT_A_BUNDLE: &str = "That does not look like a Cubby backup file";
+/// AES-256-GCM appends a 16-byte tag. Used to reject an export that could not
+/// be imported under `MAX_BUNDLE_BYTES` before the second allocation.
+const GCM_TAG_LEN: u64 = 16;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct BackupBundle {
@@ -342,14 +361,36 @@ pub async fn export_backup(db: &Database, path: &str, passphrase: &str) -> Resul
     Ok(count)
 }
 
+fn refuse_oversize_bundle(len: u64) -> Result<(), String> {
+    if len > MAX_BUNDLE_BYTES {
+        Err(OVERSIZE_BUNDLE.to_string())
+    } else {
+        Ok(())
+    }
+}
+
 /// Serialize and encrypt a bundle into the on-disk file bytes.
 ///
 /// Split out of `export_backup` so a test can seal a bundle this database would
 /// never produce, which is the only way to exercise the import guards against a
 /// crafted file.
 fn seal_bundle(bundle: &BackupBundle, passphrase: &str) -> Result<Vec<u8>, String> {
+    seal_bundle_limited(bundle, passphrase, MAX_BUNDLE_BYTES)
+}
+
+/// Same as [`seal_bundle`], with the cap supplied so a test can pin the refusal
+/// without building a 256 MiB bundle in memory.
+fn seal_bundle_limited(
+    bundle: &BackupBundle,
+    passphrase: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, String> {
     let plaintext =
         serde_json::to_vec(bundle).map_err(|e| format!("Could not build the backup: {e}"))?;
+    // Fail before encrypt allocates a second buffer the size of the payload.
+    if HEADER_LEN as u64 + plaintext.len() as u64 + GCM_TAG_LEN > max_bytes {
+        return Err(oversize_export_error(max_bytes));
+    }
 
     let mut salt = [0_u8; SALT_LEN];
     getrandom::fill(&mut salt).map_err(|e| format!("failed to generate a salt: {e}"))?;
@@ -640,6 +681,7 @@ fn read_export_image_file(
 /// Write `bytes` beside `path`, then replace the destination so a failed
 /// persist cannot leave a truncated backup in the user's chosen file.
 fn persist_backup_file(path: &str, bytes: &[u8]) -> Result<(), String> {
+    refuse_oversize_bundle(bytes.len() as u64)?;
     let dest = Path::new(path);
     if dest.file_name().is_none() {
         return Err("Could not save the backup: the destination path is not a file".to_string());
@@ -771,6 +813,60 @@ fn replace_exported_backup(source: &Path, destination: &Path) -> Result<(), Stri
     std::fs::rename(source, destination).map_err(|error| error.to_string())
 }
 
+/// Read at most `max_bytes` of a user-chosen backup. Production passes
+/// `MAX_BUNDLE_BYTES`; a test passes a small cap so it can pin the refusal
+/// without writing a 256 MiB file.
+///
+/// The AEAD tag is at the end of the file, so authentication cannot happen
+/// until the ciphertext is in memory. The bound is what stops a 4 GiB
+/// unauthenticated file from being the thing that gets us there (SBS-981).
+fn read_backup_file_limited(path: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+    use std::io::{ErrorKind, Read};
+
+    if max_bytes < HEADER_LEN as u64 {
+        return Err(OVERSIZE_BUNDLE.to_string());
+    }
+
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("Could not open the backup file: {e}"))?;
+
+    // Fast-fail on the advertised size. The bounded read below is what
+    // actually stops a file that grows after this check, or a size that
+    // cannot be trusted.
+    match file.metadata() {
+        Ok(metadata) if metadata.len() > max_bytes => {
+            return Err(OVERSIZE_BUNDLE.to_string());
+        }
+        Ok(_) => {}
+        Err(e) => return Err(format!("Could not open the backup file: {e}")),
+    }
+
+    let mut header = vec![0_u8; HEADER_LEN];
+    match file.read_exact(&mut header) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+            return Err(NOT_A_BUNDLE.to_string());
+        }
+        Err(e) => return Err(format!("Could not read the backup file: {e}")),
+    }
+    if &header[..MAGIC.len()] != MAGIC {
+        return Err(NOT_A_BUNDLE.to_string());
+    }
+
+    let max_body = max_bytes - HEADER_LEN as u64;
+    let mut body = Vec::new();
+    let n = file
+        .take(max_body.saturating_add(1))
+        .read_to_end(&mut body)
+        .map_err(|e| format!("Could not read the backup file: {e}"))?;
+    if n as u64 > max_body {
+        return Err(OVERSIZE_BUNDLE.to_string());
+    }
+
+    header.extend_from_slice(&body);
+    Ok(header)
+}
+
 /// Read a bundle back in, skipping anything already present.
 ///
 /// Dedup runs through the same content-hash lookup as capture and the Ditto
@@ -783,14 +879,22 @@ pub async fn import_backup(
     passphrase: &str,
     dry_run: bool,
 ) -> Result<BackupImportResult, String> {
-    let metadata =
-        std::fs::metadata(path).map_err(|e| format!("Could not open the backup file: {e}"))?;
-    if metadata.len() > MAX_BUNDLE_BYTES {
-        return Err("That backup file is implausibly large".to_string());
-    }
-    let raw = std::fs::read(path).map_err(|e| format!("Could not read the backup file: {e}"))?;
+    import_backup_limited(db, path, passphrase, dry_run, MAX_BUNDLE_BYTES).await
+}
+
+/// Same as [`import_backup`], with the cap supplied so a test can pin the
+/// refusal -- and prove it lands before any passphrase work -- without writing
+/// a 256 MiB file. Mirrors the [`read_backup_file_limited`] split.
+async fn import_backup_limited(
+    db: &Database,
+    path: &str,
+    passphrase: &str,
+    dry_run: bool,
+    max_bytes: u64,
+) -> Result<BackupImportResult, String> {
+    let raw = read_backup_file_limited(path, max_bytes)?;
     if raw.len() < HEADER_LEN || &raw[..MAGIC.len()] != MAGIC {
-        return Err("That does not look like a Cubby backup file".to_string());
+        return Err(NOT_A_BUNDLE.to_string());
     }
 
     let salt = &raw[MAGIC.len()..MAGIC.len() + SALT_LEN];
@@ -929,8 +1033,25 @@ pub async fn import_backup(
                 continue;
             }
         };
-        let encrypt_optional =
-            |value: Option<&str>| db.crypto.encrypt_optional_text(value).ok().flatten();
+        // Optional fields are three-state: absent, encrypted, or failed.
+        // Collapsing fail into None stored SQL NULL for notes/source/OCR and
+        // still marked OCR completed from the bundle (SBS-980).
+        let optionals = match encrypt_imported_optionals(
+            |value| db.crypto.encrypt_optional_text(value),
+            OptionalImportPlaintexts {
+                source_app: clip.source_app.as_deref(),
+                source_icon: clip.source_icon.as_deref(),
+                metadata: clip.metadata.as_deref(),
+                ocr_text: clip.ocr_text.as_deref(),
+                notes: clip.notes.as_deref(),
+            },
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                result.errors.push(error);
+                continue;
+            }
+        };
 
         let new_uuid = Uuid::new_v4().to_string();
         // Persist the original before the row exists. A clip that lands without
@@ -958,12 +1079,6 @@ pub async fn import_backup(
         } else {
             clip.created_at.clone()
         };
-        let ocr_status = if clip.ocr_text.is_some() {
-            Some("completed")
-        } else {
-            None
-        };
-
         let insert = sqlx::query(
             r#"
             INSERT INTO clips (
@@ -981,11 +1096,11 @@ pub async fn import_backup(
         .bind(&encrypted_preview)
         .bind(&content_hash)
         .bind(folder_id)
-        .bind(encrypt_optional(clip.source_app.as_deref()))
-        .bind(encrypt_optional(clip.source_icon.as_deref()))
-        .bind(encrypt_optional(clip.metadata.as_deref()))
-        .bind(encrypt_optional(clip.ocr_text.as_deref()))
-        .bind(ocr_status)
+        .bind(optionals.source_app)
+        .bind(optionals.source_icon)
+        .bind(optionals.metadata)
+        .bind(optionals.ocr_text)
+        .bind(optionals.ocr_status)
         .bind(full_image_expired)
         .bind(&clip.created_at)
         .bind(&last_accessed)
@@ -995,7 +1110,7 @@ pub async fn import_backup(
         // undo the protection on every round trip.
         .bind(i64::from(clip.is_hidden))
         // Encrypted on the way back in, like every other text column.
-        .bind(encrypt_optional(clip.notes.as_deref()))
+        .bind(optionals.notes)
         .execute(&db.pool)
         .await;
 
@@ -1019,7 +1134,7 @@ pub async fn import_backup(
                                 "BACKUP: failed to roll back clip {new_uuid} after image index error: {cleanup}"
                             );
                         } else {
-                            remove_imported_original(file_path);
+                            remove_imported_original(&db.image_dir, file_path);
                         }
                         result.errors.push(error);
                         continue;
@@ -1036,7 +1151,7 @@ pub async fn import_backup(
                             "BACKUP: failed to roll back clip {new_uuid} after format insert error: {cleanup}"
                         );
                     } else if let Some(file_path) = restored_original.as_ref() {
-                        remove_imported_original(file_path);
+                        remove_imported_original(&db.image_dir, file_path);
                     }
                     result.errors.push(error);
                     continue;
@@ -1045,7 +1160,7 @@ pub async fn import_backup(
             }
             Err(error) => {
                 if let Some(file_path) = restored_original.as_ref() {
-                    remove_imported_original(file_path);
+                    remove_imported_original(&db.image_dir, file_path);
                 }
                 result.errors.push(format!("insert failed: {error}"));
             }
@@ -1121,8 +1236,8 @@ async fn index_imported_original(
     .map_err(|error| format!("Could not index a restored screenshot original: {error}"))
 }
 
-fn remove_imported_original(file_path: &str) {
-    crate::clipboard::remove_full_image_file(file_path);
+fn remove_imported_original(image_dir: &std::path::Path, file_path: &str) {
+    crate::managed_image::remove_clip_image_files(image_dir, vec![file_path.to_string()]);
 }
 
 #[cfg(test)]
@@ -1139,13 +1254,17 @@ mod tests {
     }
 
     async fn test_database() -> Database {
+        test_database_with(crate::crypto::CryptoManager::ephemeral()).await
+    }
+
+    async fn test_database_with(crypto: crate::crypto::CryptoManager) -> Database {
         let database = Database {
             pool: sqlx::sqlite::SqlitePoolOptions::new()
                 .max_connections(1)
                 .connect("sqlite::memory:")
                 .await
                 .expect("in-memory database should open"),
-            crypto: std::sync::Arc::new(crate::crypto::CryptoManager::ephemeral()),
+            crypto: std::sync::Arc::new(crypto),
             image_dir: std::env::temp_dir().join(format!("cubby-backup-{}", Uuid::new_v4())),
             search_index: std::sync::Arc::new(crate::search_index::SearchIndex::default()),
         };
@@ -1320,6 +1439,49 @@ mod tests {
             raw.iter().flatten().all(|value| !value.contains("staging")),
             "the restored note must be encrypted at rest"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// SBS-980: optional-field encrypt failure must skip the clip. Storing it
+    /// with NULL notes/source/OCR and ocr_status = completed loses the note
+    /// and permanently skips the OCR queue.
+    #[tokio::test]
+    async fn optional_encrypt_error_skips_the_clip_and_does_not_mark_ocr_completed() {
+        let source = test_database().await;
+        insert_rich_clip(&source, "sbs-980-keep-note").await;
+
+        let path = temp_path("sbs-980");
+        export_backup(&source, path.to_str().unwrap(), "correct horse")
+            .await
+            .unwrap();
+
+        let target =
+            test_database_with(crate::crypto::CryptoManager::ephemeral_failing_optional_encrypt())
+                .await;
+        let result = import_backup(&target, path.to_str().unwrap(), "correct horse", false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.imported, 0, "the clip must not count as imported");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("encrypt failed")),
+            "the import must report the encrypt error, not succeed: {:?}",
+            result.errors
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM clips")
+            .fetch_one(&target.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "the clip must not be inserted");
+        let completed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM clips WHERE ocr_status = 'completed'")
+                .fetch_one(&target.pool)
+                .await
+                .unwrap();
+        assert_eq!(completed, 0, "OCR must not be marked completed");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1520,6 +1682,151 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("does not look like a Cubby backup"));
         std::fs::remove_file(&path).ok();
+    }
+
+    /// SBS-981: a file that starts with the magic still must not be pulled
+    /// into memory past the cap. The AEAD tag is at the end, so reading first
+    /// is what used to make a 4 GiB random file abort the process.
+    #[test]
+    fn an_oversize_unauthenticated_file_is_refused_before_aead() {
+        let path = temp_path("oversize-unauth");
+        let mut bytes = Vec::from(*MAGIC);
+        bytes.extend_from_slice(&[0_u8; SALT_LEN + NONCE_LEN]);
+        bytes.extend_from_slice(&[0xAB_u8; 64]);
+        std::fs::write(&path, &bytes).unwrap();
+
+        // Cap is larger than the header and smaller than the file, so the
+        // refusal is the size bound — not a short-header or magic check.
+        let cap = (HEADER_LEN + 16) as u64;
+        let error = read_backup_file_limited(path.to_str().unwrap(), cap).unwrap_err();
+        assert!(
+            error.contains("implausibly large"),
+            "oversize unauthenticated file must fail closed before AEAD, got {error}"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(path.parent().unwrap());
+    }
+
+    /// A file that fits the supplied cap is still returned in full, so the
+    /// bound cannot be a "read nothing" stub that would make the oversize
+    /// test pass for the wrong reason.
+    #[test]
+    fn a_file_at_the_supplied_cap_is_still_read() {
+        let path = temp_path("at-cap");
+        let mut bytes = Vec::from(*MAGIC);
+        bytes.extend_from_slice(&[0_u8; SALT_LEN + NONCE_LEN]);
+        bytes.extend_from_slice(&[0xCD_u8; 8]);
+        std::fs::write(&path, &bytes).unwrap();
+        let read = read_backup_file_limited(path.to_str().unwrap(), bytes.len() as u64)
+            .expect("a file at the cap must be read");
+        assert_eq!(read, bytes, "the bounded reader must return the whole file");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(path.parent().unwrap());
+    }
+
+    /// Cheap pin of the shared cap so export and import refuse the same size
+    /// without writing a 256 MiB file in CI.
+    #[test]
+    fn the_import_cap_refuses_one_byte_over_and_accepts_the_cap() {
+        assert!(
+            refuse_oversize_bundle(MAX_BUNDLE_BYTES).is_ok(),
+            "a file at the cap must still import"
+        );
+        let error = refuse_oversize_bundle(MAX_BUNDLE_BYTES + 1).unwrap_err();
+        assert!(
+            error.contains("implausibly large"),
+            "one byte over the cap must fail closed, got {error}"
+        );
+        // Both sides are constants, so this is a compile-time fact, not a
+        // runtime one; `const {}` says so and satisfies
+        // clippy::assertions_on_constants, which -D warnings promotes to an
+        // error. It now fails the build rather than a test run.
+        const {
+            assert!(
+                MAX_BUNDLE_BYTES < 4 * 1024 * 1024 * 1024,
+                "the production cap must stay well under the old 4 GiB abort"
+            )
+        };
+    }
+
+    /// An export that overflows the cap failed because the user's history is
+    /// too big. Settings shows this string straight after the save dialog, so
+    /// OVERSIZE_BUNDLE's "that backup file" would read as a bad destination.
+    #[test]
+    fn an_oversize_export_names_the_history_not_the_chosen_file() {
+        let bundle = BackupBundle {
+            version: 1,
+            exported_at: "2026-01-01 00:00:00".to_string(),
+            clips: Vec::new(),
+        };
+        // A cap below the header forces the refusal without building a 256 MiB
+        // bundle, the same trick read_backup_file_limited already uses.
+        let error = seal_bundle_limited(&bundle, "pass", 1)
+            .expect_err("a bundle over the supplied cap must not seal");
+        assert!(
+            error.contains("too large to export"),
+            "export must name the history, got {error}"
+        );
+        assert!(
+            !error.contains("backup file"),
+            "export must not reuse the import file wording, got {error}"
+        );
+        assert!(
+            seal_bundle_limited(&bundle, "pass", MAX_BUNDLE_BYTES).is_ok(),
+            "an ordinary bundle must still seal under the production cap"
+        );
+    }
+
+    /// The user-facing number must track the constant, not be typed twice.
+    #[test]
+    fn the_export_limit_message_reports_the_real_cap() {
+        assert!(
+            oversize_export_error(MAX_BUNDLE_BYTES).contains("256 MiB"),
+            "the production cap is 256 MiB and the message must say so"
+        );
+        assert!(
+            oversize_export_error(512 * 1024 * 1024).contains("512 MiB"),
+            "the message must be derived from the cap, not hard-coded"
+        );
+    }
+
+    /// A file past the cap must fail closed on the advertised size and never
+    /// reach Argon2/AEAD.
+    ///
+    /// This used to `set_len(MAX_BUNDLE_BYTES + 1)` and call the result sparse.
+    /// It is not: NTFS only makes a file sparse via FSCTL_SET_SPARSE, which
+    /// `set_len` does not issue, so the probe really did reserve 256 MiB in
+    /// TEMP and panicked outright if the volume could not commit it -- taking
+    /// the SBS-981 coverage with it. `import_backup_limited` takes the cap
+    /// instead, so this proves the same ordering on a 37-byte file.
+    #[tokio::test]
+    async fn import_refuses_a_file_over_the_bundle_cap_without_trying_the_passphrase() {
+        let path = temp_path("oversize-import");
+        let cap = HEADER_LEN as u64;
+        let mut probe = Vec::from(*MAGIC);
+        probe.extend_from_slice(&[0_u8; SALT_LEN + NONCE_LEN]);
+        probe.push(0);
+        assert_eq!(
+            probe.len() as u64,
+            cap + 1,
+            "the probe must sit one byte over"
+        );
+        std::fs::write(&path, &probe).unwrap();
+
+        let target = test_database().await;
+        let error = import_backup_limited(&target, path.to_str().unwrap(), "pass", false, cap)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("implausibly large"),
+            "import must refuse before Argon2/AEAD, got {error}"
+        );
+        assert!(
+            !error.contains("Wrong passphrase"),
+            "an oversize file must not reach decrypt"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(path.parent().unwrap());
     }
 
     fn clip_hash(db: &Database, text: &str) -> String {
