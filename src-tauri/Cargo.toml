@@ -50,6 +50,10 @@ dark-light = "3.0.0"
 tauri-plugin-dialog = "2"
 clipboard-rs = "0.2"
 clipboard-win = { version = "5.4.1", features = ["monitor"] }
+# SBS-983: wipe the derived backup key and in-memory backup JSON on drop so a
+# crash dump or hibernation file does not keep them after export or import.
+# Transitive via aes-gcm/argon2 is not enough — those copies are not ours.
+zeroize = { version = "1.9.0", features = ["derive"] }
 
 
 [target.'cfg(target_os = "windows")'.dependencies]

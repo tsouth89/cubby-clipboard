@@ -8,13 +8,16 @@
     "loading": "加载中...",
     "copied": "已复制到剪贴板",
     "pause": "暂停",
-    "resume": "继续"
+    "resume": "继续",
+    "clipActions": "剪贴操作",
+    "folderActions": "文件夹操作",
+    "historyActions": "历史记录操作"
   },
   "clipList": {
     "empty": "暂无剪贴",
     "emptyDesc": "复制内容后将显示在这里",
-    "loadMoreFailed": "Couldn’t load more clips",
-    "refreshFailed": "Couldn’t refresh clipboard history"
+    "loadMoreFailed": "无法加载更多剪贴",
+    "refreshFailed": "无法刷新剪贴板历史"
   },
   "folders": {
     "all": "全部",
@@ -87,7 +90,8 @@
     "removeDuplicatesSuccess": "已移除 {{count}} 个重复剪贴",
     "newFolderPlaceholder": "新文件夹名称",
     "noFolders": "尚未创建自定义文件夹。",
-    "linkFailed": "Could not open {{url}} in your browser."
+    "portableUpdateNote": "便携版不会自动更新。升级时，请下载最新的便携 ZIP 并替换 Cubby Clipboard.exe。请将 “data” 文件夹和 portable.txt 保留在 Cubby Clipboard.exe 所在的目录中，历史记录、设置和文件夹会一并保留。",
+    "linkFailed": "无法在浏览器中打开 {{url}}。"
   },
   "notifications": {
     "clipDeleted": "剪贴已删除",

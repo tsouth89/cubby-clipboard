@@ -8,6 +8,8 @@ Please report suspected vulnerabilities through GitHub's private security-adviso
 
 Cubby release candidates must pass the JavaScript production dependency audit, the Rust advisory audit, the automated checks in `scripts/smoke-release.ps1`, and the privacy checks in `scripts/check-release.mjs`. Packaged-install smoke steps remain in `docs/RELEASE_CHECKLIST.md`.
 
+The opener URL allowlist in `src-tauri/capabilities/default.json` is checked by `scripts/check-release.mjs` using the same glob defaults as `tauri-plugin-opener` (star and question-mark match slash). A pattern whose scheme or authority contains a wildcard is refused.
+
 ### RUSTSEC-2023-0071 waiver
 
 `Cargo.lock` currently records `rsa 0.9.10` through SQLx's disabled optional MySQL dependency. Cubby configures SQLx with default features disabled and enables SQLite only. `cargo tree --target all` confirms that RSA is not reachable in Cubby's active dependency graph.
@@ -43,10 +45,15 @@ Release Info logs persist under the application log directory. The History sourc
 
 ## Clipboard history at rest
 
-Cubby encrypts clipboard payloads, previews, source attribution, metadata, and image files with AES-256-GCM. Dedupe values use a keyed HMAC rather than a plain content hash. The random storage key is protected for the current Windows user with DPAPI and is never stored in plaintext.
+Cubby encrypts clipboard payloads, previews, source attribution, metadata, and image files with AES-256-GCM. Dedupe values use a keyed HMAC rather than a plain content hash. The random storage key is protected for the current Windows user with DPAPI and is never stored in plaintext. The backup passphrase, the key derived from it, the in-memory backup JSON, and the unlocked storage key are wrapped so they are overwritten when those values drop (SBS-983).
 
 Existing plaintext history is migrated before the clipboard listener starts. Cubby fails closed if the key cannot be unlocked or migration cannot complete, preventing new history from being mixed into an unreadable or partially encrypted store.
 
 Core Windows clipboard representations are retained together: Unicode text, HTML, RTF, and images. Auxiliary formats are encrypted in the same authenticated store. Cubby intentionally does not persist arbitrary private application formats because some contain process-specific handles or unsafe opaque data that cannot be replayed reliably.
 
 Copying files is intentionally not recorded. A file payload is a reference to a path, not durable content, so a history entry for it can silently stop working after a move, a disconnect, or a target-app mismatch. Cubby ignores both physical (`CF_HDROP`) and virtual file payloads before reading any text they advertise, and a migration removes file rows written by earlier versions. The one exception is a screenshot tool that publishes a real bitmap alongside a file reference: Cubby keeps that as an image, never as a path.
+
+## Backup path grants
+
+`export_backup`, `import_backup`, and `import_from_ditto` accept a filesystem path only when the matching file dialog produced that exact string. The grant is in-memory, purpose-keyed, and compared without canonicalization. It is consumed by the first mutating call, expires after 60 seconds, and is dropped when the Settings window is destroyed, so an abandoned pick cannot stay writable until Cubby exits.
+

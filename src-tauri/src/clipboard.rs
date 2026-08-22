@@ -1431,11 +1431,9 @@ fn capture_text(text: String) -> Option<CapturedContent> {
         return None;
     }
 
+    // Same bound as edit-in-place and Ditto import (SBS-994).
+    let preview = crate::clip_list::truncate_text_preview(&text);
     let content = text.into_bytes();
-    let preview = String::from_utf8_lossy(&content)
-        .chars()
-        .take(200)
-        .collect::<String>();
     let hash = calculate_hash(&content);
     Some(CapturedContent::Text {
         content,
@@ -2421,7 +2419,10 @@ async fn process_clipboard_snapshot(
                                 .bind(&clip_uuid)
                                 .execute(pool)
                                 .await;
-                            remove_full_image_file(&file_path);
+                            crate::managed_image::remove_clip_image_files(
+                                &db.image_dir,
+                                vec![file_path],
+                            );
                             return;
                         }
                     }
@@ -2908,9 +2909,11 @@ pub fn create_image_preview(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
 pub use crate::image_persist::persist_full_image_file;
 
 /// Stage a recaptured full-resolution original, update the existing image row
-/// inside one transaction, and replace the previous original only after that
-/// transaction commits. Any failure leaves the prior row and the prior file
-/// intact and never queues OCR against a file that was never written.
+/// inside one transaction, and commit that transaction only after the staged
+/// file has replaced the live original. A failed rename rolls the row back so
+/// the clip cannot claim an original that is not on disk (SBS-996). Any
+/// earlier failure leaves the prior row and the prior file intact and never
+/// queues OCR against a file that was never written.
 async fn recapture_existing_image(
     db: &Database,
     existing_id: &str,
@@ -3008,14 +3011,6 @@ pub fn read_full_image_file(
 ) -> Result<Vec<u8>, String> {
     let encrypted = std::fs::read(file_path).map_err(|e| e.to_string())?;
     crypto.decrypt(&encrypted)
-}
-
-pub fn remove_full_image_file(file_path: &str) {
-    if let Err(e) = std::fs::remove_file(file_path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            log::warn!("Failed to delete a stored clipboard image: {}", e);
-        }
-    }
 }
 
 #[cfg(target_os = "windows")]
@@ -3879,6 +3874,29 @@ mod tests {
     }
 
     #[test]
+    fn capture_text_preview_uses_the_shared_limit() {
+        let secret = "UNIQUE-SBS-994-CAPTURE-TAIL-SHOULD-NOT-STORE";
+        let body = format!(
+            "{}{secret}",
+            "x".repeat(crate::clip_list::TEXT_PREVIEW_CHAR_LIMIT)
+        );
+        let captured = capture_text(body.clone()).expect("text should be captured");
+        match captured {
+            CapturedContent::Text {
+                content, preview, ..
+            } => {
+                assert_eq!(content, body.as_bytes());
+                assert_eq!(
+                    preview.chars().count(),
+                    crate::clip_list::TEXT_PREVIEW_CHAR_LIMIT
+                );
+                assert!(!preview.contains(secret));
+            }
+            CapturedContent::Image { .. } => panic!("expected text"),
+        }
+    }
+
+    #[test]
     fn clipboard_contention_backoff_is_bounded() {
         let delays = (0..10)
             .map(|attempt| clipboard_retry_delay(attempt).as_millis())
@@ -4275,9 +4293,10 @@ mod tests {
             );
             assert_eq!(expired_flag(&index_fail_db, "shot").await, 1);
             // Review finding on PR #214: the write must not leave an orphan
-            // behind. Staging handles that on its own -- the temp file is only
-            // renamed onto `{uuid}.cubby` after the transaction commits, so a
-            // failed index leaves neither an original nor a stray temp.
+            // behind. The temp file is only renamed onto `{uuid}.cubby` after
+            // the SQL statements succeed; SBS-996 then commits the transaction.
+            // A failed index never reaches the rename, so it leaves neither an
+            // original nor a stray temp.
             assert!(
                 !index_fail_db.image_dir.join("shot.cubby").exists(),
                 "a failed index must not leave an unindexed original behind"

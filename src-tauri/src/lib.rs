@@ -15,6 +15,7 @@ static SHOW_GENERATION: AtomicU64 = AtomicU64::new(0);
 static FLYOUT_WORKER_LIVE: AtomicBool = AtomicBool::new(false);
 
 mod backup;
+mod backup_import_optional;
 mod cf_html;
 mod clip_list;
 mod clipboard;
@@ -34,6 +35,7 @@ mod database;
 mod ditto_import;
 mod image_persist;
 mod log_targets;
+mod managed_image;
 mod models;
 mod ocr;
 mod ocr_queue;
@@ -291,6 +293,18 @@ pub fn run_app() {
                         std::thread::spawn(move || {
                             crate::animate_window_hide(&win_clone, None);
                         });
+                    }
+                }
+                tauri::WindowEvent::Destroyed => {
+                    // SBS-1015: an abandoned file-dialog pick must not stay
+                    // writable after Settings is gone.
+                    if let Err(error) =
+                        crate::path_grant::drop_grants_if_settings_window(window.label())
+                    {
+                        log::warn!(
+                            "Could not drop path grants when {} closed: {error}",
+                            window.label()
+                        );
                     }
                 }
                 _ => {}

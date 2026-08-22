@@ -1,4 +1,5 @@
 use crate::database::Database;
+pub(crate) use crate::managed_image::remove_clip_image_files;
 use crate::models::{Clip, ClipboardItem, Folder, FolderItem, OcrHighlights, OcrMatch, OcrRect};
 use clipboard_rs::common::RustImage;
 use clipboard_rs::{Clipboard, ClipboardContent, ClipboardContext, RustImageData};
@@ -7,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
+use zeroize::Zeroizing;
 
 fn clip_to_list_item(clip: &Clip, preview_only: bool) -> ClipboardItem {
     // A hidden clip ships no content and no preview — not even a thumbnail.
@@ -55,41 +57,6 @@ fn clip_to_list_item(clip: &Clip, preview_only: bool) -> ClipboardItem {
     }
 }
 
-/// Group words into lines when the stored layout predates line indices. Words
-/// are already in reading order, so this only has to notice where the text
-/// steps down: a word whose vertical center leaves the current line's band
-/// starts a new one. Without it every legacy clip would look like a single
-/// line, and a multi-line selection would copy back as one run-on.
-fn infer_line_indices(words: &[crate::ocr::OcrWordBox]) -> Vec<u32> {
-    let mut lines = Vec::with_capacity(words.len());
-    let mut line = 0u32;
-    let mut band_center = f32::NAN;
-    let mut band_height = 0.0f32;
-
-    for word in words {
-        let center = word.y + word.height / 2.0;
-        if band_center.is_nan() {
-            band_center = center;
-            band_height = word.height.max(1.0);
-        } else {
-            // Tolerate half a line height of baseline wobble within a line;
-            // anything beyond that is the next line.
-            let tolerance = band_height.max(word.height).max(1.0) * 0.6;
-            if (center - band_center).abs() > tolerance {
-                line += 1;
-                band_center = center;
-                band_height = word.height.max(1.0);
-            } else {
-                // Track the running center so a gently drifting line stays one.
-                band_center = (band_center + center) / 2.0;
-                band_height = band_height.max(word.height);
-            }
-        }
-        lines.push(line);
-    }
-    lines
-}
-
 /// The selectable word layout for an image clip, as fractions of the image.
 /// Returns None when there is nothing usable to select.
 fn ocr_text_layout(ocr_words_json: &str) -> Option<crate::models::OcrTextLayout> {
@@ -102,7 +69,7 @@ fn ocr_text_layout(ocr_words_json: &str) -> Option<crate::models::OcrTextLayout>
 
     // Recorded indices are the engine's own line numbers; fall back to inferred
     // bands for layouts stored before those were kept.
-    let inferred = infer_line_indices(&layout.words);
+    let inferred = crate::ocr::infer_line_indices(&layout.words);
     let recorded: Vec<u32> = layout
         .words
         .iter()
@@ -407,19 +374,43 @@ struct ClipBatch {
     exhausted: bool,
 }
 
-/// Page by readable rows instead of SQL rows.
+/// Where in an already-ordered source to start a page.
 ///
-/// Both clients count what they displayed and send that count back as the next
-/// offset, and both treat a short page as the end of history. So dropping an
-/// unreadable row *after* the database applied LIMIT/OFFSET truncates history:
-/// the page comes back one short, the client stops asking, and the offset it
-/// would send next points at a row it has already been given. Skipping
-/// `offset` readable rows and then collecting `limit` more keeps that contract
-/// exact. The scan runs one page at a time, so memory stays bounded no matter
-/// how far down the unreadable row sits.
+/// `after_id` is the last row the client already has. Starting just after it
+/// is exact even when an earlier page skipped unreadable neighbors. A bare
+/// `offset` is a source-row index (SQL OFFSET / id-list index), which matches
+/// the displayed count when every earlier row decrypted. SBS-993: never walk
+/// and decrypt `[0, offset)` to count readable rows.
+fn listing_cursor_id(after_id: Option<&str>) -> Option<&str> {
+    after_id.map(str::trim).filter(|id| !id.is_empty())
+}
+
+fn source_start_for_ids(ids: &[String], after_id: Option<&str>, offset: usize) -> usize {
+    match listing_cursor_id(after_id) {
+        Some(id) => match ids.iter().position(|candidate| candidate == id) {
+            Some(index) => index.saturating_add(1),
+            None => {
+                // Unknown is not "start over": restarting would re-decrypt and
+                // re-send the prefix the client already displayed. Fall back to
+                // the source offset the client sent alongside the cursor.
+                log::warn!(
+                    "CLIPS: listing cursor {id} is not in this result set; falling back to offset {offset}"
+                );
+                offset
+            }
+        },
+        None => offset,
+    }
+}
+
+/// Collect `limit` readable rows starting at `source_start` in the ordered
+/// source. Unreadable neighbors are skipped and the walk continues forward so
+/// a short page still means "no more history" (SBS-830). The walk never
+/// rewinds before `source_start`, so a later page does not re-decrypt the
+/// prefix (SBS-993).
 async fn collect_readable_clips<F, Fut>(
     db: &Database,
-    offset: usize,
+    source_start: usize,
     limit: usize,
     fetch_batch: F,
 ) -> Result<Vec<Clip>, String>
@@ -431,17 +422,12 @@ where
         return Ok(Vec::new());
     }
     let mut page: Vec<Clip> = Vec::new();
-    let mut scanned = 0_usize;
-    let mut readable = 0_usize;
+    let mut scanned = source_start;
     loop {
         let batch = fetch_batch(scanned, limit).await?;
         scanned = scanned.saturating_add(limit);
         for mut clip in batch.rows {
             if !decrypt_listed_clip(db, &mut clip) {
-                continue;
-            }
-            readable += 1;
-            if readable <= offset {
                 continue;
             }
             page.push(clip);
@@ -456,14 +442,15 @@ where
 }
 
 /// Readable-row paging over an id list the caller has already ordered and
-/// filtered (search hits, source-app matches).
+/// filtered (search hits, source-app matches). `source_start` is an index
+/// into `ids`, not a readable-row count.
 async fn collect_readable_clips_by_id(
     db: &Database,
     ids: &[String],
-    offset: usize,
+    source_start: usize,
     limit: usize,
 ) -> Result<Vec<Clip>, String> {
-    collect_readable_clips(db, offset, limit, |start, count| async move {
+    collect_readable_clips(db, source_start, limit, |start, count| async move {
         let end = start.saturating_add(count).min(ids.len());
         let chunk = ids.get(start..end).unwrap_or_default();
         Ok(ClipBatch {
@@ -517,19 +504,6 @@ fn encrypt_existing_optional_text(
     value
         .map(|value| encrypt_existing_text(crypto, value))
         .transpose()
-}
-
-fn is_managed_image_path(image_dir: &std::path::Path, file_path: &str) -> bool {
-    let Ok(managed_dir) = image_dir.canonicalize() else {
-        return false;
-    };
-    let Some(parent) = std::path::Path::new(file_path).parent() else {
-        return false;
-    };
-    parent
-        .canonicalize()
-        .map(|candidate| candidate == managed_dir)
-        .unwrap_or(false)
 }
 
 async fn image_bytes_for_encryption_migration(
@@ -657,8 +631,8 @@ pub async fn migrate_encrypted_storage(db: &Database) -> Result<u64, String> {
         transaction.commit().await.map_err(|e| e.to_string())?;
 
         if let (Some(old_path), Some((new_path, _))) = (old_image_path, &new_image_path) {
-            if old_path != *new_path && is_managed_image_path(&db.image_dir, &old_path) {
-                crate::clipboard::remove_full_image_file(&old_path);
+            if old_path != *new_path {
+                remove_clip_image_files(&db.image_dir, vec![old_path]);
             }
         }
         migrated += 1;
@@ -922,12 +896,36 @@ fn clip_where_body(
     sql
 }
 
+async fn fetch_ordered_clip_ids(
+    pool: &SqlitePool,
+    where_body: &str,
+    folder_id: Option<i64>,
+    date_from: Option<&str>,
+    date_to: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let sql = format!(
+        "SELECT uuid FROM clips WHERE {where_body} ORDER BY is_pinned DESC, created_at DESC, uuid DESC"
+    );
+    let mut query = sqlx::query_scalar::<_, String>(&sql);
+    if let Some(id) = folder_id {
+        query = query.bind(id);
+    }
+    if let Some(from) = date_from {
+        query = query.bind(from.to_string());
+    }
+    if let Some(to) = date_to {
+        query = query.bind(to.to_string());
+    }
+    query.fetch_all(pool).await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn get_clips(
     filter_id: Option<String>,
     limit: i64,
     offset: i64,
+    after_id: Option<String>,
     preview_only: Option<bool>,
     content_filter: Option<String>,
     date_from: Option<String>,
@@ -935,7 +933,7 @@ pub async fn get_clips(
     source_app: Option<String>,
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<Vec<ClipboardItem>, String> {
-    get_clips_in_database(
+    get_clips_paged(
         filter_id,
         limit,
         offset,
@@ -944,6 +942,7 @@ pub async fn get_clips(
         date_from,
         date_to,
         source_app,
+        after_id,
         db.inner(),
     )
     .await
@@ -981,6 +980,11 @@ fn get_clips_request_log(
     )
 }
 
+// Cursor paging moved production onto the *_paged entry points, leaving
+// this as the no-cursor adapter the existing offset-path tests call.
+// cfg(test) rather than deleted: it is genuinely a test helper now, and
+// inlining `None` into ~35 call sites would be churn, not clarity.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn get_clips_in_database(
     filter_id: Option<String>,
@@ -991,6 +995,34 @@ async fn get_clips_in_database(
     date_from: Option<String>,
     date_to: Option<String>,
     source_app: Option<String>,
+    db: &Database,
+) -> Result<Vec<ClipboardItem>, String> {
+    get_clips_paged(
+        filter_id,
+        limit,
+        offset,
+        preview_only,
+        content_filter,
+        date_from,
+        date_to,
+        source_app,
+        None,
+        db,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn get_clips_paged(
+    filter_id: Option<String>,
+    limit: i64,
+    offset: i64,
+    preview_only: Option<bool>,
+    content_filter: Option<String>,
+    date_from: Option<String>,
+    date_to: Option<String>,
+    source_app: Option<String>,
+    after_id: Option<String>,
     db: &Database,
 ) -> Result<Vec<ClipboardItem>, String> {
     let pool = &db.pool;
@@ -1033,10 +1065,13 @@ async fn get_clips_in_database(
         date_from.as_deref(),
         date_to.as_deref(),
     );
-    // The client counts displayed rows, so offset and limit count readable
-    // clips, not database rows.
+    // `offset` is a source-row index. Clients that count displayed rows also
+    // send `after_id` (the last row they have) so a skipped unreadable neighbor
+    // cannot shift later pages. Limit is still a readable-row count: a
+    // decrypt failure fills forward instead of returning a short page.
     let requested_offset = offset.max(0) as usize;
     let requested_limit = limit.max(0) as usize;
+    let after_id = listing_cursor_id(after_id.as_deref()).map(str::to_string);
 
     let sql_started = Instant::now();
     let clips: Vec<Clip> = if let Some(app) = source_app.as_deref() {
@@ -1050,35 +1085,43 @@ async fn get_clips_in_database(
         if allowed.is_empty() {
             Vec::new()
         } else {
-            let sql = format!(
-                "SELECT uuid FROM clips WHERE {where_body} ORDER BY is_pinned DESC, created_at DESC, uuid DESC"
-            );
-            let mut query = sqlx::query_scalar::<_, String>(&sql);
-            if let Some(id) = folder_id {
-                query = query.bind(id);
-            }
-            if let Some(from) = date_from.as_deref() {
-                query = query.bind(from.to_string());
-            }
-            if let Some(to) = date_to.as_deref() {
-                query = query.bind(to.to_string());
-            }
-            let ordered_ids: Vec<String> =
-                query.fetch_all(pool).await.map_err(|e| e.to_string())?;
+            let ordered_ids = fetch_ordered_clip_ids(
+                pool,
+                &where_body,
+                folder_id,
+                date_from.as_deref(),
+                date_to.as_deref(),
+            )
+            .await?;
             let matching: Vec<String> = ordered_ids
                 .into_iter()
                 .filter(|id| allowed.contains(id))
                 .collect();
-            collect_readable_clips_by_id(db, &matching, requested_offset, requested_limit).await?
+            let source_start =
+                source_start_for_ids(&matching, after_id.as_deref(), requested_offset);
+            collect_readable_clips_by_id(db, &matching, source_start, requested_limit).await?
         }
     } else {
+        let source_start = if after_id.is_some() {
+            let ordered_ids = fetch_ordered_clip_ids(
+                pool,
+                &where_body,
+                folder_id,
+                date_from.as_deref(),
+                date_to.as_deref(),
+            )
+            .await?;
+            source_start_for_ids(&ordered_ids, after_id.as_deref(), requested_offset)
+        } else {
+            requested_offset
+        };
         let list_sql = format!(
             "SELECT * FROM clips WHERE {where_body} \
              ORDER BY is_pinned DESC, created_at DESC, uuid DESC LIMIT ? OFFSET ?"
         );
         let date_from = date_from.as_deref();
         let date_to = date_to.as_deref();
-        collect_readable_clips(db, requested_offset, requested_limit, |start, count| {
+        collect_readable_clips(db, source_start, requested_limit, |start, count| {
             let sql = list_sql.as_str();
             async move {
                 let mut query = sqlx::query_as::<_, Clip>(sql);
@@ -1613,11 +1656,12 @@ pub async fn toggle_clip_pin(
 /// clip permanently unfindable by its real text and give the user no way to
 /// mend that. A correction is worth more to search than to one paste.
 ///
-/// The per-word boxes are deliberately left alone. They still describe where
-/// words sit on the image, which is what the selection overlay needs; only the
-/// recognized-text block — what search, Copy text, and Shift+Enter use — is
-/// corrected. Selecting a misread word directly off the image therefore still
-/// yields the original reading.
+/// The per-word boxes are rewritten to the same tokens (SBS-1010). Leaving them
+/// as the engine stored them meant drag-select and search highlights still
+/// copied the misreading after "Recognized text updated". Geometry stays;
+/// leftover boxes are dropped so a shorter correction cannot select a stale
+/// word. Unreadable existing boxes are left unchanged rather than cleared —
+/// failed to decrypt is not "no layout".
 #[tauri::command]
 pub async fn set_clip_ocr_text(
     id: String,
@@ -1627,14 +1671,64 @@ pub async fn set_clip_ocr_text(
     set_clip_ocr_text_in_database(db.inner(), &id, &text).await
 }
 
+/// Whether a correction can rewrite the stored word-box JSON.
+enum OcrWordsUpdate {
+    /// Encrypt and store this JSON, or NULL the column.
+    Replace(Option<String>),
+    /// Existing ciphertext could not be read; leave the column alone.
+    LeaveUnchanged,
+}
+
+fn rewrite_stored_ocr_words(
+    crypto: &crate::crypto::CryptoManager,
+    encrypted_words: Option<&str>,
+    trimmed: &str,
+) -> Result<OcrWordsUpdate, String> {
+    if trimmed.is_empty() {
+        // Clearing the assembled block must also clear selectable boxes, or
+        // drag-select still copies the reading the user just deleted.
+        return Ok(OcrWordsUpdate::Replace(None));
+    }
+    let Some(ciphertext) = encrypted_words else {
+        return Ok(OcrWordsUpdate::Replace(None));
+    };
+    let json = match crypto.decrypt_text(ciphertext) {
+        Ok(json) => json,
+        Err(error) => {
+            log::warn!(
+                "CLIPS: Leaving unreadable OCR word boxes unchanged after a correction: {error}"
+            );
+            return Ok(OcrWordsUpdate::LeaveUnchanged);
+        }
+    };
+    let layout: crate::ocr::OcrLayout = match serde_json::from_str(&json) {
+        Ok(layout) => layout,
+        Err(error) => {
+            log::warn!(
+                "CLIPS: Leaving unparseable OCR word boxes unchanged after a correction: {error}"
+            );
+            return Ok(OcrWordsUpdate::LeaveUnchanged);
+        }
+    };
+    let layout = crate::ocr::apply_ocr_text_to_layout(layout, trimmed);
+    if layout.words.is_empty() {
+        return Ok(OcrWordsUpdate::Replace(None));
+    }
+    let json = serde_json::to_string(&layout).map_err(|error| error.to_string())?;
+    Ok(OcrWordsUpdate::Replace(Some(crypto.encrypt_text(&json)?)))
+}
+
 async fn set_clip_ocr_text_in_database(db: &Database, id: &str, text: &str) -> Result<(), String> {
-    let clip_type: Option<String> =
-        sqlx::query_scalar("SELECT clip_type FROM clips WHERE uuid = ?")
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT clip_type, ocr_words FROM clips WHERE uuid = ?")
             .bind(id)
             .fetch_optional(&db.pool)
             .await
             .map_err(|e| e.to_string())?;
-    if clip_type.as_deref() != Some("image") {
+    let Some((clip_type, encrypted_words)) = row else {
+        return Err("Recognized text belongs to image clips".to_string());
+    };
+    if clip_type != "image" {
         return Err("Recognized text belongs to image clips".to_string());
     }
 
@@ -1644,14 +1738,30 @@ async fn set_clip_ocr_text_in_database(db: &Database, id: &str, text: &str) -> R
     } else {
         db.crypto.encrypt_optional_text(Some(trimmed))?
     };
+    let words_update = rewrite_stored_ocr_words(&db.crypto, encrypted_words.as_deref(), trimmed)?;
     // A corrected clip counts as processed: leaving it pending would let the
     // background worker overwrite the correction on its next pass.
-    sqlx::query("UPDATE clips SET ocr_text = ?, ocr_status = 'completed' WHERE uuid = ?")
-        .bind(&stored)
-        .bind(id)
-        .execute(&db.pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    match words_update {
+        OcrWordsUpdate::Replace(stored_words) => {
+            sqlx::query(
+                "UPDATE clips SET ocr_text = ?, ocr_words = ?, ocr_status = 'completed' WHERE uuid = ?",
+            )
+            .bind(&stored)
+            .bind(&stored_words)
+            .bind(id)
+            .execute(&db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+        OcrWordsUpdate::LeaveUnchanged => {
+            sqlx::query("UPDATE clips SET ocr_text = ?, ocr_status = 'completed' WHERE uuid = ?")
+                .bind(&stored)
+                .bind(id)
+                .execute(&db.pool)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
 
     db.search_index.update_ocr(id, trimmed);
     Ok(())
@@ -1763,10 +1873,9 @@ fn is_unique_constraint_error(error: &sqlx::Error) -> bool {
 }
 
 /// Preview text stored on the row, bounded so a huge clip does not bloat every
-/// list query. Mirrors the capture path's limit.
+/// list query. Same helper and limit as capture and Ditto import (SBS-994).
 fn truncate_preview(text: &str) -> String {
-    const PREVIEW_LIMIT: usize = 500;
-    text.chars().take(PREVIEW_LIMIT).collect()
+    crate::clip_list::truncate_text_preview(text)
 }
 
 /// Attach or clear a clip's note (SOU-588). An empty note clears the field
@@ -1978,6 +2087,7 @@ pub async fn search_clips(
     filter_id: Option<String>,
     limit: i64,
     offset: i64,
+    after_id: Option<String>,
     preview_only: Option<bool>,
     content_filter: Option<String>,
     date_from: Option<String>,
@@ -1985,7 +2095,7 @@ pub async fn search_clips(
     source_app: Option<String>,
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<Vec<ClipboardItem>, String> {
-    search_clips_in_database(
+    search_clips_paged(
         query,
         filter_id,
         limit,
@@ -1995,11 +2105,17 @@ pub async fn search_clips(
         date_from,
         date_to,
         source_app,
+        after_id,
         db.inner(),
     )
     .await
 }
 
+// Cursor paging moved production onto the *_paged entry points, leaving
+// this as the no-cursor adapter the existing offset-path tests call.
+// cfg(test) rather than deleted: it is genuinely a test helper now, and
+// inlining `None` into ~35 call sites would be churn, not clarity.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn search_clips_in_database(
     query: String,
@@ -2013,6 +2129,36 @@ async fn search_clips_in_database(
     source_app: Option<String>,
     db: &Database,
 ) -> Result<Vec<ClipboardItem>, String> {
+    search_clips_paged(
+        query,
+        filter_id,
+        limit,
+        offset,
+        preview_only,
+        content_filter,
+        date_from,
+        date_to,
+        source_app,
+        None,
+        db,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn search_clips_paged(
+    query: String,
+    filter_id: Option<String>,
+    limit: i64,
+    offset: i64,
+    preview_only: Option<bool>,
+    content_filter: Option<String>,
+    date_from: Option<String>,
+    date_to: Option<String>,
+    source_app: Option<String>,
+    after_id: Option<String>,
+    db: &Database,
+) -> Result<Vec<ClipboardItem>, String> {
     // Flyout and History are the only search callers, and both are list UIs.
     // Unlike get_clips, omitting the flag withholds the body: a forgotten
     // previewOnly on a keystroke path must not resurrect the SBS-912 leak.
@@ -2021,6 +2167,7 @@ async fn search_clips_in_database(
     let started = Instant::now();
     let requested_offset = offset.max(0) as usize;
     let requested_limit = limit.max(0) as usize;
+    let after_id = listing_cursor_id(after_id.as_deref()).map(str::to_string);
     if requested_limit == 0 {
         return Ok(Vec::new());
     }
@@ -2056,23 +2203,14 @@ async fn search_clips_in_database(
         date_to.as_deref(),
     );
     let sql_started = Instant::now();
-    let sql = format!(
-        "SELECT uuid FROM clips WHERE {where_body} ORDER BY is_pinned DESC, created_at DESC, uuid DESC"
-    );
-    let mut ordered_query = sqlx::query_scalar::<_, String>(&sql);
-    if let Some(id) = folder_id {
-        ordered_query = ordered_query.bind(id);
-    }
-    if let Some(from) = date_from.as_deref() {
-        ordered_query = ordered_query.bind(from.to_string());
-    }
-    if let Some(to) = date_to.as_deref() {
-        ordered_query = ordered_query.bind(to.to_string());
-    }
-    let ordered_ids: Vec<String> = ordered_query
-        .fetch_all(pool)
-        .await
-        .map_err(|error| error.to_string())?;
+    let ordered_ids = fetch_ordered_clip_ids(
+        pool,
+        &where_body,
+        folder_id,
+        date_from.as_deref(),
+        date_to.as_deref(),
+    )
+    .await?;
     let matching = ordered_ids
         .into_iter()
         .filter(|id| candidates.contains(id))
@@ -2084,8 +2222,8 @@ async fn search_clips_in_database(
     // An indexed hit can still fail to decrypt here (the index skips the
     // content of an image clip, so a corrupt thumbnail only surfaces now), so
     // the page is filled with readable rows rather than trimmed after the fact.
-    let clips =
-        collect_readable_clips_by_id(db, &matching, requested_offset, requested_limit).await?;
+    let source_start = source_start_for_ids(&matching, after_id.as_deref(), requested_offset);
+    let clips = collect_readable_clips_by_id(db, &matching, source_start, requested_limit).await?;
     let sql_ms = sql_started.elapsed().as_millis();
 
     let image_rows = clips
@@ -2576,16 +2714,6 @@ fn bind_retention<'q, O>(
         .bind(max_items.max(0))
 }
 
-pub(crate) fn remove_clip_image_files(image_dir: &std::path::Path, image_paths: Vec<String>) {
-    for path in image_paths {
-        if !path.is_empty() && is_managed_image_path(image_dir, &path) {
-            crate::clipboard::remove_full_image_file(&path);
-        } else if !path.is_empty() {
-            log::warn!("Skipped deleting an unmanaged clipboard image path");
-        }
-    }
-}
-
 #[tauri::command]
 pub async fn clear_unpinned_clips(db: tauri::State<'_, Arc<Database>>) -> Result<u64, String> {
     let (deleted, image_paths) = clear_clips_in_pool(&db.pool, true).await?;
@@ -2972,7 +3100,10 @@ pub async fn export_backup(
     passphrase: String,
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<usize, String> {
-    crate::path_grant::export_granted_backup(db.inner(), path, passphrase).await
+    // SBS-983: this is the longest-lived copy of the passphrase, alive for the
+    // whole export. Owning it as Zeroizing wipes it on return instead of
+    // leaving it in freed heap for a crash dump or hiberfil.sys.
+    crate::path_grant::export_granted_backup(db.inner(), path, Zeroizing::new(passphrase)).await
 }
 
 #[tauri::command]
@@ -2982,7 +3113,9 @@ pub async fn import_backup(
     dry_run: bool,
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<crate::backup::BackupImportResult, String> {
-    crate::path_grant::import_granted_backup(db.inner(), path, passphrase, dry_run).await
+    // SBS-983: see export_backup above.
+    crate::path_grant::import_granted_backup(db.inner(), path, Zeroizing::new(passphrase), dry_run)
+        .await
 }
 
 #[tauri::command]
@@ -3279,6 +3412,47 @@ mod tests {
         .collect()
     }
 
+    async fn paged_after(database: &Database, limit: i64, after_id: &str) -> Vec<String> {
+        super::get_clips_paged(
+            None,
+            limit,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(after_id.to_string()),
+            database,
+        )
+        .await
+        .expect("listing must survive an unreadable clip")
+        .into_iter()
+        .map(|clip| clip.id)
+        .collect()
+    }
+
+    async fn searched_after(database: &Database, limit: i64, after_id: &str) -> Vec<String> {
+        super::search_clips_paged(
+            "pageable".into(),
+            None,
+            limit,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(after_id.to_string()),
+            database,
+        )
+        .await
+        .expect("search must survive an unreadable hit")
+        .into_iter()
+        .map(|clip| clip.id)
+        .collect()
+    }
+
     /// Three clips over three days from two apps, newest last.
     async fn seed_filter_clips(database: &Database) {
         insert_search_clip(
@@ -3508,6 +3682,79 @@ mod tests {
         assert!(database.search_index.matches("teh").is_empty());
     }
 
+    /// SBS-994: a ~450-character edit used to persist 450 characters of
+    /// `text_preview`. Every preview-only list and search then shipped that
+    /// prefix into the WebView. Capture stores 200; the edit path must too.
+    #[tokio::test]
+    async fn editing_a_long_clip_stores_the_capture_preview_limit() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("editable", "short original", "2026-06-01 09:00:00"),
+        )
+        .await;
+
+        let prefix = "a".repeat(crate::clip_list::TEXT_PREVIEW_CHAR_LIMIT);
+        let secret = "UNIQUE-SBS-994-EDITED-TAIL-SHOULD-NOT-SHIP";
+        let edited = format!("{prefix}{secret}");
+        update_clip_text_in_database(&database, "editable", &edited)
+            .await
+            .expect("edit should apply");
+
+        let stored: String = sqlx::query_scalar("SELECT text_preview FROM clips WHERE uuid = ?")
+            .bind("editable")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        let decrypted = database.crypto.decrypt_text(&stored).unwrap();
+        assert_eq!(
+            decrypted.chars().count(),
+            crate::clip_list::TEXT_PREVIEW_CHAR_LIMIT
+        );
+        assert_eq!(decrypted, prefix);
+        assert!(
+            !decrypted.contains(secret),
+            "stored text_preview must not keep the tail past the capture limit"
+        );
+
+        let listed =
+            get_clips_in_database(None, 10, 0, Some(true), None, None, None, None, &database)
+                .await
+                .unwrap();
+        let row = listed
+            .iter()
+            .find(|clip| clip.id == "editable")
+            .expect("edited clip should list");
+        assert!(
+            row.content.is_empty(),
+            "preview_only must withhold the body"
+        );
+        assert_eq!(row.preview, prefix);
+        assert!(!row.preview.contains(secret));
+
+        let searched = search_clips_in_database(
+            "UNIQUE-SBS-994".to_string(),
+            None,
+            10,
+            0,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            &database,
+        )
+        .await
+        .unwrap();
+        let search_row = searched
+            .iter()
+            .find(|clip| clip.id == "editable")
+            .expect("the full body is still searchable");
+        assert!(search_row.content.is_empty());
+        assert_eq!(search_row.preview, prefix);
+        assert!(!search_row.preview.contains(secret));
+    }
+
     #[tokio::test]
     async fn editing_refuses_an_image_and_an_unknown_clip() {
         let database = test_database().await;
@@ -3668,6 +3915,73 @@ mod tests {
                 .await
                 .unwrap();
         assert!(!raw.unwrap().contains("invoice"));
+    }
+
+    #[tokio::test]
+    async fn a_corrected_reading_rewrites_drag_select_word_boxes() {
+        // SBS-1010: saving a correction used to leave ocr_words as the engine
+        // stored them, so drag-select and search highlights still copied the
+        // misreading after Copy text already used the fix.
+        let database = test_database().await;
+        let layout = crate::ocr::OcrLayout {
+            image_width: 100,
+            image_height: 50,
+            words: vec![crate::ocr::OcrWordBox {
+                text: "htlps://exarnple.com".to_string(),
+                x: 10.0,
+                y: 5.0,
+                width: 80.0,
+                height: 10.0,
+                line: Some(0),
+            }],
+        };
+        sqlx::query(
+            "INSERT INTO clips (uuid, clip_type, content, text_preview, content_hash, ocr_text, ocr_words, ocr_status) VALUES ('shot', 'image', ?, ?, 'h', ?, ?, 'completed')",
+        )
+        .bind(database.crypto.encrypt(&[1, 2, 3]).unwrap())
+        .bind(database.crypto.encrypt_text("Screenshot").unwrap())
+        .bind(database.crypto.encrypt_text("htlps://exarnple.com").unwrap())
+        .bind(
+            database
+                .crypto
+                .encrypt_text(&serde_json::to_string(&layout).unwrap())
+                .unwrap(),
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        set_clip_ocr_text_in_database(&database, "shot", "https://example.com")
+            .await
+            .unwrap();
+
+        let details = get_clip_details_in_database(&database, "shot")
+            .await
+            .expect("details should load");
+        assert_eq!(details.ocr_text.as_deref(), Some("https://example.com"));
+        let words = details.ocr_layout.expect("layout should remain").words;
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].text, "https://example.com");
+        assert_eq!(words[0].x, 0.1);
+        assert_eq!(words[0].width, 0.8);
+
+        // Not stored in the clear.
+        let raw_words: Option<String> =
+            sqlx::query_scalar("SELECT ocr_words FROM clips WHERE uuid = 'shot'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert!(!raw_words.unwrap().contains("example"));
+
+        // Clearing the assembled block must drop the boxes too.
+        set_clip_ocr_text_in_database(&database, "shot", "   ")
+            .await
+            .unwrap();
+        let cleared = get_clip_details_in_database(&database, "shot")
+            .await
+            .expect("details should load");
+        assert!(cleared.ocr_text.is_none());
+        assert!(cleared.ocr_layout.is_none());
     }
 
     #[tokio::test]
@@ -4528,8 +4842,10 @@ mod tests {
         assert_eq!(items[0].source_app, None, "the broken field is cleared");
     }
 
-    /// The clients count the rows they displayed and send that count back as
-    /// the next offset, so a page has to hold `limit` *readable* clips.
+    /// The clients send the last displayed id as `after_id` and treat a short
+    /// page as the end of history, so a page has to hold `limit` *readable*
+    /// clips. A displayed-row offset alone is not enough once a neighbor was
+    /// skipped (SBS-830 / SBS-993).
     #[tokio::test]
     async fn paging_hands_back_every_readable_clip_around_an_unreadable_one() {
         let database = test_database().await;
@@ -4546,7 +4862,7 @@ mod tests {
         assert_eq!(first.len(), 20, "a full page, not 19");
         assert_eq!(first, readable[..20]);
 
-        let second = paged_ids(&database, 20, 20).await;
+        let second = paged_after(&database, 20, first.last().expect("first page")).await;
         assert_eq!(second, readable[20..], "the tail is still reachable");
 
         let mut seen = first;
@@ -4573,7 +4889,7 @@ mod tests {
         assert_eq!(readable.len(), 25);
 
         let first = paged_ids(&database, 20, 0).await;
-        let second = paged_ids(&database, 20, 20).await;
+        let second = paged_after(&database, 20, first.last().expect("first page")).await;
         assert_eq!(first.len(), 20);
         assert_eq!(second.len(), 5, "the short page is the real end of history");
         let mut seen = first;
@@ -4627,8 +4943,86 @@ mod tests {
         let first = searched_ids(&database, 20, 0).await;
         assert_eq!(first.len(), 20, "a full page of readable hits");
         assert_eq!(first, readable[..20]);
-        let second = searched_ids(&database, 20, 20).await;
+        let second = searched_after(&database, 20, first.last().expect("first page")).await;
         assert_eq!(second, readable[20..]);
+    }
+
+    /// SBS-993: a later page must bind the source offset on the first fetch
+    /// instead of walking and decrypting `[0, offset)`.
+    #[tokio::test]
+    async fn later_page_does_not_rescan_the_readable_prefix() {
+        let database = test_database().await;
+        let ids = seed_paging_clips(&database, 60).await;
+        let starts = std::sync::Mutex::new(Vec::<usize>::new());
+        let pool = &database.pool;
+        let page = super::collect_readable_clips(&database, 40, 10, |start, count| {
+            starts.lock().expect("starts").push(start);
+            async move {
+                let rows = sqlx::query_as::<_, crate::models::Clip>(
+                    r#"SELECT * FROM clips WHERE is_deleted = 0
+                       ORDER BY is_pinned DESC, created_at DESC, uuid DESC
+                       LIMIT ? OFFSET ?"#,
+                )
+                .bind(count as i64)
+                .bind(start as i64)
+                .fetch_all(pool)
+                .await
+                .map_err(|error| error.to_string())?;
+                Ok(super::ClipBatch {
+                    exhausted: rows.len() < count,
+                    rows,
+                })
+            }
+        })
+        .await
+        .expect("later page should load");
+        assert_eq!(
+            *starts.lock().expect("starts"),
+            vec![40],
+            "one fetch at the source offset, not a walk from 0"
+        );
+        assert_eq!(
+            page.iter()
+                .map(|clip| clip.uuid.as_str())
+                .collect::<Vec<_>>(),
+            ids[40..50].iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+    }
+
+    /// A gone cursor is unknown, not "start over": restarting would re-send
+    /// the prefix the client already has.
+    #[tokio::test]
+    async fn gone_listing_cursor_falls_back_to_offset_not_the_start() {
+        let database = test_database().await;
+        let ids = seed_paging_clips(&database, 8).await;
+        let page = super::get_clips_paged(
+            None,
+            3,
+            5,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("missing-cursor".into()),
+            &database,
+        )
+        .await
+        .expect("a gone cursor must not fail the listing");
+        assert_eq!(
+            page.iter().map(|clip| clip.id.as_str()).collect::<Vec<_>>(),
+            ids[5..8].iter().map(String::as_str).collect::<Vec<_>>(),
+            "fallback offset 5, not a restart at 0"
+        );
+    }
+
+    #[test]
+    fn source_start_keeps_a_missing_cursor_from_restarting() {
+        let ids = ["a".into(), "b".into(), "c".into(), "d".into()];
+        assert_eq!(super::source_start_for_ids(&ids, Some("b"), 0), 2);
+        assert_eq!(super::source_start_for_ids(&ids, Some("gone"), 3), 3);
+        assert_eq!(super::source_start_for_ids(&ids, Some("  "), 3), 3);
+        assert_eq!(super::source_start_for_ids(&ids, None, 3), 3);
     }
 
     #[tokio::test]
