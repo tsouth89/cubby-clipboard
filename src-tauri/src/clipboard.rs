@@ -1545,7 +1545,7 @@ fn rgba_to_cf_dib(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, Strin
     dib.extend_from_slice(&0_u32.to_le_bytes());
 
     for source_row in rgba.chunks_exact(row_bytes).rev() {
-        for pixel in source_row.chunks_exact(4) {
+        for pixel in source_row.as_chunks::<4>().0 {
             dib.push(pixel[2]);
             dib.push(pixel[1]);
             dib.push(pixel[0]);
@@ -3356,7 +3356,7 @@ unsafe fn extract_icon(path: &str) -> Option<String> {
     let _ = DeleteObject(mem_bm.into());
     let _ = ReleaseDC(None, screen_dc);
 
-    for chunk in pixels.chunks_exact_mut(4) {
+    for chunk in pixels.as_chunks_mut::<4>().0 {
         let b = chunk[0];
         let r = chunk[2];
         chunk[0] = r;

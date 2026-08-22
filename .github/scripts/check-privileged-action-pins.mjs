@@ -2,14 +2,51 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// Any workflow that runs in the base-repo context with write scopes belongs
+// here, because an unpinned third-party action in one of these executes with
+// those permissions (SBS-984). Every `pull_request_target` workflow qualifies;
+// the test suite enforces that so a new one cannot be added and forgotten.
 export const PRIVILEGED_WORKFLOWS = [
   '.github/workflows/release.yml',
   '.github/workflows/publish-store-packages.yml',
   '.github/workflows/validate-store-submission.yml',
-  // pull_request_target + pull-requests:write. An unpinned third-party
-  // action here runs in the base-repo context with those permissions (SBS-984).
-  '.github/workflows/pr-review.yml',
 ];
+
+// Triggers that run in the base-repo context with the repository's secrets and
+// write scopes. An unpinned third-party action in a workflow with one of these
+// is an escalation path, so such a workflow must be pin-checked (SBS-984).
+export const PRIVILEGED_TRIGGERS = ['pull_request_target', 'workflow_run'];
+
+/**
+ * Return the workflow's `on:` section, comments stripped.
+ *
+ * GitHub accepts the trigger list as a scalar (`on: push`), a flow sequence
+ * (`on: [push, pull_request_target]`), a block sequence, or a mapping. Matching
+ * a single shape misses the others, so take the whole section and look for the
+ * trigger token inside it. Scoping to the section also stops an unrelated
+ * mention further down the file -- in an `if:` or a script step -- from
+ * counting as a trigger.
+ */
+export function triggerSection(source) {
+  const lines = source.split(/\r?\n/);
+  const start = lines.findIndex((line) => /^(?:on|["']on["'])\s*:/.test(line));
+  if (start === -1) return '';
+  const section = [lines[start]];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    // A new top-level key ends the section; blank and indented lines continue it.
+    if (/^\S/.test(lines[index])) break;
+    section.push(lines[index]);
+  }
+  return section.map((line) => line.replace(/#.*$/, '')).join('\n');
+}
+
+/** Which privileged triggers this workflow declares, if any. */
+export function privilegedTriggersIn(source) {
+  const section = triggerSection(source);
+  return PRIVILEGED_TRIGGERS.filter((trigger) =>
+    new RegExp(`\\b${trigger}\\b`).test(section),
+  );
+}
 
 const FIRST_PARTY_OWNERS = new Set(['actions']);
 const SHA_RE = /^[0-9a-f]{40}$/i;
@@ -111,7 +148,21 @@ export function violationsOf(findings) {
 export async function checkPrivilegedActionPins(rootDir) {
   const findings = [];
   for (const relativePath of PRIVILEGED_WORKFLOWS) {
-    const text = await readFile(path.join(rootDir, relativePath), 'utf8');
+    let text;
+    try {
+      text = await readFile(path.join(rootDir, relativePath), 'utf8');
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        // A retired or renamed workflow must not surface as a bare ENOENT
+        // stack trace three CI steps deep. Say which entry is stale and what
+        // to do about it.
+        throw new Error(
+          `${relativePath} is listed in PRIVILEGED_WORKFLOWS but does not exist. ` +
+            'Drop the entry if the workflow was retired, or update it if it was renamed.',
+        );
+      }
+      throw error;
+    }
     findings.push(...parseWorkflowUses(text, relativePath));
   }
   return {
