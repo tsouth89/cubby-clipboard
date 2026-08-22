@@ -51,15 +51,18 @@ export function assertAllowlistNotWideOpen(patterns) {
   }
 }
 
-// SBS-1016: a Settings link is any const/let/var binding of an http(s)
-// literal, or a string passed directly to openUrl( / handleOpenUrl(.
-// Do not require the identifier to end in URL or sit at column 0 —
-// `const DISCORD_LINK = 'https://…'` is the case that used to slip
-// through while the existing *URL constants kept the empty-set guard quiet.
+// SBS-1016: a URL literal handed straight to openUrl( / handleOpenUrl(.
+// This runs over all of frontend/src, so it must only match something that
+// is demonstrably opened. It deliberately does NOT match a bare
+// `const X = 'https://…'` binding: that would sweep in the example.test
+// fixtures in *.test.ts and fail the release on URLs nothing ever opens,
+// which is the same reason extractHttpUrlLiterals below is kept off
+// frontend/src at large. `const DISCORD_LINK = 'https://…'` in Settings is
+// covered by that literal scan instead, which is where SBS-1016's widening
+// belongs -- Settings is the only surface that opens URLs.
 // No dollar-anchor: sources can be CRLF, so a trailing CR would leave
 // the pattern matching nothing and the gate passing on an empty set.
-const OPENED_URL_PATTERN =
-  /(?:^\s*(?:export\s+)?(?:const|let|var)\s+\w+\s*=\s*|(?:handleO|o)penUrl\(\s*)['"](https?:\/\/[^'"]+)['"]/gm;
+const OPENED_URL_PATTERN = /(?:handleO|o)penUrl\(\s*['"](https?:\/\/[^'"]+)['"]/g;
 
 // Quoted http(s) URL with a host. Prefix-only checks such as 'https://'
 // do not match because [^'"]+ requires at least one character after ://.

@@ -80,13 +80,16 @@ test('host-wildcard patterns are treated as opening the entire web', () => {
   assert.throws(() => assertAllowlistNotWideOpen(['https://*']), /entire web/);
 });
 
-test('extractOpenedUrls finds Settings const URL assignments', () => {
+test('Settings const URL assignments reach the allowlist check', () => {
+  // check-release runs extractHttpUrlLiterals over SettingsPanel.tsx, so this
+  // is the layer that has to see them. extractOpenedUrls deliberately does not
+  // -- it runs over all of frontend/src, where the same shape is test fixtures.
   const source = [
     "const GITHUB_URL = 'https://github.com/tsouth89/cubby-clipboard';",
     "const WEBSITE_URL = 'https://cubbyclipboard.com';",
     "const PRIVACY_URL = 'https://cubbyclipboard.com/privacy';",
   ].join('\n');
-  assert.deepEqual(extractOpenedUrls(source), [
+  assert.deepEqual(extractHttpUrlLiterals(source), [
     'https://github.com/tsouth89/cubby-clipboard',
     'https://cubbyclipboard.com',
     'https://cubbyclipboard.com/privacy',
@@ -106,17 +109,18 @@ test('path URLs keep their written form; rust-url does not add a slash', () => {
   ]);
 });
 
-test('extractOpenedUrls finds a const that does not end in URL or sit at column 0', () => {
-  // SBS-1016: the old /^const \w*URL = / pattern missed this and
+test('a Settings link is found whatever the constant is named or indented', () => {
+  // SBS-1016: the old /^const \w*URL = / pattern missed these and
   // release:check still passed because the existing *URL constants kept
-  // settingsOpenedUrls non-empty.
+  // settingsOpenedUrls non-empty. extractHttpUrlLiterals catches all of them
+  // by not caring about the binding at all.
   const source = [
     "const GITHUB_URL = 'https://github.com/tsouth89/cubby-clipboard';",
     "  const DISCORD_LINK = 'https://discord.gg/cubby';",
     "export const SUPPORT_HREF = \"https://cubbyclipboard.com/support\";",
     "let DOCS_PAGE = 'https://cubbyclipboard.com/docs';",
   ].join('\n');
-  assert.deepEqual(extractOpenedUrls(source), [
+  assert.deepEqual(extractHttpUrlLiterals(source), [
     'https://github.com/tsouth89/cubby-clipboard',
     'https://discord.gg/cubby',
     'https://cubbyclipboard.com/support',
@@ -157,4 +161,28 @@ test('live SettingsPanel quoted URLs are the three product links', async () => {
     'https://cubbyclipboard.com',
     'https://cubbyclipboard.com/privacy',
   ]);
+});
+
+/**
+ * SBS-1016 guard rail. extractOpenedUrls runs over every frontend/src .ts/.tsx,
+ * so matching a bare `const X = 'https://…'` would sweep in the example.test
+ * fixtures that live in *.test.ts and fail the release on URLs nothing opens.
+ * Settings link constants are covered by extractHttpUrlLiterals instead.
+ */
+test('a bare const binding is not treated as an opened URL', () => {
+  assert.deepEqual(extractOpenedUrls("  const href = 'https://example.test/a.png';"), []);
+  assert.deepEqual(extractOpenedUrls("export const X = 'https://example.test/b.png';"), []);
+  assert.deepEqual(extractOpenedUrls("  let u = 'https://example.test/c.png';"), []);
+});
+
+test('URLs handed straight to an open call are still collected', () => {
+  assert.deepEqual(extractOpenedUrls("  openUrl('https://cubbyclipboard.com');"), [
+    'https://cubbyclipboard.com',
+  ]);
+  assert.deepEqual(
+    extractOpenedUrls("  void handleOpenUrl('https://cubbyclipboard.com/privacy');"),
+    ['https://cubbyclipboard.com/privacy'],
+  );
+  // CRLF sources must not leave a trailing CR on the extracted URL.
+  assert.deepEqual(extractOpenedUrls("  openUrl('https://a.example')\r"), ['https://a.example']);
 });
