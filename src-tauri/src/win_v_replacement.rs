@@ -145,7 +145,7 @@ impl WinVReplacementManager {
             .map_err(|_| "Win+V helper state is unavailable".to_string())?;
 
         let action = compute_helper_action(&state, enabled, hotkey.as_deref());
-        
+
         state.desired = enabled;
         state.hotkey = hotkey;
 
@@ -306,7 +306,7 @@ fn compute_helper_action(
     // Always start if enabled, ensure_child_running is a no-op if it's already running.
     // If it was stopped due to hotkey_changed, it will actually start.
     let needs_start = enabled;
-    
+
     HelperAction {
         needs_stop,
         needs_start,
@@ -342,9 +342,10 @@ mod tests {
     #[test]
     fn test_compute_helper_action_enable() {
         let state = HelperState::default();
-        
+
         let action = compute_helper_action(&state, true, Some("Win+Alt+V"));
-        assert!(action.needs_stop); // because state was not previously enabled or hotkey is different
+        // not previously enabled, so hotkey_changed is true too
+        assert!(action.needs_stop);
         assert!(action.needs_start);
     }
 
@@ -355,7 +356,7 @@ mod tests {
             desired: true,
             hotkey: Some("Win+Alt+V".to_string()),
         };
-        
+
         let action = compute_helper_action(&state, false, Some("Win+Alt+V"));
         assert!(action.needs_stop);
         assert!(!action.needs_start);
@@ -368,7 +369,7 @@ mod tests {
             desired: true,
             hotkey: Some("Win+Alt+V".to_string()),
         };
-        
+
         let action = compute_helper_action(&state, true, Some("Win+Shift+V"));
         assert!(action.needs_stop);
         assert!(action.needs_start);
@@ -381,7 +382,7 @@ mod tests {
             desired: true,
             hotkey: Some("Win+Alt+V".to_string()),
         };
-        
+
         let action = compute_helper_action(&state, true, Some("Win+Alt+V"));
         assert!(!action.needs_stop);
         assert!(action.needs_start); // ensure_child_running will safely verify it's running
