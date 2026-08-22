@@ -18,6 +18,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Backup import no longer drops notes, source app, or OCR text on an encryption error, and no longer marks OCR completed for a clip it did not store (SBS-980)
 - Recapture no longer commits a clip that names a full-resolution original before that file is on disk; a failed rename keeps last-good or the expired state instead of a phantom original (SBS-996)
 - release:check treats every quoted http(s) URL in Settings as a link that must be on the opener allowlist, not only constants named `*URL` (SBS-1016)
+- History and flyout paging no longer re-decrypt every earlier clip on each new page; later pages start after the last visible row and still fill past an unreadable neighbor (SBS-993)
 - Encrypted backup export now includes live full-resolution screenshot originals, and refuses the export if one cannot be read, instead of restoring every image as an expired thumbnail; a restore keeps those originals through the destination keep-for window without rewriting the visible capture date (SBS-919)
 - Empty Unicode text is no longer diagnosed as a clipboard lock, so a copy that still has HTML or RTF is stored instead of dropped; an advertised picture still retries before that HTML wrapper is stored (SBS-924)
 - Recover an interrupted settings.json replace from the leftover temp instead of treating it as a first-run 30-day retention (SBS-935)
