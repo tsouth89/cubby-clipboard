@@ -84,7 +84,7 @@ fn warn_delete_failed(_error: &std::io::Error) {}
 
 #[cfg(test)]
 mod tests {
-    use super::{is_managed_image_path, remove_clip_image_files};
+    use super::{is_managed_image_path, remove_clip_image_files, sanitize_path_for_log};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_root() -> std::path::PathBuf {
