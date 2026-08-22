@@ -24,7 +24,12 @@ function compileCharClass(chars, start) {
     i += 1;
   }
   const bodyStart = i;
-  const close = chars.indexOf("]", bodyStart);
+  // glob treats a `]` immediately after `[` or `[!` as a literal specifier
+  // rather than the closer, so `[]]` matches `]` and `[!]]` matches not-`]`.
+  // Searching from bodyStart would read those as an empty class and reject the
+  // whole pattern, which is stricter than the plugin will be at runtime.
+  const closeFrom = chars[bodyStart] === "]" ? bodyStart + 1 : bodyStart;
+  const close = chars.indexOf("]", closeFrom);
   if (close === -1 || close === bodyStart) return null;
   const body = chars.slice(bodyStart, close);
   let cls = negated ? "[^" : "[";
@@ -32,6 +37,10 @@ function compileCharClass(chars, start) {
     const c = body[k];
     if (c === "\\") {
       cls += "\\\\";
+    } else if (c === "]") {
+      // Only reachable for a leading `]`. Unescaped, JS would read `[]]` as an
+      // empty class followed by a literal `]`, which matches nothing.
+      cls += "\\]";
     } else if (c === "^" && k === 0 && !negated) {
       cls += "\\^";
     } else {

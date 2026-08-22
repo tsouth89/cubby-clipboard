@@ -144,3 +144,26 @@ test('path URLs keep their written form; rust-url does not add a slash', () => {
     'https://cubbyclipboard.com/privacy',
   ]);
 });
+
+/**
+ * SBS-997 fidelity: glob documents that a `]` immediately after `[` or `[!` is
+ * a literal specifier rather than the closer. Reading it as the closer makes
+ * the class look empty and rejects the whole pattern, which is stricter than
+ * the plugin enforces at runtime -- and a release gate that is stricter than
+ * production is a gate that lies.
+ */
+test('a leading ] in a character class is a specifier, not the closer', () => {
+  assert.equal(rustGlobMatches('https://example.com/[]]', 'https://example.com/]'), true);
+  assert.equal(rustGlobMatches('https://example.com/[]]', 'https://example.com/x'), false);
+  assert.equal(rustGlobMatches('https://example.com/[!]]', 'https://example.com/x'), true);
+  assert.equal(rustGlobMatches('https://example.com/[!]]', 'https://example.com/]'), false);
+});
+
+test('ordinary and malformed character classes are unchanged', () => {
+  assert.equal(rustGlobMatches('https://example.com/[abc]', 'https://example.com/b'), true);
+  assert.equal(rustGlobMatches('https://example.com/[abc]', 'https://example.com/z'), false);
+  assert.equal(rustGlobMatches('https://example.com/[!abc]', 'https://example.com/z'), true);
+  // Genuinely empty and unclosed classes are still PatternError, so fail closed.
+  assert.equal(rustGlobMatches('https://example.com/[]', 'https://example.com/'), false);
+  assert.equal(rustGlobMatches('https://example.com/[abc', 'https://example.com/a'), false);
+});
