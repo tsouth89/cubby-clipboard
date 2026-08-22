@@ -18,6 +18,7 @@ import { useUpdater } from './hooks/useUpdater';
 import { useRevealedClips } from './hooks/useRevealedClips';
 import { isImeKey, shouldCaptureTypeToSearch } from './utils/flyoutSearch';
 import { folderSelectionAfterReload } from './utils/folderSelection';
+import { clipListPageArgs } from './utils/clipListPage';
 import {
   clipLoadAnnouncesSuccess,
   clipLoadFailure,
@@ -332,7 +333,7 @@ function App() {
       try {
         setIsLoading(true);
 
-        const currentOffset = append ? clipsRef.current.length : 0;
+        const page = clipListPageArgs(clipsRef.current, append, 20);
         // The index lowercases but does not trim, so a leading space matches
         // nothing. History already sends the trimmed form.
         const query = searchQuery.trim();
@@ -365,8 +366,7 @@ function App() {
           data = await invoke<AppClipboardItem[]>('search_clips', {
             query,
             filterId: folderId,
-            limit: 20,
-            offset: currentOffset,
+            ...page,
             previewOnly: true,
             contentFilter: filter,
           });
@@ -375,8 +375,7 @@ function App() {
           if (perfLogEnabled) invokeStart = performance.now();
           data = await invoke<AppClipboardItem[]>('get_clips', {
             filterId: folderId,
-            limit: 20,
-            offset: currentOffset,
+            ...page,
             previewOnly: true,
             contentFilter: filter,
           });
@@ -422,7 +421,7 @@ function App() {
                 folderId: folderId ?? 'all',
                 append,
                 hasSearch: Boolean(searchQuery.trim()),
-                offset: currentOffset,
+                offset: page.offset,
                 itemCount: data.length,
                 imageCount,
                 totalContentChars,
