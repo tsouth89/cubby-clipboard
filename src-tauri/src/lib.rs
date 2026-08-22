@@ -15,6 +15,7 @@ static SHOW_GENERATION: AtomicU64 = AtomicU64::new(0);
 static FLYOUT_WORKER_LIVE: AtomicBool = AtomicBool::new(false);
 
 mod backup;
+mod backup_import_optional;
 mod cf_html;
 mod clip_list;
 mod clipboard;
