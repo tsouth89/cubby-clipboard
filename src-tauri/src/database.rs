@@ -137,20 +137,23 @@ impl Database {
     /// up; creating the unique index before they run would fail the upgrade of
     /// exactly the installs that need it. Call this after them.
     ///
-    /// The oldest *visible* copy of each hash survives and inherits the pin,
-    /// hide state, folder, and note of every row being removed. Unlike
-    /// `remove_duplicate_clips`, which refuses to touch pinned rows at all, this
-    /// has to collapse the group to exactly one row for the constraint to hold
-    /// -- so the pin is moved rather than honoured in place.
+    /// The oldest *visible* copy of each hash survives and inherits the pin
+    /// and hide state of every row being removed. Notes from every copy are
+    /// concatenated when they differ; a folder is kept from the survivor
+    /// when it has one, otherwise from the first loser that does (SBS-988).
+    /// Unlike `remove_duplicate_clips`, which refuses to touch pinned rows at
+    /// all, this has to collapse the group to exactly one row for the
+    /// constraint to hold -- so the pin is moved rather than honoured in place.
     ///
-    /// Returns the number of duplicate rows removed so the caller can report
-    /// it. Deliberately does not log: this runs before the log plugin is
+    /// Returns how many rows were removed and how many notes or folder
+    /// assignments could not be kept, so the caller can report it.
+    /// Deliberately does not log: this runs before the log plugin is
     /// installed, so anything written here is discarded.
     ///
-    /// Returns the number of duplicate rows removed. On failure the whole
-    /// reconciliation rolls back and the old non-unique index is left in place:
-    /// an unconstrained database that works beats a half-migrated one.
-    pub async fn enforce_content_hash_uniqueness(&self) -> Result<u64, String> {
+    /// On failure the whole reconciliation rolls back and the old non-unique
+    /// index is left in place: an unconstrained database that works beats a
+    /// half-migrated one.
+    pub async fn enforce_content_hash_uniqueness(&self) -> Result<ContentHashDedup, String> {
         let mut transaction = self
             .pool
             .begin()
@@ -170,6 +173,8 @@ impl Database {
 
         let mut orphaned_images: Vec<String> = Vec::new();
         let mut removed = 0_u64;
+        let mut discarded_notes = 0_u64;
+        let mut discarded_folders = 0_u64;
 
         for hash in &duplicated {
             // The oldest *visible* copy wins, matching `remove_duplicate_clips`.
@@ -246,20 +251,13 @@ impl Database {
             // duplicates by content, but the organising work on them is not
             // duplicated: a note written on one copy exists only there, and
             // losing it because another copy survived would be silent data
-            // loss the user cannot undo.
+            // loss the user cannot undo (SBS-988).
             let pinned = rows.iter().any(|row| row.is_pinned);
             let hidden = rows.iter().any(|row| row.is_hidden);
-            let folder = survivor
-                .folder_id
-                .or_else(|| rows.iter().find_map(|row| row.folder_id));
-            let notes = survivor
-                .notes
-                .clone()
-                .filter(|note| !note.trim().is_empty())
-                .or_else(|| {
-                    rows.iter()
-                        .find_map(|row| row.notes.clone().filter(|note| !note.trim().is_empty()))
-                });
+            let (folder, folder_discards) = merge_duplicate_folders(&rows);
+            discarded_folders += folder_discards;
+            let (notes, note_discards) = merge_duplicate_notes(&self.crypto, &rows)?;
+            discarded_notes += note_discards;
 
             sqlx::query(
                 "UPDATE clips SET is_pinned = ?, is_hidden = ?, folder_id = ?, notes = ? WHERE uuid = ?",
@@ -370,7 +368,11 @@ impl Database {
             // and this is a no-op; it matters for any later caller.
             self.search_index.invalidate();
         }
-        Ok(removed)
+        Ok(ContentHashDedup {
+            removed,
+            discarded_notes,
+            discarded_folders,
+        })
     }
 
     /// Schema setup. Returns notices for history it rewrote (legacy
@@ -1330,6 +1332,39 @@ fn sanitize_storage_diagnostic(message: &str) -> String {
     }
 }
 
+/// How uniqueness reconciliation changed history (SBS-988).
+///
+/// `removed` is the rows that disappeared. The discard counts are the
+/// notes and folder assignments that could not be kept on the survivor:
+/// a clip has one `folder_id`, and a merged note is capped at
+/// [`MERGED_NOTE_CHAR_LIMIT`]. The startup line reports both so a user
+/// who lost one can see that it happened.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContentHashDedup {
+    pub removed: u64,
+    pub discarded_notes: u64,
+    pub discarded_folders: u64,
+}
+
+impl ContentHashDedup {
+    pub fn startup_message(&self) -> String {
+        let note_word = if self.discarded_notes == 1 {
+            "note"
+        } else {
+            "notes"
+        };
+        let folder_word = if self.discarded_folders == 1 {
+            "folder assignment"
+        } else {
+            "folder assignments"
+        };
+        format!(
+            "STORAGE: Merged {} duplicate clips while making clip hashes unique ({} discarded {note_word}, {} discarded {folder_word})",
+            self.removed, self.discarded_notes, self.discarded_folders
+        )
+    }
+}
+
 /// One clip competing to survive deduplication.
 struct DuplicateRow {
     uuid: String,
@@ -1352,6 +1387,121 @@ fn ocr_quality(status: &Option<String>, text: &Option<String>) -> u8 {
         (_, true) => 1,
         _ => 0,
     }
+}
+
+/// Same cap as `NOTE_CHAR_LIMIT` in commands.rs. A merge that would go
+/// past it keeps the survivor's note first, then as many distinct loser
+/// notes as still fit. The rest is counted as discarded (SBS-988).
+const MERGED_NOTE_CHAR_LIMIT: usize = 500;
+
+/// What one stored `clips.notes` cell decoded as.
+///
+/// Three states, not two. A `CUB1:` blob that will not decrypt is not
+/// "no note", and an unprefixed legacy/test value is not "unreadable".
+enum DecodedNote {
+    Empty,
+    Plain(String),
+    Unreadable,
+}
+
+fn decode_stored_note(crypto: &CryptoManager, stored: Option<&str>) -> DecodedNote {
+    let Some(raw) = stored.map(str::trim).filter(|value| !value.is_empty()) else {
+        return DecodedNote::Empty;
+    };
+    if !CryptoManager::is_text_envelope(raw) {
+        return DecodedNote::Plain(raw.to_string());
+    }
+    match crypto.decrypt_text(raw) {
+        Ok(plain) if plain.trim().is_empty() => DecodedNote::Empty,
+        Ok(plain) => DecodedNote::Plain(plain),
+        Err(_) => DecodedNote::Unreadable,
+    }
+}
+
+/// First folder wins (survivor is first). Later different folders cannot
+/// live on one clip, so they are counted as discarded.
+fn merge_duplicate_folders(rows: &[DuplicateRow]) -> (Option<i64>, u64) {
+    let folder = rows.iter().find_map(|row| row.folder_id);
+    let discarded = rows
+        .iter()
+        .filter(|row| row.folder_id.is_some() && row.folder_id != folder)
+        .count() as u64;
+    (folder, discarded)
+}
+
+/// Concatenate distinct readable notes, survivor first.
+///
+/// An unreadable envelope is kept when it is the first note we see and
+/// nothing readable follows it. It is never treated as empty, and it
+/// cannot be concatenated, so a later readable note next to it is
+/// counted as discarded rather than overwriting unknown data.
+fn merge_duplicate_notes(
+    crypto: &CryptoManager,
+    rows: &[DuplicateRow],
+) -> Result<(Option<String>, u64), String> {
+    let mut plains: Vec<String> = Vec::new();
+    let mut first_plain_stored: Option<String> = None;
+    let mut kept_unreadable: Option<String> = None;
+    let mut discarded = 0_u64;
+
+    for row in rows {
+        match decode_stored_note(crypto, row.notes.as_deref()) {
+            DecodedNote::Empty => {}
+            DecodedNote::Plain(text) => {
+                if plains.iter().any(|kept| kept == &text) {
+                    continue;
+                }
+                if plains.is_empty() {
+                    first_plain_stored = row.notes.clone();
+                }
+                plains.push(text);
+            }
+            DecodedNote::Unreadable => {
+                if kept_unreadable.is_none() && plains.is_empty() {
+                    kept_unreadable = row.notes.clone();
+                } else {
+                    discarded += 1;
+                }
+            }
+        }
+    }
+
+    if let Some(unreadable) = kept_unreadable {
+        discarded += plains.len() as u64;
+        return Ok((Some(unreadable), discarded));
+    }
+
+    match plains.len() {
+        0 => Ok((None, discarded)),
+        1 => Ok((first_plain_stored, discarded)),
+        _ => {
+            let (merged, extra) = join_distinct_notes(&plains, MERGED_NOTE_CHAR_LIMIT);
+            discarded += extra;
+            Ok((Some(crypto.encrypt_text(&merged)?), discarded))
+        }
+    }
+}
+
+fn join_distinct_notes(notes: &[String], limit: usize) -> (String, u64) {
+    let mut out = String::new();
+    let mut discarded = 0_u64;
+    for note in notes {
+        if out.is_empty() {
+            // A stored note can already exceed the input cap. Keep it in
+            // full; adding more would only hide the original further.
+            out.push_str(note);
+            continue;
+        }
+        let sep = "\n\n";
+        let combined = out.chars().count() + sep.chars().count() + note.chars().count();
+        if combined > limit {
+            discarded += 1;
+            continue;
+        }
+        out.push_str(sep);
+        out.push_str(note);
+    }
+    (out, discarded)
 }
 
 /// Whether this clip's original can actually be read back.
@@ -1486,11 +1636,11 @@ async fn add_column_if_missing(pool: &SqlitePool, sql: &str) -> Result<(), sqlx:
 mod tests {
     use super::{
         apply_database_health, backup_is_fresh_as_of, classify_sqlite_health_failure,
-        copy_backup_snapshot, count_clips_in_file, perform_rolling_backup_refresh,
-        prepare_database_file, quarantine_database_files, replace_backup_atomically,
-        rolling_backup_path, sanitize_storage_diagnostic, should_skip_backup_refresh,
-        sqlite_failure_is_corruption, verify_database_quick_check, Database, DatabaseHealth,
-        RollingBackupScheduler, RollingBackupTick,
+        copy_backup_snapshot, count_clips_in_file, join_distinct_notes,
+        perform_rolling_backup_refresh, prepare_database_file, quarantine_database_files,
+        replace_backup_atomically, rolling_backup_path, sanitize_storage_diagnostic,
+        should_skip_backup_refresh, sqlite_failure_is_corruption, verify_database_quick_check,
+        ContentHashDedup, Database, DatabaseHealth, RollingBackupScheduler, RollingBackupTick,
     };
     use crate::crypto::CryptoManager;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -1581,7 +1731,8 @@ mod tests {
             database
                 .enforce_content_hash_uniqueness()
                 .await
-                .expect("a fresh database has nothing to reconcile"),
+                .expect("a fresh database has nothing to reconcile")
+                .removed,
             0
         );
         assert!(unique_hash_index_exists(&database).await);
@@ -1637,7 +1788,11 @@ mod tests {
         }
 
         assert_eq!(
-            database.enforce_content_hash_uniqueness().await.unwrap(),
+            database
+                .enforce_content_hash_uniqueness()
+                .await
+                .unwrap()
+                .removed,
             0,
             "nothing should be removed when there are no duplicates"
         );
@@ -1685,7 +1840,14 @@ mod tests {
         .await
         .expect("note should save");
 
-        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
+        assert_eq!(
+            database
+                .enforce_content_hash_uniqueness()
+                .await
+                .unwrap()
+                .removed,
+            1
+        );
 
         let survivors: Vec<SurvivorState> =
             sqlx::query_as("SELECT uuid, is_pinned, is_hidden, folder_id, notes FROM clips")
@@ -1706,6 +1868,174 @@ mod tests {
             "the user's note should carry forward"
         );
         assert!(unique_hash_index_exists(&database).await);
+    }
+
+    /// SBS-988: when both copies have a note and a folder, taking the
+    /// survivor's values used to drop the loser's with no record.
+    #[tokio::test]
+    async fn a_conflicting_note_and_folder_are_kept_or_counted() {
+        let database = migrated_database().await;
+        let work: i64 =
+            sqlx::query_scalar("INSERT INTO folders (name) VALUES ('Work') RETURNING id")
+                .fetch_one(&database.pool)
+                .await
+                .expect("folder should insert");
+        let archive: i64 =
+            sqlx::query_scalar("INSERT INTO folders (name) VALUES ('Archive') RETURNING id")
+                .fetch_one(&database.pool)
+                .await
+                .expect("folder should insert");
+
+        insert_clip_with_hash(
+            &database,
+            "original",
+            "same-hash",
+            false,
+            Some(work),
+            "2026-05-01 09:00:00",
+        )
+        .await;
+        insert_clip_with_hash(
+            &database,
+            "duplicate",
+            "same-hash",
+            false,
+            Some(archive),
+            "2026-05-02 09:00:00",
+        )
+        .await;
+
+        let survivor_note = database
+            .crypto
+            .encrypt_text("staging — expires June")
+            .expect("note should encrypt");
+        let loser_note = database
+            .crypto
+            .encrypt_text("prod — do not use")
+            .expect("note should encrypt");
+        sqlx::query("UPDATE clips SET notes = ? WHERE uuid = 'original'")
+            .bind(&survivor_note)
+            .execute(&database.pool)
+            .await
+            .expect("survivor note should save");
+        sqlx::query("UPDATE clips SET notes = ? WHERE uuid = 'duplicate'")
+            .bind(&loser_note)
+            .execute(&database.pool)
+            .await
+            .expect("loser note should save");
+
+        let stats = database.enforce_content_hash_uniqueness().await.unwrap();
+        assert_eq!(stats.removed, 1);
+        assert_eq!(
+            stats.discarded_notes, 0,
+            "distinct notes must be concatenated, not dropped"
+        );
+        assert_eq!(
+            stats.discarded_folders, 1,
+            "a clip can keep one folder; the loser's assignment is counted"
+        );
+
+        let survivor: SurvivorState =
+            sqlx::query_as("SELECT uuid, is_pinned, is_hidden, folder_id, notes FROM clips")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(survivor.0, "original");
+        assert_eq!(survivor.3, Some(work), "the survivor keeps its own folder");
+        let mut stored = survivor.4;
+        database
+            .crypto
+            .decrypt_optional_text(&mut stored)
+            .expect("merged note must decrypt");
+        assert_eq!(
+            stored.as_deref(),
+            Some("staging — expires June\n\nprod — do not use"),
+            "both notes must survive on the remaining row"
+        );
+        assert_eq!(
+            stats.startup_message(),
+            "STORAGE: Merged 1 duplicate clips while making clip hashes unique (0 discarded notes, 1 discarded folder assignment)"
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_notes_are_not_repeated_on_the_survivor() {
+        let database = migrated_database().await;
+        insert_clip_with_hash(
+            &database,
+            "original",
+            "same-hash",
+            false,
+            None,
+            "2026-05-01 09:00:00",
+        )
+        .await;
+        insert_clip_with_hash(
+            &database,
+            "duplicate",
+            "same-hash",
+            false,
+            None,
+            "2026-05-02 09:00:00",
+        )
+        .await;
+        let note = database
+            .crypto
+            .encrypt_text("same reminder")
+            .expect("note should encrypt");
+        sqlx::query("UPDATE clips SET notes = ? WHERE uuid IN ('original', 'duplicate')")
+            .bind(&note)
+            .execute(&database.pool)
+            .await
+            .expect("notes should save");
+
+        let stats = database.enforce_content_hash_uniqueness().await.unwrap();
+        assert_eq!(stats.removed, 1);
+        assert_eq!(stats.discarded_notes, 0);
+        let mut stored: Option<String> =
+            sqlx::query_scalar("SELECT notes FROM clips WHERE uuid = 'original'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        database
+            .crypto
+            .decrypt_optional_text(&mut stored)
+            .expect("note must decrypt");
+        assert_eq!(stored.as_deref(), Some("same reminder"));
+    }
+
+    #[test]
+    fn join_distinct_notes_keeps_the_first_and_counts_what_will_not_fit() {
+        let first = "a".repeat(498);
+        let (merged, discarded) =
+            join_distinct_notes(&[first.clone(), "bb".to_string(), "cc".to_string()], 500);
+        assert_eq!(merged, first);
+        assert_eq!(discarded, 2);
+        let (merged, discarded) = join_distinct_notes(&["one".to_string(), "two".to_string()], 500);
+        assert_eq!(merged, "one\n\ntwo");
+        assert_eq!(discarded, 0);
+    }
+
+    #[test]
+    fn startup_message_names_the_discards() {
+        assert_eq!(
+            ContentHashDedup {
+                removed: 1,
+                discarded_notes: 0,
+                discarded_folders: 1,
+            }
+            .startup_message(),
+            "STORAGE: Merged 1 duplicate clips while making clip hashes unique (0 discarded notes, 1 discarded folder assignment)"
+        );
+        assert_eq!(
+            ContentHashDedup {
+                removed: 2,
+                discarded_notes: 2,
+                discarded_folders: 0,
+            }
+            .startup_message(),
+            "STORAGE: Merged 2 duplicate clips while making clip hashes unique (2 discarded notes, 0 discarded folder assignments)"
+        );
     }
 
     #[tokio::test]
@@ -1763,7 +2093,14 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
+        assert_eq!(
+            database
+                .enforce_content_hash_uniqueness()
+                .await
+                .unwrap()
+                .removed,
+            1
+        );
 
         let survivor: (String, Option<String>, Option<String>, i64) =
             sqlx::query_as("SELECT uuid, ocr_text, ocr_status, full_image_expired FROM clips")
@@ -1836,7 +2173,14 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 2);
+        assert_eq!(
+            database
+                .enforce_content_hash_uniqueness()
+                .await
+                .unwrap()
+                .removed,
+            2
+        );
 
         let (uuid, expired): (String, i64) =
             sqlx::query_as("SELECT uuid, full_image_expired FROM clips")
@@ -1898,7 +2242,14 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
+        assert_eq!(
+            database
+                .enforce_content_hash_uniqueness()
+                .await
+                .unwrap()
+                .removed,
+            1
+        );
 
         let blob: Vec<u8> =
             sqlx::query_scalar("SELECT full_content FROM clip_images WHERE clip_uuid = 'original'")
@@ -1952,7 +2303,14 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
+        assert_eq!(
+            database
+                .enforce_content_hash_uniqueness()
+                .await
+                .unwrap()
+                .removed,
+            1
+        );
         crate::commands::enforce_retention_in_pool(&database.pool, 0, 30)
             .await
             .expect("retention should run");
@@ -2018,7 +2376,14 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
+        assert_eq!(
+            database
+                .enforce_content_hash_uniqueness()
+                .await
+                .unwrap()
+                .removed,
+            1
+        );
 
         let (uuid, expired): (String, i64) =
             sqlx::query_as("SELECT uuid, full_image_expired FROM clips")
@@ -2066,7 +2431,14 @@ mod tests {
             .await
             .expect("soft delete should apply");
 
-        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
+        assert_eq!(
+            database
+                .enforce_content_hash_uniqueness()
+                .await
+                .unwrap()
+                .removed,
+            1
+        );
 
         let remaining: Vec<(String, bool)> = sqlx::query_as("SELECT uuid, is_deleted FROM clips")
             .fetch_all(&database.pool)

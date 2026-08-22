@@ -200,6 +200,12 @@ impl CryptoManager {
         self.decrypt_text(value).is_ok()
     }
 
+    /// Prefix check only. A `CUB1:` blob that fails to decrypt is still an
+    /// envelope: "unreadable" is not "legacy plaintext".
+    pub(crate) fn is_text_envelope(value: &str) -> bool {
+        value.starts_with(TEXT_PREFIX)
+    }
+
     pub fn encrypt_optional_text(&self, value: Option<&str>) -> Result<Option<String>, String> {
         value.map(|value| self.encrypt_text(value)).transpose()
     }
