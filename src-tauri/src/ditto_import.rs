@@ -9,12 +9,13 @@
 //! pinned state, encrypting each one through Cubby's `CryptoManager` exactly as
 //! native capture does. Image clips are counted and skipped for now.
 
+use crate::clip_list::truncate_text_preview;
+#[cfg(test)]
+use crate::clip_list::TEXT_PREVIEW_CHAR_LIMIT;
 use crate::database::Database;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
-
-const PREVIEW_LIMIT: usize = 200;
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct DittoImportResult {
@@ -84,17 +85,6 @@ fn extract_text(formats: &[(String, Vec<u8>)]) -> Option<String> {
         }
     }
     None
-}
-
-fn truncate_preview(text: &str) -> String {
-    let mut preview = String::new();
-    for ch in text.chars() {
-        if preview.chars().count() >= PREVIEW_LIMIT {
-            break;
-        }
-        preview.push(ch);
-    }
-    preview
 }
 
 /// Convert Ditto's Unix-seconds `lDate` to Cubby's `YYYY-MM-DD HH:MM:SS` UTC
@@ -224,7 +214,7 @@ pub async fn import_from_ditto(
                 continue;
             }
         };
-        let encrypted_preview = match db.crypto.encrypt_text(&truncate_preview(&text)) {
+        let encrypted_preview = match db.crypto.encrypt_text(&truncate_text_preview(&text)) {
             Ok(value) => value,
             Err(error) => {
                 result
@@ -321,8 +311,11 @@ mod tests {
 
     #[test]
     fn preview_is_truncated_by_chars_not_bytes() {
-        let long = "é".repeat(300);
-        assert_eq!(truncate_preview(&long).chars().count(), PREVIEW_LIMIT);
+        let long = "é".repeat(TEXT_PREVIEW_CHAR_LIMIT + 100);
+        assert_eq!(
+            truncate_text_preview(&long).chars().count(),
+            TEXT_PREVIEW_CHAR_LIMIT
+        );
     }
 
     #[tokio::test]
