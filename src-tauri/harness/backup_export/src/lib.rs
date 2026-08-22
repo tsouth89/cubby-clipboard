@@ -15,5 +15,8 @@ mod search_index;
 #[path = "../../../src/image_persist.rs"]
 mod image_persist;
 
+#[path = "../../../src/backup_import_optional.rs"]
+mod backup_import_optional;
+
 #[path = "../../../src/backup.rs"]
 mod backup;

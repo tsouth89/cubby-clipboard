@@ -8,6 +8,8 @@ Please report suspected vulnerabilities through GitHub's private security-adviso
 
 Cubby release candidates must pass the JavaScript production dependency audit, the Rust advisory audit, the automated checks in `scripts/smoke-release.ps1`, and the privacy checks in `scripts/check-release.mjs`. Packaged-install smoke steps remain in `docs/RELEASE_CHECKLIST.md`.
 
+The opener URL allowlist in `src-tauri/capabilities/default.json` is checked by `scripts/check-release.mjs` using the same glob defaults as `tauri-plugin-opener` (star and question-mark match slash). A pattern whose scheme or authority contains a wildcard is refused.
+
 ### RUSTSEC-2023-0071 waiver
 
 `Cargo.lock` currently records `rsa 0.9.10` through SQLx's disabled optional MySQL dependency. Cubby configures SQLx with default features disabled and enables SQLite only. `cargo tree --target all` confirms that RSA is not reachable in Cubby's active dependency graph.
