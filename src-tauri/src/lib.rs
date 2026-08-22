@@ -35,6 +35,7 @@ mod database;
 mod ditto_import;
 mod image_persist;
 mod log_targets;
+mod managed_image;
 mod models;
 mod ocr;
 mod ocr_queue;

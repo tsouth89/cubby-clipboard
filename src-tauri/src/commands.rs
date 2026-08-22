@@ -1,4 +1,5 @@
 use crate::database::Database;
+pub(crate) use crate::managed_image::remove_clip_image_files;
 use crate::models::{Clip, ClipboardItem, Folder, FolderItem, OcrHighlights, OcrMatch, OcrRect};
 use clipboard_rs::common::RustImage;
 use clipboard_rs::{Clipboard, ClipboardContent, ClipboardContext, RustImageData};
@@ -519,19 +520,6 @@ fn encrypt_existing_optional_text(
         .transpose()
 }
 
-fn is_managed_image_path(image_dir: &std::path::Path, file_path: &str) -> bool {
-    let Ok(managed_dir) = image_dir.canonicalize() else {
-        return false;
-    };
-    let Some(parent) = std::path::Path::new(file_path).parent() else {
-        return false;
-    };
-    parent
-        .canonicalize()
-        .map(|candidate| candidate == managed_dir)
-        .unwrap_or(false)
-}
-
 async fn image_bytes_for_encryption_migration(
     db: &Database,
     clip: &Clip,
@@ -657,8 +645,8 @@ pub async fn migrate_encrypted_storage(db: &Database) -> Result<u64, String> {
         transaction.commit().await.map_err(|e| e.to_string())?;
 
         if let (Some(old_path), Some((new_path, _))) = (old_image_path, &new_image_path) {
-            if old_path != *new_path && is_managed_image_path(&db.image_dir, &old_path) {
-                crate::clipboard::remove_full_image_file(&old_path);
+            if old_path != *new_path {
+                remove_clip_image_files(&db.image_dir, vec![old_path]);
             }
         }
         migrated += 1;
@@ -2573,16 +2561,6 @@ fn bind_retention<'q, O>(
         .bind(auto_delete_days)
         .bind(max_items)
         .bind(max_items.max(0))
-}
-
-pub(crate) fn remove_clip_image_files(image_dir: &std::path::Path, image_paths: Vec<String>) {
-    for path in image_paths {
-        if !path.is_empty() && is_managed_image_path(image_dir, &path) {
-            crate::clipboard::remove_full_image_file(&path);
-        } else if !path.is_empty() {
-            log::warn!("Skipped deleting an unmanaged clipboard image path");
-        }
-    }
 }
 
 #[tauri::command]
