@@ -1,9 +1,0 @@
-        (word, fallback)str::trim)
-        (word, fallback)|(word, fallback)| word.line.unwrap_or(*fallback))
-        let chars: Vec<String> = tokens[0].chars()(word, fallback)|c| c.to_string()).collect();
-            (word, fallback)|s| s.success())
-            (word, fallback)|status| status.success())
-        let texts: Vec<&str> = corrected.words.iter()(word, fallback)|w| w.text.as_str()).collect();
-            (word, fallback)|w| w.text.as_str())
-                (word, fallback)|word| word.text.as_str())
-                (word, fallback)|word| word.text.as_str())
