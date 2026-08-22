@@ -2623,7 +2623,8 @@ mod tests {
         std::fs::write(&unmanaged, b"do-not-delete").unwrap();
         attach_image_path(&database, "loser", &unmanaged).await;
 
-        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
+        let stats = database.enforce_content_hash_uniqueness().await.unwrap();
+        assert_eq!(stats.removed, 1);
         assert!(
             unmanaged.exists(),
             "content-hash dedup must not delete a file outside image_dir"
@@ -2667,7 +2668,8 @@ mod tests {
         std::fs::write(&managed, b"managed-loser").unwrap();
         attach_image_path(&database, "loser", &managed).await;
 
-        assert_eq!(database.enforce_content_hash_uniqueness().await.unwrap(), 1);
+        let stats = database.enforce_content_hash_uniqueness().await.unwrap();
+        assert_eq!(stats.removed, 1);
         assert!(
             !managed.exists(),
             "content-hash dedup should still delete a managed loser original"
