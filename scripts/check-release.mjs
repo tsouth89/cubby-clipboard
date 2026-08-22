@@ -11,6 +11,7 @@ import { extractDefaultSkipLikelySecrets, evaluateSecretHeuristicsDoc, saysDefau
 import {
   assertAllowlistNotWideOpen,
   extractAllowlistPatterns,
+  extractHttpUrlLiterals,
   extractOpenedUrls,
   isUrlAllowed,
   urlSlashVariants,
@@ -282,7 +283,10 @@ for (const [docName, doc] of userFacingHistoryDocs) {
 // pattern whose scheme or authority contains a wildcard.
 const openerPatterns = extractAllowlistPatterns(capability);
 assertAllowlistNotWideOpen(openerPatterns);
-const settingsOpenedUrls = extractOpenedUrls(settingsPanelSource);
+// SBS-1016: Settings links are every quoted http(s) URL in that file, not
+// only `const *URL` / inline openUrl(. A `const DISCORD_LINK = 'https://…'`
+// is still a dead button if the capability does not allow it.
+const settingsOpenedUrls = extractHttpUrlLiterals(settingsPanelSource);
 if (settingsOpenedUrls.length === 0) {
   throw new Error('Could not find the Settings link URL constants to check against the allowlist');
 }

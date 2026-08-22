@@ -124,13 +124,37 @@ export function assertAllowlistNotWideOpen(patterns) {
   }
 }
 
+// SBS-1016: a URL literal handed straight to openUrl( / handleOpenUrl(.
+// This runs over all of frontend/src, so it must only match something that
+// is demonstrably opened. It deliberately does NOT match a bare
+// `const X = 'https://…'` binding: that would sweep in the example.test
+// fixtures in *.test.ts and fail the release on URLs nothing ever opens,
+// which is the same reason extractHttpUrlLiterals below is kept off
+// frontend/src at large. `const DISCORD_LINK = 'https://…'` in Settings is
+// covered by that literal scan instead, which is where SBS-1016's widening
+// belongs -- Settings is the only surface that opens URLs.
 // No dollar-anchor: sources can be CRLF, so a trailing CR would leave
 // the pattern matching nothing and the gate passing on an empty set.
-const OPENED_URL_PATTERN =
-  /(?:^const \w*URL = |openUrl\(\s*)['"](https?:[^'"]+)['"]/gm;
+const OPENED_URL_PATTERN = /(?:handleO|o)penUrl\(\s*['"](https?:\/\/[^'"]+)['"]/g;
+
+// Quoted http(s) URL with a host. Prefix-only checks such as 'https://'
+// do not match because [^'"]+ requires at least one character after ://.
+const HTTP_URL_LITERAL = /['"](https?:\/\/[^'"]+)['"]/g;
+
+function stripTrailingCr(url) {
+  return url.replace(/\r$/, "");
+}
 
 export function extractOpenedUrls(source) {
-  return [...source.matchAll(OPENED_URL_PATTERN)].map(([, url]) => url.replace(/\r$/, ""));
+  return [...source.matchAll(OPENED_URL_PATTERN)].map(([, url]) => stripTrailingCr(url));
+}
+
+// Settings is the only surface that opens URLs today. Any quoted http(s)
+// URL there is treated as a link that must be on the allowlist. Not used
+// on the rest of frontend/src, where test fixtures contain example.test
+// URLs that are never opened.
+export function extractHttpUrlLiterals(source) {
+  return [...source.matchAll(HTTP_URL_LITERAL)].map(([, url]) => stripTrailingCr(url));
 }
 
 export function urlSlashVariants(url) {
