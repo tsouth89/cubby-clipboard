@@ -5,6 +5,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 ## Unreleased
 
 ### Security
+- Encrypted backup now overwrites the derived bundle key and the in-memory JSON history when export or import returns, instead of leaving them in freed heap (SBS-983)
 - Search no longer ships full decrypted clip bodies on every keystroke; flyout and History search rows use the same preview-only contract as the list (SBS-912)
 
 ### Fixed
