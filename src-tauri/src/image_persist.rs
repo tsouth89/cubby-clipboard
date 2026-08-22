@@ -193,9 +193,17 @@ pub(crate) async fn apply_existing_image_recapture(
     // visible. Committing first (the previous order) left an expired revive
     // claiming an original that `Drop` then deleted when MoveFileExW failed
     // (SBS-996). A failed rename now rolls the SQL back: last-good for a live
-    // clip, still-expired for a revive. A failed commit after a successful
-    // rename can leave the new bytes on disk with the prior row; that is an
-    // orphan file, not a row that names a missing original.
+    // clip, still-expired for a revive.
+    //
+    // A failed commit after a successful rename leaves the new bytes on disk
+    // with the prior row, and what that means differs by case. Reviving an
+    // expired clip had no prior file, so the leftover is an orphan
+    // `{uuid}.cubby` that no row references. Recapturing a live clip
+    // atomically replaced its existing file, so the leftover is the live
+    // original holding new bytes while the rolled-back `clip_images.file_size`
+    // and `clips.content` thumbnail still describe the old ones -- stale
+    // metadata to reconcile, not an orphan to sweep. Neither case is a row
+    // naming a missing original, which is the failure SBS-996 was about.
     staged.commit().map_err(|error| {
         format!("CLIPBOARD: Failed to replace the stored original for existing clip {existing_id}: {error}")
     })?;
