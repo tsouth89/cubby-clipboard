@@ -71,6 +71,10 @@ fn load_protected_key(key_path: &Path) -> Result<[u8; KEY_LEN], StorageError> {
 #[derive(Clone)]
 pub struct CryptoManager {
     key: [u8; KEY_LEN],
+    /// Test-only: content/preview encrypt still works, optional fields fail.
+    /// Needed so import can prove SBS-980 without a real entropy outage.
+    #[cfg(test)]
+    fail_optional_encrypt: bool,
 }
 
 impl CryptoManager {
@@ -118,14 +122,28 @@ impl CryptoManager {
             }
         };
 
-        Ok(Self { key })
+        Ok(Self {
+            key,
+            #[cfg(test)]
+            fail_optional_encrypt: false,
+        })
     }
 
     #[cfg(test)]
     pub fn ephemeral() -> Self {
         let mut key = [0_u8; KEY_LEN];
         getrandom::fill(&mut key).expect("test encryption key should be generated");
-        Self { key }
+        Self {
+            key,
+            fail_optional_encrypt: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn ephemeral_failing_optional_encrypt() -> Self {
+        let mut manager = Self::ephemeral();
+        manager.fail_optional_encrypt = true;
+        manager
     }
 
     pub fn is_encrypted(&self, value: &[u8]) -> bool {
@@ -201,6 +219,10 @@ impl CryptoManager {
     }
 
     pub fn encrypt_optional_text(&self, value: Option<&str>) -> Result<Option<String>, String> {
+        #[cfg(test)]
+        if self.fail_optional_encrypt && value.is_some() {
+            return Err("test-injected optional encrypt failure".to_string());
+        }
         value.map(|value| self.encrypt_text(value)).transpose()
     }
 
