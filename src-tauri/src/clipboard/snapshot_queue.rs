@@ -268,9 +268,13 @@ mod tests {
 
     #[test]
     fn the_shipped_capacity_covers_the_100_copy_reliability_burst() {
-        assert!(
-            SNAPSHOT_QUEUE_CAPACITY >= 100,
-            "the reliability contract captures a 100-copy burst; the queue must hold it"
-        );
+        // Both sides are constants, so this is a compile-time fact.
+        // `const {}` satisfies clippy::assertions_on_constants.
+        const {
+            assert!(
+                SNAPSHOT_QUEUE_CAPACITY >= 100,
+                "the reliability contract captures a 100-copy burst; the queue must hold it"
+            )
+        };
     }
 }
