@@ -2128,7 +2128,7 @@ async fn process_clipboard_snapshot(
             // Clearing by hash alone would drop a newer paste of the same
             // content.
             consume_ignore_marker_after_self_paste(
-                &mut *lock,
+                &mut lock,
                 queued_ignore.as_ref(),
                 clip_hash.as_str(),
                 Instant::now(),
