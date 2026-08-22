@@ -8,7 +8,10 @@
     "loading": "Wird geladen...",
     "copied": "In die Zwischenablage kopiert",
     "pause": "Pausieren",
-    "resume": "Fortsetzen"
+    "resume": "Fortsetzen",
+    "clipActions": "Clip-Aktionen",
+    "folderActions": "Ordneraktionen",
+    "historyActions": "Verlaufsaktionen"
   },
   "clipList": {
     "empty": "Noch keine Einträge",
