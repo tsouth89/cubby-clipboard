@@ -5,6 +5,8 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 ## Unreleased
 
 ### Security
+- An abandoned backup or Ditto file-dialog pick is no longer writable for the rest of the process: the grant expires after 60 seconds or when Settings closes (SBS-1015)
+- Edited clips now store the same 200-character `text_preview` as capture, so flyout and History search no longer ship 500 characters of an edited body (SBS-994)
 - Search no longer ships full decrypted clip bodies on every keystroke; flyout and History search rows use the same preview-only contract as the list (SBS-912)
 
 ### Fixed
