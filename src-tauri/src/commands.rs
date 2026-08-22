@@ -1014,6 +1014,11 @@ fn get_clips_request_log(
     )
 }
 
+// Cursor paging moved production onto the *_paged entry points, leaving
+// this as the no-cursor adapter the existing offset-path tests call.
+// cfg(test) rather than deleted: it is genuinely a test helper now, and
+// inlining `None` into ~35 call sites would be churn, not clarity.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn get_clips_in_database(
     filter_id: Option<String>,
@@ -2073,6 +2078,11 @@ pub async fn search_clips(
     .await
 }
 
+// Cursor paging moved production onto the *_paged entry points, leaving
+// this as the no-cursor adapter the existing offset-path tests call.
+// cfg(test) rather than deleted: it is genuinely a test helper now, and
+// inlining `None` into ~35 call sites would be churn, not clarity.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn search_clips_in_database(
     query: String,
