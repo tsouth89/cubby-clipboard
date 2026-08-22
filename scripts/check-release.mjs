@@ -276,9 +276,11 @@ for (const [docName, doc] of userFacingHistoryDocs) {
 
 // SBS-810: a URL the frontend opens but the capability does not allow is
 // rejected at the Tauri boundary, which reads as a button that does nothing.
-// Match the way tauri-plugin-opener does (Rust glob), including the
-// trailing-slash homepage the live site actually uses. Exact JSON equality
-// was how cubbyclipboard.com sat in the allowlist and still failed.
+// Match tauri-plugin-opener (glob Pattern::matches defaults, so star and
+// question-mark cross slash; SBS-997). Including the trailing-slash homepage
+// the live site actually uses. Exact JSON equality was how cubbyclipboard.com
+// sat in the allowlist and still failed. assertAllowlistNotWideOpen refuses a
+// pattern whose scheme or authority contains a wildcard.
 const openerPatterns = extractAllowlistPatterns(capability);
 assertAllowlistNotWideOpen(openerPatterns);
 // SBS-1016: Settings links are every quoted http(s) URL in that file, not
