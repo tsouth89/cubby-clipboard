@@ -299,6 +299,18 @@ pub fn run_app() {
                         });
                     }
                 }
+                tauri::WindowEvent::Destroyed => {
+                    // SBS-1015: an abandoned file-dialog pick must not stay
+                    // writable after Settings is gone.
+                    if let Err(error) =
+                        crate::path_grant::drop_grants_if_settings_window(window.label())
+                    {
+                        log::warn!(
+                            "Could not drop path grants when {} closed: {error}",
+                            window.label()
+                        );
+                    }
+                }
                 _ => {}
             }
         })

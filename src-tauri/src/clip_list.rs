@@ -1,10 +1,25 @@
 //! List-row IPC mapping.
 //!
 //! Isolated so the `preview_only` contract can be unit-tested without compiling
-//! the Windows-only crate. `commands.rs` is the only caller. `get_clips` and
-//! `search_clips` both go through these helpers (SBS-829 / SBS-912).
+//! the Windows-only crate. List IPC (`commands.rs`) is the read-side caller;
+//! capture, edit-in-place, and Ditto import share `truncate_text_preview`
+//! so stored `text_preview` cannot drift from what list rows ship (SBS-994).
+//! `get_clips` and `search_clips` both go through these helpers (SBS-829 / SBS-912).
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+/// Characters stored in `text_preview` and shipped on preview-only list rows.
+///
+/// Capture (`capture_text`), edit-in-place (`update_clip_text`), and Ditto
+/// import must use this same bound so an edited clip cannot leak more of the
+/// body than a freshly copied one (SBS-994). Counted in Unicode scalars, not
+/// bytes, so a JWT of CJK or accented text is bounded the same way as ASCII.
+pub const TEXT_PREVIEW_CHAR_LIMIT: usize = 200;
+
+/// Bound preview text to [`TEXT_PREVIEW_CHAR_LIMIT`] characters, not bytes.
+pub fn truncate_text_preview(text: &str) -> String {
+    text.chars().take(TEXT_PREVIEW_CHAR_LIMIT).collect()
+}
 
 /// What the list IPC puts in `content`.
 ///
@@ -31,11 +46,15 @@ pub fn list_item_content(
 }
 
 /// What the list IPC puts in `preview`. Hidden rows stay fully blanked.
+///
+/// Visible rows are re-bounded to [`TEXT_PREVIEW_CHAR_LIMIT`] so a leftover
+/// 500-character edited preview already on disk cannot leak past the capture
+/// contract on the next `preview_only` list or search (SBS-994).
 pub fn list_item_preview(preview: &str, is_hidden: bool) -> String {
     if is_hidden {
         String::new()
     } else {
-        preview.to_string()
+        truncate_text_preview(preview)
     }
 }
 
@@ -197,5 +216,45 @@ mod tests {
         )
         .is_empty());
         assert!(list_item_preview("copied log line", true).is_empty());
+    }
+
+    /// SBS-994: edit-in-place used to store 500 characters of preview while
+    /// capture stored 200. The unique suffix past the shared limit must not
+    /// appear on a list or search row, including when the stored column still
+    /// holds the old 500-character value.
+    #[test]
+    fn edited_clip_preview_matches_capture_limit() {
+        let prefix = "a".repeat(TEXT_PREVIEW_CHAR_LIMIT);
+        let secret = "UNIQUE-SBS-994-EDITED-TAIL-SHOULD-NOT-SHIP";
+        let edited = format!("{prefix}{secret}");
+        assert_eq!(
+            edited.chars().count(),
+            TEXT_PREVIEW_CHAR_LIMIT + secret.chars().count()
+        );
+        assert_eq!(TEXT_PREVIEW_CHAR_LIMIT, 200);
+
+        let stored = truncate_text_preview(&edited);
+        assert_eq!(stored, prefix);
+        assert_eq!(stored.chars().count(), TEXT_PREVIEW_CHAR_LIMIT);
+        assert!(!stored.contains(secret));
+
+        // Read path: a leftover 500-character column still ships only 200.
+        let shipped = list_item_preview(&edited, false);
+        assert_eq!(shipped, prefix);
+        assert!(!shipped.contains(secret));
+        assert!(list_item_preview(&edited, true).is_empty());
+    }
+
+    #[test]
+    fn preview_limit_is_counted_in_chars_not_bytes() {
+        let long = "é".repeat(TEXT_PREVIEW_CHAR_LIMIT + 50);
+        assert_eq!(
+            truncate_text_preview(&long).chars().count(),
+            TEXT_PREVIEW_CHAR_LIMIT
+        );
+        assert_eq!(
+            list_item_preview(&long, false).chars().count(),
+            TEXT_PREVIEW_CHAR_LIMIT
+        );
     }
 }

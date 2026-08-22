@@ -130,12 +130,31 @@ pub async fn save_settings(
     // changes, so the remote-session trigger tracks the current hotkey.
     if shortcut_settings_changed {
         let replacement = app.state::<Arc<crate::win_v_replacement::WinVReplacementManager>>();
-        if let Err(error) = replacement.configure(
-            new_settings.replace_win_v,
-            Some(new_settings.hotkey.clone()),
+        // replace_win_v defaults to true and persists, so a hotkey-only save on
+        // a session whose shortcut channel failed to bind still arrives here as
+        // enabled=true. Rolling the save back for that left the user unable to
+        // change their hotkey until they switched replacement off, and that off
+        // value would then stick on the next good launch (SBS-991).
+        let newly_enabled = new_settings.replace_win_v && !current.replace_win_v;
+        if crate::win_v_replacement::shortcut_save_blocked(
+            replacement.is_available(),
+            newly_enabled,
         ) {
             restore_shortcut_settings(&app, &current);
-            return Err(error);
+            return Err("Cubby shortcut channel is unavailable this session".to_string());
+        }
+        if replacement.is_available() {
+            if let Err(error) = replacement.configure(
+                new_settings.replace_win_v,
+                Some(new_settings.hotkey.clone()),
+            ) {
+                restore_shortcut_settings(&app, &current);
+                return Err(error);
+            }
+        } else {
+            log::warn!(
+                "SETTINGS: Saved shortcut settings without the Win+V helper; the shortcut channel is unavailable this session"
+            );
         }
     }
 

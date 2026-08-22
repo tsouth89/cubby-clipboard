@@ -39,18 +39,40 @@ pub(crate) fn remove_clip_image_files(image_dir: &Path, image_paths: Vec<String>
         if !path.is_empty() && is_managed_image_path(image_dir, &path) {
             remove_full_image_file(&path);
         } else if !path.is_empty() {
-            warn_skipped_unmanaged();
+            warn_skipped_unmanaged(&path);
         }
     }
 }
 
 #[cfg(not(test))]
-fn warn_skipped_unmanaged() {
-    log::warn!("Skipped deleting an unmanaged clipboard image path");
+fn warn_skipped_unmanaged(file_path: &str) {
+    log::warn!(
+        "Skipped deleting an unmanaged clipboard image path: {}",
+        sanitize_path_for_log(file_path)
+    );
 }
 
 #[cfg(test)]
-fn warn_skipped_unmanaged() {}
+fn warn_skipped_unmanaged(_file_path: &str) {}
+
+/// `clip_images.file_path` is whatever the database holds, so a hand-edited or
+/// corrupted row can carry newlines and arbitrary length. Flatten control
+/// characters and bound the result rather than letting an untrusted value forge
+/// log lines.
+fn sanitize_path_for_log(path: &str) -> String {
+    const MAX: usize = 180;
+    let flat: String = path
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= MAX {
+        flat
+    } else {
+        let truncated: String = flat.chars().take(MAX).collect();
+        format!("{truncated}...")
+    }
+}
 
 #[cfg(not(test))]
 fn warn_delete_failed(error: &std::io::Error) {
@@ -165,5 +187,32 @@ mod tests {
             !body.contains("remove_full_image_file"),
             "dedup must not unlink clip_images.file_path without the guard"
         );
+    }
+
+    /// The skipped path comes from the database, so it is untrusted input: a
+    /// newline in `clip_images.file_path` must not be able to forge a second
+    /// log line, and an absurdly long value must not flood the log file.
+    #[test]
+    fn unmanaged_path_log_is_flattened_and_bounded() {
+        let forged = "C:\\pics\\a.png\nWARN  Cubby: everything is fine";
+        let cleaned = sanitize_path_for_log(forged);
+        assert!(
+            !cleaned.contains('\n'),
+            "control characters must be flattened"
+        );
+        assert_eq!(cleaned, "C:\\pics\\a.png WARN Cubby: everything is fine");
+
+        let long = "x".repeat(500);
+        let bounded = sanitize_path_for_log(&long);
+        assert!(
+            bounded.ends_with("..."),
+            "an over-long path must be truncated"
+        );
+        assert_eq!(bounded.chars().count(), 183);
+
+        // A path that needs no cleaning survives untouched, so the log stays
+        // useful for the ordinary case this warning exists to diagnose.
+        let ordinary = "C:\\Users\\t\\AppData\\Roaming\\cubby\\images\\a.png";
+        assert_eq!(sanitize_path_for_log(ordinary), ordinary);
     }
 }

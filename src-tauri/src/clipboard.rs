@@ -107,7 +107,9 @@ struct RecentCapture {
 }
 
 mod forget_on_clear;
-use forget_on_clear::{next_forget_attempts, ForgetClipLookup};
+use forget_on_clear::{
+    next_forget_attempts, select_forget_attempt, ForgetAttempt, ForgetClipLookup,
+};
 
 /// Pure helper for SOU-316 unit tests: only empty clears within the window
 /// forget the last clip. A later clear must leave history alone.
@@ -275,6 +277,7 @@ pub fn init(app: &AppHandle, db: Arc<Database>) {
                         db_for_consumer.clone(),
                         sequence,
                         FORGET_ON_CLEAR_ATTEMPTS,
+                        None,
                     )
                     .await;
                 }
@@ -1428,11 +1431,9 @@ fn capture_text(text: String) -> Option<CapturedContent> {
         return None;
     }
 
+    // Same bound as edit-in-place and Ditto import (SBS-994).
+    let preview = crate::clip_list::truncate_text_preview(&text);
     let content = text.into_bytes();
-    let preview = String::from_utf8_lossy(&content)
-        .chars()
-        .take(200)
-        .collect::<String>();
     let hash = calculate_hash(&content);
     Some(CapturedContent::Text {
         content,
@@ -1542,7 +1543,7 @@ fn rgba_to_cf_dib(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, Strin
     dib.extend_from_slice(&0_u32.to_le_bytes());
 
     for source_row in rgba.chunks_exact(row_bytes).rev() {
-        for pixel in source_row.chunks_exact(4) {
+        for pixel in source_row.as_chunks::<4>().0 {
             dib.push(pixel[2]);
             dib.push(pixel[1]);
             dib.push(pixel[0]);
@@ -2585,6 +2586,7 @@ async fn process_clipboard_clear(
     db: Arc<Database>,
     sequence: u32,
     attempts_left: u8,
+    pinned: Option<RecentCapture>,
 ) {
     use crate::settings_manager::SettingsManager;
     use tauri::Manager;
@@ -2595,21 +2597,28 @@ async fn process_clipboard_clear(
         return;
     }
 
+    // A retry carries the capture its first attempt was scheduled for, and
+    // deletes exactly that row. Re-reading the marker would delete whatever
+    // copy landed while SQLITE_BUSY held the first attempt, and re-checking the
+    // 90s window would drop a forget that only missed it because the retry
+    // itself took time -- a capture 89.9s old would age out during the delay.
+    let took_marker = pinned.is_none();
     let recent = {
         let mut lock = LAST_ACCEPTED_CAPTURE.lock();
-        let should_forget = lock.as_ref().is_some_and(|recent| {
+        let within_window = lock.as_ref().is_some_and(|recent| {
             should_forget_recent_capture(
                 recent.captured_at,
                 Instant::now(),
                 CLIPBOARD_CLEAR_FORGET_WINDOW,
             )
         });
-        if should_forget {
-            lock.take()
-        } else {
-            // Outside the window (or nothing tracked): drop any stale marker.
-            lock.take();
-            None
+        // A first attempt consumes the marker either way: in the window it is
+        // the target, outside it is stale and must not linger.
+        let marker = if took_marker { lock.take() } else { None };
+        drop(lock);
+        match select_forget_attempt(pinned, marker, within_window) {
+            ForgetAttempt::Pinned(capture) | ForgetAttempt::FromMarker(capture) => Some(capture),
+            ForgetAttempt::Nothing => None,
         }
     };
 
@@ -2630,18 +2639,18 @@ async fn process_clipboard_clear(
         return;
     }
 
-    // Reports whether the marker went back. A newer capture landing while we
-    // held it means this clear no longer describes what is in history, so the
-    // caller must not retry: the retry would take that newer marker and delete
-    // a clip the user never cleared.
-    let restore_marker = |recent: RecentCapture| -> bool {
-        let mut lock = LAST_ACCEPTED_CAPTURE.lock();
-        // Only restore if nothing newer was captured while we held the marker.
-        if lock.is_none() {
-            *lock = Some(recent);
-            return true;
+    // Every failure below leaves the clip in history, so the attempt has to be
+    // repeatable. The retry carries the capture, so it no longer matters
+    // whether the marker could go back; putting it back is only so a later
+    // clear can still forget the clip if the retries run out (SBS-831).
+    let requeue = |app: AppHandle, db: Arc<Database>, recent: RecentCapture| {
+        if took_marker {
+            let mut lock = LAST_ACCEPTED_CAPTURE.lock();
+            if lock.is_none() {
+                *lock = Some(recent.clone());
+            }
         }
-        false
+        schedule_forget_retry(app, db, sequence, attempts_left, recent);
     };
 
     let _guard = CLIPBOARD_SYNC.lock().await;
@@ -2680,12 +2689,10 @@ async fn process_clipboard_clear(
         }
         ForgetClipLookup::Failed { error, taken } => {
             log::error!(
-                "CLIPBOARD: forget-on-clear skipped for sequence {sequence} (clip {}); lookup failed, so the retry marker was restored: {error}",
+                "CLIPBOARD: forget-on-clear lookup failed for sequence {sequence} (clip {}); queueing another attempt at that clip: {error}",
                 taken.uuid
             );
-            if restore_marker(taken) {
-                schedule_forget_retry(app, db, sequence, attempts_left);
-            }
+            requeue(app, db, taken);
             return;
         }
     };
@@ -2708,9 +2715,7 @@ async fn process_clipboard_clear(
         Ok(tx) => tx,
         Err(error) => {
             log::error!("CLIPBOARD: Failed to begin clear-forget transaction: {error}");
-            if restore_marker(recent) {
-                schedule_forget_retry(app, db, sequence, attempts_left);
-            }
+            requeue(app, db, recent);
             return;
         }
     };
@@ -2750,9 +2755,7 @@ async fn process_clipboard_clear(
                 "CLIPBOARD: Failed to forget cleared capture {}: {error}",
                 recent.uuid
             );
-            if restore_marker(recent) {
-                schedule_forget_retry(app, db, sequence, attempts_left);
-            }
+            requeue(app, db, recent);
             return;
         }
     };
@@ -2773,10 +2776,18 @@ async fn process_clipboard_clear(
             "CLIPBOARD: Failed to commit clear-forget for {}: {error}",
             recent.uuid
         );
-        if restore_marker(recent) {
-            schedule_forget_retry(app, db, sequence, attempts_left);
-        }
+        requeue(app, db, recent);
         return;
+    }
+
+    // A retry never took the marker, so it can still point at the row that was
+    // just deleted. Clear it only in that case: a newer copy owns the slot now
+    // and must keep its own forget-on-clear window.
+    {
+        let mut lock = LAST_ACCEPTED_CAPTURE.lock();
+        if lock.as_ref().is_some_and(|held| held.uuid == recent.uuid) {
+            lock.take();
+        }
     }
 
     crate::commands::remove_clip_image_files(&db.image_dir, file_path.into_iter().collect());
@@ -2803,13 +2814,29 @@ async fn process_clipboard_clear(
 /// SBS-1003: a password manager clears once. Restoring the marker without a
 /// follow-up attempt left the password in history whenever SQLITE_BUSY won
 /// that single SELECT/DELETE.
-fn schedule_forget_retry(app: AppHandle, db: Arc<Database>, sequence: u32, attempts_left: u8) {
+///
+/// The capture travels with the retry. The first attempt holds CLIPBOARD_SYNC
+/// across its lookup, so snapshots queue behind it and land the moment it
+/// fails; a retry that re-read the marker would delete one of those instead of
+/// the password this clear was about.
+fn schedule_forget_retry(
+    app: AppHandle,
+    db: Arc<Database>,
+    sequence: u32,
+    attempts_left: u8,
+    recent: RecentCapture,
+) {
     let Some(remaining) = next_forget_attempts(attempts_left) else {
+        log::warn!(
+            "CLIPBOARD: forget-on-clear gave up on {} after {} attempts",
+            recent.uuid,
+            FORGET_ON_CLEAR_ATTEMPTS
+        );
         return;
     };
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(FORGET_ON_CLEAR_RETRY_DELAY).await;
-        process_clipboard_clear(app, db, sequence, remaining).await;
+        process_clipboard_clear(app, db, sequence, remaining, Some(recent)).await;
     });
 }
 
@@ -3322,7 +3349,7 @@ unsafe fn extract_icon(path: &str) -> Option<String> {
     let _ = DeleteObject(mem_bm.into());
     let _ = ReleaseDC(None, screen_dc);
 
-    for chunk in pixels.chunks_exact_mut(4) {
+    for chunk in pixels.as_chunks_mut::<4>().0 {
         let b = chunk[0];
         let r = chunk[2];
         chunk[0] = r;
@@ -3842,6 +3869,29 @@ mod tests {
     fn capture_text_ignores_only_truly_empty_content() {
         assert!(capture_text(String::new()).is_none());
         assert!(capture_text("   ".to_string()).is_some());
+    }
+
+    #[test]
+    fn capture_text_preview_uses_the_shared_limit() {
+        let secret = "UNIQUE-SBS-994-CAPTURE-TAIL-SHOULD-NOT-STORE";
+        let body = format!(
+            "{}{secret}",
+            "x".repeat(crate::clip_list::TEXT_PREVIEW_CHAR_LIMIT)
+        );
+        let captured = capture_text(body.clone()).expect("text should be captured");
+        match captured {
+            CapturedContent::Text {
+                content, preview, ..
+            } => {
+                assert_eq!(content, body.as_bytes());
+                assert_eq!(
+                    preview.chars().count(),
+                    crate::clip_list::TEXT_PREVIEW_CHAR_LIMIT
+                );
+                assert!(!preview.contains(secret));
+            }
+            CapturedContent::Image { .. } => panic!("expected text"),
+        }
     }
 
     #[test]

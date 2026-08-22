@@ -15,5 +15,8 @@ mod search_index;
 #[path = "../../../src/image_persist.rs"]
 mod image_persist;
 
+#[path = "../../../src/managed_image.rs"]
+mod managed_image;
+
 #[path = "../../../src/backup.rs"]
 mod backup;
