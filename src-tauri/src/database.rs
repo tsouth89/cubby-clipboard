@@ -1957,7 +1957,7 @@ mod tests {
             .expect("merged note must decrypt");
         assert_eq!(
             stored.as_deref(),
-            Some("staging — expires June\n\nprod — do not use"),
+            Some("staging — expires June · prod — do not use"),
             "both notes must survive on the remaining row"
         );
         assert_eq!(
