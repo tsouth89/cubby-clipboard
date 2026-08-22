@@ -41,7 +41,7 @@
       <p class="eyebrow">Privacy</p>
       <h1>Your clipboard stays yours.</h1>
       <p>Cubby is built to keep clipboard history useful without turning it into a cloud service.</p>
-      <div class="legal-meta">Last updated August 15, 2026</div>
+      <div class="legal-meta">Last updated August 22, 2026</div>
     </header>
     <article class="legal-content">
       <div class="legal-callout"><p><strong>The short version:</strong> Cubby stores clipboard history locally on your Windows PC. The desktop app does not include analytics, advertising, cloud sync, or network-backed AI features. This website collects limited, privacy-preserving visit counts.</p></div>
@@ -51,7 +51,7 @@
       <p>History is stored in Cubby’s local application-data directory. Clipboard payloads are kept in a local SQLite database, and image data is kept in local application files.</p>
 
       <h2>Encrypted local backups</h2>
-      <p>You can export your clip history to a single encrypted file you choose on this PC, and import that file later here or on another machine. The archive holds each clip’s text, your notes, image thumbnails, text recognized in images, and the source app, folder, pin state, and hidden state. It does not hold the HTML and RTF copies of a clip or the full-resolution image files, so those do not come back on import. You choose the passphrase. Cubby does not store it, cannot recover it, and does not upload the file. Export decrypts your local history in memory and re-encrypts it into that portable archive. There is no cloud backup.</p>
+      <p>You can export your clip history to a single encrypted file you choose on this PC, and import that file later here or on another machine. The archive holds each clip’s text, HTML and RTF copies, your notes, image thumbnails, any live full-resolution original, text recognized in images, and the source app, folder, pin state, and hidden state. Export refuses to write the file if a live original or format cannot be read, rather than writing an incomplete backup. An image whose full-resolution original has already been dropped by retention stays thumbnail-only, matching the live history. You choose the passphrase. Cubby does not store it, cannot recover it, and does not upload the file. Export decrypts your local history in memory and re-encrypts it into that portable archive. There is no cloud backup.</p>
 
       <h2>Remote-session clipboard</h2>
       <p>When you copy inside a supported remote-control session, Cubby can rewrite that remote-owned clipboard onto the local clipboard so your other remote viewer sessions pick it up. Cubby only writes to the clipboard on this PC; the remote-control app you are using can then carry that content on to its other sessions and to the remote hosts they connect to. Cubby itself is not a cloud clipboard. The relay is on by default and skips a copy only when the remote viewer process itself (mstsc.exe and similar) is on the ignored list, not the application running on the remote host. The sensitive-content and skip-likely-secrets settings do not stop it. Turn it off in Settings under “Sync clipboard between remote sessions.”</p>

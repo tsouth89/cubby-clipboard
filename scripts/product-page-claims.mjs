@@ -124,6 +124,48 @@ export function findFileListHistoryClaims(source) {
 }
 
 /**
+ * SBS-1028: encrypted backups include HTML/RTF (`attach_export_formats`) and
+ * live full-resolution originals (`attach_export_full_image`). A sentence that
+ * says the archive omits those, or that they do not come back on import, is
+ * the privacy.html lie this helper exists to keep off the public pages.
+ */
+const OMIT_HOLD =
+  /\b(?:does\s+not|doesn[’']t|do\s+not|don[’']t)\s+(?:hold|include|contain|store|keep)\b/i;
+const DO_NOT_COME_BACK =
+  /\b(?:do\s+not|does\s+not|don[’']t|doesn[’']t|never)\s+come\s+back\b/i;
+const HTML_AND_RTF = /\bHTML\b/i;
+const RTF = /\bRTF\b/i;
+const FULL_RESOLUTION = /\bfull[\s-]*resolution\b/i;
+
+export function findStaleBackupOmissionClaims(source) {
+  const claims = [];
+  for (const segment of segments(source)) {
+    const mentionsFormats = HTML_AND_RTF.test(segment) && RTF.test(segment);
+    const mentionsFullRes = FULL_RESOLUTION.test(segment);
+    if (!mentionsFormats && !mentionsFullRes) {
+      continue;
+    }
+
+    const omit = segment.match(OMIT_HOLD);
+    if (omit) {
+      const after = segment.slice(omit.index + omit[0].length);
+      if (
+        (mentionsFormats && HTML_AND_RTF.test(after) && RTF.test(after)) ||
+        (mentionsFullRes && FULL_RESOLUTION.test(after))
+      ) {
+        claims.push(segment);
+        continue;
+      }
+    }
+
+    if (DO_NOT_COME_BACK.test(segment)) {
+      claims.push(segment);
+    }
+  }
+  return claims;
+}
+
+/**
  * Weaker scan used by the release check: a sentence that says files are
  * retained or supported without also negating that. Broader than
  * `findFileListHistoryClaims` so "Cubby stores files" still fails even when

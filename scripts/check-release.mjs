@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { checkPrivilegedActionPins } from '../.github/scripts/check-privileged-action-pins.mjs';
 import {
   findFileListHistoryClaims,
+  findStaleBackupOmissionClaims,
   findWeakerFileRetentionClaim,
 } from './product-page-claims.mjs';
 import { extractDefaultSkipLikelySecrets, evaluateSecretHeuristicsDoc, saysDefaultOff } from './release-check-helpers.mjs';
@@ -272,6 +273,36 @@ for (const [docName, doc] of userFacingHistoryDocs) {
       `${docName} claims file clipboard history is retained or supported, which capture policy deliberately ignores: ${fileClaim.trim()}`
     );
   }
+}
+
+// SBS-1028: export_backup attaches HTML/RTF via attach_export_formats and
+// live full-resolution originals via attach_export_full_image, and refuses
+// the export if a live original or format cannot be read. The privacy page
+// once said those were omitted and would not come back on import.
+for (const [docName, doc] of userFacingHistoryDocs) {
+  const [claim] = findStaleBackupOmissionClaims(doc);
+  if (claim) {
+    throw new Error(
+      `${docName} still claims encrypted backups omit HTML/RTF or full-resolution originals: ${claim}`
+    );
+  }
+}
+
+const backupSection = privacyPageDoc.match(
+  /<h2>Encrypted local backups<\/h2>\s*<p>([\s\S]*?)<\/p>/
+)?.[1];
+if (!backupSection) {
+  throw new Error('product_pages/privacy.html must keep an Encrypted local backups section');
+}
+if (!/\bHTML\b/.test(backupSection) || !/\bRTF\b/.test(backupSection)) {
+  throw new Error(
+    'product_pages/privacy.html must say encrypted backups include HTML and RTF copies'
+  );
+}
+if (!/\bfull[\s-]*resolution\b/i.test(backupSection)) {
+  throw new Error(
+    'product_pages/privacy.html must say encrypted backups include live full-resolution originals'
+  );
 }
 
 // SBS-810: a URL the frontend opens but the capability does not allow is
