@@ -361,9 +361,10 @@ mod tests {
         let (bundle, path_str) = write_library_backup("secret history").await;
         let target = test_database().await;
 
-        let error = import_granted_backup(&target, path_str, "correct horse".into(), false)
-            .await
-            .expect_err("import_backup must reject a never-picked path");
+        let error =
+            import_granted_backup(&target, path_str, "correct horse".to_string().into(), false)
+                .await
+                .expect_err("import_backup must reject a never-picked path");
         assert_eq!(error, UNTRUSTED_PATH);
         assert!(
             !error.to_lowercase().contains("secret"),
@@ -412,10 +413,14 @@ mod tests {
         let export_str = export_path.to_string_lossy().to_string();
 
         grant_picker_path(PathGrantPurpose::BackupSave, import_path.clone()).unwrap();
-        let import_error =
-            import_granted_backup(&db, import_path.clone(), "correct horse".into(), false)
-                .await
-                .expect_err("a save grant must not authorize import_backup");
+        let import_error = import_granted_backup(
+            &db,
+            import_path.clone(),
+            "correct horse".to_string().into(),
+            false,
+        )
+        .await
+        .expect_err("a save grant must not authorize import_backup");
         assert_eq!(import_error, UNTRUSTED_PATH);
         assert_eq!(live_clip_count(&db).await, 1);
 
@@ -451,25 +456,34 @@ mod tests {
         grant_picker_path(PathGrantPurpose::BackupOpen, path_str.clone()).unwrap();
 
         let target = test_database().await;
-        let preview =
-            import_granted_backup(&target, path_str.clone(), "correct horse".into(), true)
-                .await
-                .expect("dry-run import_backup must accept a granted path");
+        let preview = import_granted_backup(
+            &target,
+            path_str.clone(),
+            "correct horse".to_string().into(),
+            true,
+        )
+        .await
+        .expect("dry-run import_backup must accept a granted path");
         assert!(preview.dry_run);
         assert_eq!(preview.imported, 1);
         assert_eq!(live_clip_count(&target).await, 0);
 
-        let imported =
-            import_granted_backup(&target, path_str.clone(), "correct horse".into(), false)
-                .await
-                .expect("mutating import_backup must still accept the path after dry-run");
+        let imported = import_granted_backup(
+            &target,
+            path_str.clone(),
+            "correct horse".to_string().into(),
+            false,
+        )
+        .await
+        .expect("mutating import_backup must still accept the path after dry-run");
         assert!(!imported.dry_run);
         assert_eq!(imported.imported, 1);
         assert_eq!(live_clip_count(&target).await, 1);
 
-        let reused = import_granted_backup(&target, path_str, "correct horse".into(), false)
-            .await
-            .expect_err("the grant must be consumed by the first mutating call");
+        let reused =
+            import_granted_backup(&target, path_str, "correct horse".to_string().into(), false)
+                .await
+                .expect_err("the grant must be consumed by the first mutating call");
         assert_eq!(reused, UNTRUSTED_PATH);
 
         let _ = std::fs::remove_file(bundle);
@@ -485,9 +499,10 @@ mod tests {
         let path_str = path.to_string_lossy().to_string();
         grant_picker_path(PathGrantPurpose::BackupSave, path_str.clone()).unwrap();
 
-        let count = export_granted_backup(&db, path_str.clone(), "correct horse".into())
-            .await
-            .expect("export_backup must accept a granted save path");
+        let count =
+            export_granted_backup(&db, path_str.clone(), "correct horse".to_string().into())
+                .await
+                .expect("export_backup must accept a granted save path");
         assert_eq!(count, 1);
         assert!(path.exists());
 
@@ -508,7 +523,7 @@ mod tests {
         let path_str = path.to_string_lossy().to_string();
         grant_picker_path(PathGrantPurpose::BackupSave, path_str.clone()).unwrap();
 
-        let first = export_granted_backup(&db, path_str.clone(), String::new())
+        let first = export_granted_backup(&db, path_str.clone(), String::new().into())
             .await
             .expect_err("an empty passphrase should fail after the grant is consumed");
         assert_ne!(first, UNTRUSTED_PATH);
@@ -581,7 +596,7 @@ mod tests {
         }
 
         // A rejected lookalike must not consume the real grant.
-        let granted_error = export_granted_backup(&db, granted, String::new())
+        let granted_error = export_granted_backup(&db, granted, String::new().into())
             .await
             .expect_err("the real grant should still be present and then fail on passphrase");
         assert_ne!(granted_error, UNTRUSTED_PATH);
@@ -777,7 +792,7 @@ mod tests {
         grant_picker_path(PathGrantPurpose::BackupSave, path_str.clone()).unwrap();
         age_grants_for_tests(GRANT_TTL);
 
-        let error = export_granted_backup(&db, path_str, "correct horse".into())
+        let error = export_granted_backup(&db, path_str, "correct horse".to_string().into())
             .await
             .expect_err("export_backup must reject an expired save grant");
         assert_eq!(error, GRANT_EXPIRED);
