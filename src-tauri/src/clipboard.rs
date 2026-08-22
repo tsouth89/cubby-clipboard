@@ -1431,11 +1431,9 @@ fn capture_text(text: String) -> Option<CapturedContent> {
         return None;
     }
 
+    // Same bound as edit-in-place and Ditto import (SBS-994).
+    let preview = crate::clip_list::truncate_text_preview(&text);
     let content = text.into_bytes();
-    let preview = String::from_utf8_lossy(&content)
-        .chars()
-        .take(200)
-        .collect::<String>();
     let hash = calculate_hash(&content);
     Some(CapturedContent::Text {
         content,
@@ -1545,7 +1543,7 @@ fn rgba_to_cf_dib(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, Strin
     dib.extend_from_slice(&0_u32.to_le_bytes());
 
     for source_row in rgba.chunks_exact(row_bytes).rev() {
-        for pixel in source_row.chunks_exact(4) {
+        for pixel in source_row.as_chunks::<4>().0 {
             dib.push(pixel[2]);
             dib.push(pixel[1]);
             dib.push(pixel[0]);
@@ -3356,7 +3354,7 @@ unsafe fn extract_icon(path: &str) -> Option<String> {
     let _ = DeleteObject(mem_bm.into());
     let _ = ReleaseDC(None, screen_dc);
 
-    for chunk in pixels.chunks_exact_mut(4) {
+    for chunk in pixels.as_chunks_mut::<4>().0 {
         let b = chunk[0];
         let r = chunk[2];
         chunk[0] = r;
@@ -3876,6 +3874,29 @@ mod tests {
     fn capture_text_ignores_only_truly_empty_content() {
         assert!(capture_text(String::new()).is_none());
         assert!(capture_text("   ".to_string()).is_some());
+    }
+
+    #[test]
+    fn capture_text_preview_uses_the_shared_limit() {
+        let secret = "UNIQUE-SBS-994-CAPTURE-TAIL-SHOULD-NOT-STORE";
+        let body = format!(
+            "{}{secret}",
+            "x".repeat(crate::clip_list::TEXT_PREVIEW_CHAR_LIMIT)
+        );
+        let captured = capture_text(body.clone()).expect("text should be captured");
+        match captured {
+            CapturedContent::Text {
+                content, preview, ..
+            } => {
+                assert_eq!(content, body.as_bytes());
+                assert_eq!(
+                    preview.chars().count(),
+                    crate::clip_list::TEXT_PREVIEW_CHAR_LIMIT
+                );
+                assert!(!preview.contains(secret));
+            }
+            CapturedContent::Image { .. } => panic!("expected text"),
+        }
     }
 
     #[test]
