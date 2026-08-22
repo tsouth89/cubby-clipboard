@@ -107,6 +107,7 @@ struct RecentCapture {
 }
 
 mod forget_on_clear;
+mod snapshot_channel;
 mod snapshot_queue;
 use forget_on_clear::{
     next_forget_attempts, select_forget_attempt, ForgetAttempt, ForgetClipLookup,
@@ -260,7 +261,7 @@ pub fn init(app: &AppHandle, db: Arc<Database>) {
     crate::ocr_queue::init(app.clone(), db.clone());
     // SBS-1032: snapshots carry full PNG/HTML/RTF bytes. The queue is
     // bounded (drop-oldest); see `snapshot_queue` for the policy.
-    let (event_tx, event_rx) = snapshot_queue::channel();
+    let (event_tx, event_rx) = snapshot_channel::channel();
     let app_for_consumer = app.clone();
     let db_for_consumer = db.clone();
 
@@ -386,7 +387,7 @@ impl ClipboardSnapshot {
 }
 
 fn enqueue_listener_event(
-    event_tx: &snapshot_queue::Sender<ClipboardListenerEvent>,
+    event_tx: &snapshot_channel::Sender<ClipboardListenerEvent>,
     event: ClipboardListenerEvent,
 ) -> Result<(), ()> {
     match event_tx.send(event) {
@@ -737,7 +738,7 @@ fn deferral_decision(
 #[cfg(target_os = "windows")]
 fn capture_clipboard_update(
     mut sequence: u32,
-    event_tx: &snapshot_queue::Sender<ClipboardListenerEvent>,
+    event_tx: &snapshot_channel::Sender<ClipboardListenerEvent>,
 ) -> Result<CaptureAttempt, ()> {
     let read_sequence =
         || unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
@@ -785,7 +786,7 @@ impl From<SequenceBindError> for BoundCaptureFailure {
 fn capture_one_bound_sequence(
     mut sequence: u32,
     read_sequence: &impl Fn() -> u32,
-    event_tx: &snapshot_queue::Sender<ClipboardListenerEvent>,
+    event_tx: &snapshot_channel::Sender<ClipboardListenerEvent>,
 ) -> Result<CaptureAttempt, BoundCaptureFailure> {
     let started = Instant::now();
     let live = read_sequence();
@@ -1073,7 +1074,7 @@ fn clipboard_has_image_format() -> bool {
 #[cfg(target_os = "windows")]
 fn run_listener_session(
     monitor: &mut Monitor,
-    event_tx: &snapshot_queue::Sender<ClipboardListenerEvent>,
+    event_tx: &snapshot_channel::Sender<ClipboardListenerEvent>,
 ) -> ListenerSessionExit {
     loop {
         match monitor.recv() {
@@ -1209,7 +1210,7 @@ fn clipboard_only_has_placeholder_text_formats() -> bool {
 ///   those copies are ingested late rather than lost.
 /// - Consumer channel close stops the supervisor (process teardown).
 #[cfg(target_os = "windows")]
-fn run_native_listener(event_tx: snapshot_queue::Sender<ClipboardListenerEvent>) {
+fn run_native_listener(event_tx: snapshot_channel::Sender<ClipboardListenerEvent>) {
     spawn_listener_watchdog();
 
     let mut backoff = INITIAL_LISTENER_BACKOFF;
@@ -1285,7 +1286,7 @@ fn run_native_listener(event_tx: snapshot_queue::Sender<ClipboardListenerEvent>)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn run_native_listener(_event_tx: snapshot_queue::Sender<ClipboardListenerEvent>) {
+fn run_native_listener(_event_tx: snapshot_channel::Sender<ClipboardListenerEvent>) {
     set_capture_state(CAPTURE_STATE_STOPPED);
     record_capture_error("clipboard capture requires Windows");
 }
