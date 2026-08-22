@@ -19,7 +19,7 @@ import { shortcutsSuspended } from '../utils/flyoutSearch';
 import { ClipDetails } from '../utils/clipPreviewState';
 import { customRange, DATE_PRESET_LABELS, DatePreset, presetRange } from '../utils/dateRange';
 import { folderSelectionAfterReload } from '../utils/folderSelection';
-import { clipListPageArgs } from '../utils/clipListPage';
+import { clipListPageArgs, nextPageCursor } from '../utils/clipListPage';
 import {
   clipLoadAnnouncesSuccess,
   clipLoadFailure,
@@ -101,6 +101,9 @@ export function HistoryWindow() {
 
   const clipsRef = useRef<ClipboardItem[]>(clips);
   clipsRef.current = clips;
+  // Cursor for the next page, captured from the backend's own ordering.
+  // Never read off clipsRef: a pin/unpin re-sorts that array in place.
+  const pageCursorRef = useRef<string | null>(null);
   const selectedFolderRef = useRef(selectedFolder);
   selectedFolderRef.current = selectedFolder;
   // Guards against an older load landing after a newer one and restoring stale
@@ -148,7 +151,11 @@ export function HistoryWindow() {
   const loadClips = useCallback(
     async (append: boolean): Promise<ClipLoadResult> => {
       const loadId = ++loadIdRef.current;
-      const page = clipListPageArgs(clipsRef.current, append, PAGE_SIZE);
+      const page = clipListPageArgs(
+        { loadedCount: clipsRef.current.length, cursorId: pageCursorRef.current },
+        append,
+        PAGE_SIZE
+      );
       const query = searchQuery.trim();
       const filterKey = JSON.stringify([
         selectedFolder,
@@ -188,6 +195,7 @@ export function HistoryWindow() {
 
         if (loadId !== loadIdRef.current) return 'superseded';
         setClips((previous) => (append ? [...previous, ...data] : data));
+        pageCursorRef.current = nextPageCursor(data, append ? pageCursorRef.current : null);
         visibleFilterKeyRef.current = filterKey;
         setHasMore(data.length === PAGE_SIZE);
         setLoadError(false);
@@ -205,6 +213,7 @@ export function HistoryWindow() {
         });
         if (failure.clearList) {
           setClips([]);
+          pageCursorRef.current = null;
           // The empty list now stands for this query, so retrying it is a
           // same-filter refresh rather than another filter change.
           visibleFilterKeyRef.current = filterKey;

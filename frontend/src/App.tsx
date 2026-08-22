@@ -18,7 +18,7 @@ import { useUpdater } from './hooks/useUpdater';
 import { useRevealedClips } from './hooks/useRevealedClips';
 import { isImeKey, shouldCaptureTypeToSearch } from './utils/flyoutSearch';
 import { folderSelectionAfterReload } from './utils/folderSelection';
-import { clipListPageArgs } from './utils/clipListPage';
+import { clipListPageArgs, nextPageCursor } from './utils/clipListPage';
 import {
   clipLoadAnnouncesSuccess,
   clipLoadFailure,
@@ -121,6 +121,9 @@ function App() {
   const loadPerfIdRef = useRef(0);
   const clipsRef = useRef(clips);
   clipsRef.current = clips;
+  // Cursor for the next page, captured from the backend's own ordering.
+  // Never read off clipsRef: a pin/unpin re-sorts that array in place.
+  const pageCursorRef = useRef<string | null>(null);
   // Which query the rows on screen answer. A failed replace only has to wipe
   // them when this no longer matches the load that failed — a same-filter
   // refresh (clipboard change, post-edit reload, retry) leaves a correct page.
@@ -333,7 +336,11 @@ function App() {
       try {
         setIsLoading(true);
 
-        const page = clipListPageArgs(clipsRef.current, append, 20);
+        const page = clipListPageArgs(
+          { loadedCount: clipsRef.current.length, cursorId: pageCursorRef.current },
+          append,
+          20
+        );
         // The index lowercases but does not trim, so a leading space matches
         // nothing. History already sends the trimmed form.
         const query = searchQuery.trim();
@@ -406,6 +413,7 @@ function App() {
         } else {
           setClips(data);
         }
+        pageCursorRef.current = nextPageCursor(data, append ? pageCursorRef.current : null);
         visibleFilterKeyRef.current = filterKey;
 
         // If we got fewer than limit, no more clips
@@ -448,6 +456,7 @@ function App() {
         });
         if (failure.clearList) {
           setClips([]);
+          pageCursorRef.current = null;
           // The empty list now stands for this query, so retrying it is a
           // same-filter refresh rather than another filter change.
           visibleFilterKeyRef.current = filterKey;
