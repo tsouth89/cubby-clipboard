@@ -9,7 +9,9 @@
     "copied": "Copied to clipboard",
     "pause": "Pause",
     "resume": "Resume",
-    "clipActions": "Clip actions"
+    "clipActions": "Clip actions",
+    "folderActions": "Folder actions",
+    "historyActions": "History actions"
   },
   "clipList": {
     "empty": "No clips yet",

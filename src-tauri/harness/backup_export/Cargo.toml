@@ -19,3 +19,4 @@ sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["sqlite", "chrono", "uuid", "runtime-tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 uuid = { version = "1", features = ["v4"] }
+zeroize = { version = "1.9.0", features = ["derive"] }

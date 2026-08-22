@@ -18,6 +18,7 @@ import { useUpdater } from './hooks/useUpdater';
 import { useRevealedClips } from './hooks/useRevealedClips';
 import { isImeKey, shouldCaptureTypeToSearch } from './utils/flyoutSearch';
 import { folderSelectionAfterReload } from './utils/folderSelection';
+import { clipListPageArgs, nextPageCursor } from './utils/clipListPage';
 import {
   clipLoadAnnouncesSuccess,
   clipLoadFailure,
@@ -120,6 +121,9 @@ function App() {
   const loadPerfIdRef = useRef(0);
   const clipsRef = useRef(clips);
   clipsRef.current = clips;
+  // Cursor for the next page, captured from the backend's own ordering.
+  // Never read off clipsRef: a pin/unpin re-sorts that array in place.
+  const pageCursorRef = useRef<string | null>(null);
   // Which query the rows on screen answer. A failed replace only has to wipe
   // them when this no longer matches the load that failed — a same-filter
   // refresh (clipboard change, post-edit reload, retry) leaves a correct page.
@@ -332,7 +336,11 @@ function App() {
       try {
         setIsLoading(true);
 
-        const currentOffset = append ? clipsRef.current.length : 0;
+        const page = clipListPageArgs(
+          { loadedCount: clipsRef.current.length, cursorId: pageCursorRef.current },
+          append,
+          20
+        );
         // The index lowercases but does not trim, so a leading space matches
         // nothing. History already sends the trimmed form.
         const query = searchQuery.trim();
@@ -365,8 +373,7 @@ function App() {
           data = await invoke<AppClipboardItem[]>('search_clips', {
             query,
             filterId: folderId,
-            limit: 20,
-            offset: currentOffset,
+            ...page,
             previewOnly: true,
             contentFilter: filter,
           });
@@ -375,8 +382,7 @@ function App() {
           if (perfLogEnabled) invokeStart = performance.now();
           data = await invoke<AppClipboardItem[]>('get_clips', {
             filterId: folderId,
-            limit: 20,
-            offset: currentOffset,
+            ...page,
             previewOnly: true,
             contentFilter: filter,
           });
@@ -407,6 +413,7 @@ function App() {
         } else {
           setClips(data);
         }
+        pageCursorRef.current = nextPageCursor(data, append ? pageCursorRef.current : null);
         visibleFilterKeyRef.current = filterKey;
 
         // If we got fewer than limit, no more clips
@@ -422,7 +429,7 @@ function App() {
                 folderId: folderId ?? 'all',
                 append,
                 hasSearch: Boolean(searchQuery.trim()),
-                offset: currentOffset,
+                offset: page.offset,
                 itemCount: data.length,
                 imageCount,
                 totalContentChars,
@@ -449,6 +456,7 @@ function App() {
         });
         if (failure.clearList) {
           setClips([]);
+          pageCursorRef.current = null;
           // The empty list now stands for this query, so retrying it is a
           // same-filter refresh rather than another filter change.
           visibleFilterKeyRef.current = filterKey;
@@ -1094,6 +1102,7 @@ function App() {
             <ContextMenu
               x={contextMenu.x}
               y={contextMenu.y}
+              kind={contextMenu.type}
               onClose={handleCloseContextMenu}
               options={
                 contextMenu.type === 'history'

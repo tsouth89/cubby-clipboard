@@ -5,7 +5,11 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::io;
 use std::path::Path;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
+// The trait is only needed to wipe the DPAPI output buffer, which is
+// Windows-only; importing it unconditionally warns on every other target.
+#[cfg(target_os = "windows")]
+use zeroize::Zeroize;
 
 const ENVELOPE_MAGIC: &[u8; 4] = b"CUB1";
 const NONCE_LEN: usize = 12;
@@ -73,6 +77,10 @@ fn load_protected_key(key_path: &Path) -> Result<Zeroizing<[u8; KEY_LEN]>, Stora
 #[derive(Clone)]
 pub struct CryptoManager {
     key: Zeroizing<[u8; KEY_LEN]>,
+    /// Test-only: content/preview encrypt still works, optional fields fail.
+    /// Needed so import can prove SBS-980 without a real entropy outage.
+    #[cfg(test)]
+    fail_optional_encrypt: bool,
 }
 
 impl CryptoManager {
@@ -96,7 +104,7 @@ impl CryptoManager {
                 let mut key = Zeroizing::new([0_u8; KEY_LEN]);
                 getrandom::fill(&mut *key)
                     .map_err(|e| format!("failed to generate storage key: {e}"))?;
-                let protected = protect_for_current_user(&key)?;
+                let protected = protect_for_current_user(key.as_slice())?;
                 if let Some(parent) = key_path.parent() {
                     std::fs::create_dir_all(parent)
                         .map_err(|e| format!("failed to create storage directory: {e}"))?;
@@ -120,14 +128,28 @@ impl CryptoManager {
             }
         };
 
-        Ok(Self { key })
+        Ok(Self {
+            key,
+            #[cfg(test)]
+            fail_optional_encrypt: false,
+        })
     }
 
     #[cfg(test)]
     pub fn ephemeral() -> Self {
         let mut key = Zeroizing::new([0_u8; KEY_LEN]);
         getrandom::fill(&mut *key).expect("test encryption key should be generated");
-        Self { key }
+        Self {
+            key,
+            fail_optional_encrypt: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn ephemeral_failing_optional_encrypt() -> Self {
+        let mut manager = Self::ephemeral();
+        manager.fail_optional_encrypt = true;
+        manager
     }
 
     pub fn is_encrypted(&self, value: &[u8]) -> bool {
@@ -135,7 +157,7 @@ impl CryptoManager {
     }
 
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
-        let cipher = Aes256Gcm::new_from_slice(&self.key)
+        let cipher = Aes256Gcm::new_from_slice(self.key.as_slice())
             .map_err(|_| "failed to initialize storage encryption".to_string())?;
         let mut nonce = [0_u8; NONCE_LEN];
         getrandom::fill(&mut nonce).map_err(|e| format!("failed to generate nonce: {e}"))?;
@@ -159,7 +181,7 @@ impl CryptoManager {
         }
         let nonce_start = ENVELOPE_MAGIC.len();
         let ciphertext_start = nonce_start + NONCE_LEN;
-        let cipher = Aes256Gcm::new_from_slice(&self.key)
+        let cipher = Aes256Gcm::new_from_slice(self.key.as_slice())
             .map_err(|_| "failed to initialize storage encryption".to_string())?;
         cipher
             .decrypt(
@@ -170,8 +192,8 @@ impl CryptoManager {
     }
 
     pub fn keyed_hash(&self, content: &[u8]) -> String {
-        let mut mac =
-            <Hmac<Sha256> as Mac>::new_from_slice(&self.key).expect("HMAC accepts a 256-bit key");
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.key.as_slice())
+            .expect("HMAC accepts a 256-bit key");
         mac.update(content);
         mac.finalize()
             .into_bytes()
@@ -203,6 +225,10 @@ impl CryptoManager {
     }
 
     pub fn encrypt_optional_text(&self, value: Option<&str>) -> Result<Option<String>, String> {
+        #[cfg(test)]
+        if self.fail_optional_encrypt && value.is_some() {
+            return Err("test-injected optional encrypt failure".to_string());
+        }
         value.map(|value| self.encrypt_text(value)).transpose()
     }
 

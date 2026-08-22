@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { ContextMenuKind, contextMenuLabelKey } from '../utils/contextMenuLabel';
 
 interface ContextMenuProps {
   x: number;
@@ -11,13 +12,15 @@ interface ContextMenuProps {
     disabled?: boolean;
   }[];
   onClose: () => void;
+  /** What this menu acts on. Drives the default accessible name so Folder and
+   *  History are not announced as clip actions (SBS-1013). */
+  kind: ContextMenuKind;
   /** Accessible name for the menu. Screen readers announce this on open.
-   *  Defaults to a translated string rather than a literal, since this is
-   *  user-facing text like every other string in the app. */
+   *  Defaults from `kind` rather than a clip-only literal. */
   label?: string;
 }
 
-export function ContextMenu({ x, y, options, onClose, label }: ContextMenuProps) {
+export function ContextMenu({ x, y, options, onClose, kind, label }: ContextMenuProps) {
   const { t } = useTranslation();
   const menuRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -136,7 +139,7 @@ export function ContextMenu({ x, y, options, onClose, label }: ContextMenuProps)
     <div
       ref={menuRef}
       role="menu"
-      aria-label={label ?? t('common.clipActions')}
+      aria-label={label ?? t(contextMenuLabelKey(kind))}
       tabIndex={-1}
       className="animate-in fade-in-0 zoom-in-95 fixed z-50 max-h-[min(24rem,calc(100vh-1rem))] min-w-[12rem] overflow-y-auto rounded-lg border border-white/[0.1] bg-popover/95 p-1.5 shadow-2xl backdrop-blur-xl"
       style={style}
