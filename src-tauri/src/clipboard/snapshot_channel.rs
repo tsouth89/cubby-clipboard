@@ -20,6 +20,24 @@ struct Inner<T> {
     senders_gone: bool,
 }
 
+impl<T: SizedPayload> Inner<T> {
+    // Methods take `&mut self` so we do not split-borrow a MutexGuard
+    // (parking_lot's DerefMut is not disjoint-field aware).
+    fn push(&mut self, item: T) -> EnqueueOutcome {
+        enqueue(
+            &mut self.items,
+            &mut self.bytes,
+            item,
+            SNAPSHOT_QUEUE_CAPACITY,
+            SNAPSHOT_QUEUE_MAX_BYTES,
+        )
+    }
+
+    fn pop(&mut self) -> Option<T> {
+        dequeue(&mut self.items, &mut self.bytes)
+    }
+}
+
 struct Shared<T> {
     inner: Mutex<Inner<T>>,
     notify: Notify,
@@ -57,13 +75,7 @@ impl<T: SizedPayload> Sender<T> {
         if inner.receiver_gone {
             return Err(());
         }
-        let outcome = enqueue(
-            &mut inner.items,
-            &mut inner.bytes,
-            item,
-            SNAPSHOT_QUEUE_CAPACITY,
-            SNAPSHOT_QUEUE_MAX_BYTES,
-        );
+        let outcome = inner.push(item);
         drop(inner);
         self.shared.notify.notify_one();
         Ok(outcome)
@@ -82,7 +94,7 @@ impl<T: SizedPayload> Receiver<T> {
         loop {
             {
                 let mut inner = self.shared.inner.lock();
-                if let Some(item) = dequeue(&mut inner.items, &mut inner.bytes) {
+                if let Some(item) = inner.pop() {
                     return Some(item);
                 }
                 if inner.senders_gone {
