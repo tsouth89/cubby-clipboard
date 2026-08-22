@@ -50,6 +50,17 @@ const HEADER_LEN: usize = MAGIC.len() + SALT_LEN + NONCE_LEN;
 /// cap let an unauthenticated file allocate until the process aborted (SBS-981).
 const MAX_BUNDLE_BYTES: u64 = 256 * 1024 * 1024;
 const OVERSIZE_BUNDLE: &str = "That backup file is implausibly large";
+
+/// Export failed because the user's own history is too big, not because they
+/// picked a bad file. OVERSIZE_BUNDLE names "that backup file", which after a
+/// save dialog reads as a problem with the destination they just chose.
+/// Derived from the cap so the number cannot drift away from MAX_BUNDLE_BYTES.
+fn oversize_export_error(max_bytes: u64) -> String {
+    format!(
+        "This clipboard history is too large to export: the backup would exceed the {} MiB limit",
+        max_bytes / (1024 * 1024)
+    )
+}
 const NOT_A_BUNDLE: &str = "That does not look like a Cubby backup file";
 /// AES-256-GCM appends a 16-byte tag. Used to reject an export that could not
 /// be imported under `MAX_BUNDLE_BYTES` before the second allocation.
@@ -364,10 +375,22 @@ fn refuse_oversize_bundle(len: u64) -> Result<(), String> {
 /// never produce, which is the only way to exercise the import guards against a
 /// crafted file.
 fn seal_bundle(bundle: &BackupBundle, passphrase: &str) -> Result<Vec<u8>, String> {
+    seal_bundle_limited(bundle, passphrase, MAX_BUNDLE_BYTES)
+}
+
+/// Same as [`seal_bundle`], with the cap supplied so a test can pin the refusal
+/// without building a 256 MiB bundle in memory.
+fn seal_bundle_limited(
+    bundle: &BackupBundle,
+    passphrase: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, String> {
     let plaintext =
         serde_json::to_vec(bundle).map_err(|e| format!("Could not build the backup: {e}"))?;
     // Fail before encrypt allocates a second buffer the size of the payload.
-    refuse_oversize_bundle(HEADER_LEN as u64 + plaintext.len() as u64 + GCM_TAG_LEN)?;
+    if HEADER_LEN as u64 + plaintext.len() as u64 + GCM_TAG_LEN > max_bytes {
+        return Err(oversize_export_error(max_bytes));
+    }
 
     let mut salt = [0_u8; SALT_LEN];
     getrandom::fill(&mut salt).map_err(|e| format!("failed to generate a salt: {e}"))?;
@@ -860,7 +883,20 @@ pub async fn import_backup(
     passphrase: &str,
     dry_run: bool,
 ) -> Result<BackupImportResult, String> {
-    let raw = read_backup_file(path)?;
+    import_backup_limited(db, path, passphrase, dry_run, MAX_BUNDLE_BYTES).await
+}
+
+/// Same as [`import_backup`], with the cap supplied so a test can pin the
+/// refusal -- and prove it lands before any passphrase work -- without writing
+/// a 256 MiB file. Mirrors the [`read_backup_file_limited`] split.
+async fn import_backup_limited(
+    db: &Database,
+    path: &str,
+    passphrase: &str,
+    dry_run: bool,
+    max_bytes: u64,
+) -> Result<BackupImportResult, String> {
+    let raw = read_backup_file_limited(path, max_bytes)?;
     if raw.len() < HEADER_LEN || &raw[..MAGIC.len()] != MAGIC {
         return Err(NOT_A_BUNDLE.to_string());
     }
@@ -1705,28 +1741,84 @@ mod tests {
             error.contains("implausibly large"),
             "one byte over the cap must fail closed, got {error}"
         );
+        // Both sides are constants, so this is a compile-time fact, not a
+        // runtime one; `const {}` says so and satisfies
+        // clippy::assertions_on_constants, which -D warnings promotes to an
+        // error. It now fails the build rather than a test run.
+        const {
+            assert!(
+                MAX_BUNDLE_BYTES < 4 * 1024 * 1024 * 1024,
+                "the production cap must stay well under the old 4 GiB abort"
+            )
+        };
+    }
+
+    /// An export that overflows the cap failed because the user's history is
+    /// too big. Settings shows this string straight after the save dialog, so
+    /// OVERSIZE_BUNDLE's "that backup file" would read as a bad destination.
+    #[test]
+    fn an_oversize_export_names_the_history_not_the_chosen_file() {
+        let bundle = BackupBundle {
+            version: 1,
+            exported_at: "2026-01-01 00:00:00".to_string(),
+            clips: Vec::new(),
+        };
+        // A cap below the header forces the refusal without building a 256 MiB
+        // bundle, the same trick read_backup_file_limited already uses.
+        let error = seal_bundle_limited(&bundle, "pass", 1)
+            .expect_err("a bundle over the supplied cap must not seal");
         assert!(
-            MAX_BUNDLE_BYTES < 4 * 1024 * 1024 * 1024,
-            "the production cap must stay well under the old 4 GiB abort"
+            error.contains("too large to export"),
+            "export must name the history, got {error}"
+        );
+        assert!(
+            !error.contains("backup file"),
+            "export must not reuse the import file wording, got {error}"
+        );
+        assert!(
+            seal_bundle_limited(&bundle, "pass", MAX_BUNDLE_BYTES).is_ok(),
+            "an ordinary bundle must still seal under the production cap"
         );
     }
 
-    /// Production import uses `MAX_BUNDLE_BYTES`. A sparse file past that cap
-    /// must fail closed on the advertised size and never reach Argon2/AEAD.
+    /// The user-facing number must track the constant, not be typed twice.
+    #[test]
+    fn the_export_limit_message_reports_the_real_cap() {
+        assert!(
+            oversize_export_error(MAX_BUNDLE_BYTES).contains("256 MiB"),
+            "the production cap is 256 MiB and the message must say so"
+        );
+        assert!(
+            oversize_export_error(512 * 1024 * 1024).contains("512 MiB"),
+            "the message must be derived from the cap, not hard-coded"
+        );
+    }
+
+    /// A file past the cap must fail closed on the advertised size and never
+    /// reach Argon2/AEAD.
+    ///
+    /// This used to `set_len(MAX_BUNDLE_BYTES + 1)` and call the result sparse.
+    /// It is not: NTFS only makes a file sparse via FSCTL_SET_SPARSE, which
+    /// `set_len` does not issue, so the probe really did reserve 256 MiB in
+    /// TEMP and panicked outright if the volume could not commit it -- taking
+    /// the SBS-981 coverage with it. `import_backup_limited` takes the cap
+    /// instead, so this proves the same ordering on a 37-byte file.
     #[tokio::test]
     async fn import_refuses_a_file_over_the_bundle_cap_without_trying_the_passphrase() {
         let path = temp_path("oversize-import");
-        let mut header = Vec::from(*MAGIC);
-        header.extend_from_slice(&[0_u8; SALT_LEN + NONCE_LEN]);
-        std::fs::write(&path, &header).unwrap();
-        {
-            let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-            file.set_len(MAX_BUNDLE_BYTES + 1)
-                .expect("the oversize probe must be creatable");
-        }
+        let cap = HEADER_LEN as u64;
+        let mut probe = Vec::from(*MAGIC);
+        probe.extend_from_slice(&[0_u8; SALT_LEN + NONCE_LEN]);
+        probe.push(0);
+        assert_eq!(
+            probe.len() as u64,
+            cap + 1,
+            "the probe must sit one byte over"
+        );
+        std::fs::write(&path, &probe).unwrap();
 
         let target = test_database().await;
-        let error = import_backup(&target, path.to_str().unwrap(), "pass", false)
+        let error = import_backup_limited(&target, path.to_str().unwrap(), "pass", false, cap)
             .await
             .unwrap_err();
         assert!(
