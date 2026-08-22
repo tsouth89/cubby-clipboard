@@ -2,13 +2,14 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// Any workflow that runs in the base-repo context with write scopes belongs
+// here, because an unpinned third-party action in one of these executes with
+// those permissions (SBS-984). Every `pull_request_target` workflow qualifies;
+// the test suite enforces that so a new one cannot be added and forgotten.
 export const PRIVILEGED_WORKFLOWS = [
   '.github/workflows/release.yml',
   '.github/workflows/publish-store-packages.yml',
   '.github/workflows/validate-store-submission.yml',
-  // pull_request_target + pull-requests:write. An unpinned third-party
-  // action here runs in the base-repo context with those permissions (SBS-984).
-  '.github/workflows/pr-review.yml',
 ];
 
 const FIRST_PARTY_OWNERS = new Set(['actions']);
@@ -111,7 +112,21 @@ export function violationsOf(findings) {
 export async function checkPrivilegedActionPins(rootDir) {
   const findings = [];
   for (const relativePath of PRIVILEGED_WORKFLOWS) {
-    const text = await readFile(path.join(rootDir, relativePath), 'utf8');
+    let text;
+    try {
+      text = await readFile(path.join(rootDir, relativePath), 'utf8');
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        // A retired or renamed workflow must not surface as a bare ENOENT
+        // stack trace three CI steps deep. Say which entry is stale and what
+        // to do about it.
+        throw new Error(
+          `${relativePath} is listed in PRIVILEGED_WORKFLOWS but does not exist. ` +
+            'Drop the entry if the workflow was retired, or update it if it was renamed.',
+        );
+      }
+      throw error;
+    }
     findings.push(...parseWorkflowUses(text, relativePath));
   }
   return {

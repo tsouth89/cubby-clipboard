@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,11 +14,52 @@ import {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-test('privileged workflow list includes pr-review.yml', () => {
-  assert.ok(
-    PRIVILEGED_WORKFLOWS.includes('.github/workflows/pr-review.yml'),
-    'pr-review.yml is pull_request_target and must be pin-checked (SBS-984)',
+/**
+ * SBS-984, generalized. This used to hardcode pr-review.yml, which meant
+ * retiring that workflow left a stale PRIVILEGED_WORKFLOWS entry and broke
+ * three CI steps with an ENOENT. Assert the invariant the filename stood for
+ * instead: a `pull_request_target` workflow runs in the base-repo context with
+ * write scopes, so every one of them must be pin-checked.
+ */
+test('every pull_request_target workflow is pin-checked', async () => {
+  const workflowDir = path.join(repoRoot, '.github/workflows');
+  const unlisted = [];
+  for (const name of await readdir(workflowDir)) {
+    if (!/\.ya?ml$/.test(name)) continue;
+    const source = await readFile(path.join(workflowDir, name), 'utf8');
+    // Trigger keys sit under `on:`; a `#`-prefixed mention will not match.
+    if (!/^\s*pull_request_target\s*:/m.test(source)) continue;
+    const relativePath = `.github/workflows/${name}`;
+    if (!PRIVILEGED_WORKFLOWS.includes(relativePath)) unlisted.push(relativePath);
+  }
+  assert.deepEqual(
+    unlisted,
+    [],
+    `pull_request_target workflows missing from PRIVILEGED_WORKFLOWS (SBS-984): ${unlisted.join(', ')}`,
   );
+});
+
+/** Every listed workflow must exist, and a stale entry must say so plainly. */
+test('a listed workflow that no longer exists fails with an actionable message', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'sbs-984-'));
+  await mkdir(path.join(root, '.github', 'workflows'), { recursive: true });
+  await assert.rejects(
+    () => checkPrivilegedActionPins(root),
+    (error) => {
+      assert.match(error.message, /listed in PRIVILEGED_WORKFLOWS but does not exist/);
+      assert.match(error.message, /Drop the entry|update it/);
+      return true;
+    },
+  );
+});
+
+test('every listed privileged workflow is present in the repo', async () => {
+  for (const relativePath of PRIVILEGED_WORKFLOWS) {
+    await assert.doesNotReject(
+      () => readFile(path.join(repoRoot, relativePath), 'utf8'),
+      `${relativePath} is listed in PRIVILEGED_WORKFLOWS but missing from the repo`,
+    );
+  }
 });
 
 test('SHA pin with a version comment is accepted', () => {
