@@ -1093,6 +1093,7 @@ function App() {
             <ContextMenu
               x={contextMenu.x}
               y={contextMenu.y}
+              kind={contextMenu.type}
               onClose={handleCloseContextMenu}
               options={
                 contextMenu.type === 'history'
