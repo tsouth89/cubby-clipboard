@@ -150,13 +150,8 @@ pub fn run_app() {
         // the first release of this migration merged five clips on a real
         // machine and left nothing in the log to show for it.
         match db.enforce_content_hash_uniqueness().await {
-            Ok(0) => {}
-            Ok(removed) => startup_log.push((
-                log::Level::Info,
-                format!(
-                    "STORAGE: Merged {removed} duplicate clips while making clip hashes unique"
-                ),
-            )),
+            Ok(stats) if stats.removed == 0 => {}
+            Ok(stats) => startup_log.push((log::Level::Info, stats.startup_message())),
             Err(error) => startup_log.push((
                 log::Level::Error,
                 format!("STORAGE: Could not enforce unique clip hashes: {error}"),
