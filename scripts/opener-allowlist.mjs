@@ -1,26 +1,89 @@
 // SBS-810: opener allowlist matching used by check-release.mjs.
+// SBS-997: match glob::Pattern::matches defaults, and refuse host globs.
 
 // tauri-plugin-opener compares the URL string the frontend passes to
 // openUrl against each capability url with the Rust glob crate
-// (Pattern::matches). Star and question-mark do not cross slash.
-// This helper copies that rule so the release gate tests the same
-// thing the plugin will enforce, not string equality of the JSON.
+// (Pattern::matches). That uses MatchOptions::new(), where
+// require_literal_separator is false, so * and ? match `/`. Character
+// classes are `[abc]` / `[!abc]`. This helper copies those defaults so
+// the release gate tests the same thing the plugin will enforce, not
+// string equality of the JSON and not a stricter-than-runtime model.
 
-const GLOB_ESCAPE = /[\\^$+.()|[\]{}-]/g;
+const GLOB_ESCAPE = /[\\^$+.()|{}]/g;
+const GLOB_META = /[*?\[]/;
 
-export function rustGlobMatches(pattern, value) {
+function compileCharClass(chars, start) {
+  // glob::Pattern::new: '[' then optional '!' then at least one specifier
+  // then ']'. Unclosed or empty classes are PatternError.
+  if (start + 2 >= chars.length) return null;
+  let i = start + 1;
+  let negated = false;
+  if (chars[i] === "!") {
+    if (start + 3 >= chars.length) return null;
+    negated = true;
+    i += 1;
+  }
+  const bodyStart = i;
+  // glob treats a `]` immediately after `[` or `[!` as a literal specifier
+  // rather than the closer, so `[]]` matches `]` and `[!]]` matches not-`]`.
+  // Searching from bodyStart would read those as an empty class and reject the
+  // whole pattern, which is stricter than the plugin will be at runtime.
+  const closeFrom = chars[bodyStart] === "]" ? bodyStart + 1 : bodyStart;
+  const close = chars.indexOf("]", closeFrom);
+  if (close === -1 || close === bodyStart) return null;
+  const body = chars.slice(bodyStart, close);
+  let cls = negated ? "[^" : "[";
+  for (let k = 0; k < body.length; k += 1) {
+    const c = body[k];
+    if (c === "\\") {
+      cls += "\\\\";
+    } else if (c === "]") {
+      // Only reachable for a leading `]`. Unescaped, JS would read `[]]` as an
+      // empty class followed by a literal `]`, which matches nothing.
+      cls += "\\]";
+    } else if (c === "^" && k === 0 && !negated) {
+      cls += "\\^";
+    } else {
+      cls += c;
+    }
+  }
+  cls += "]";
+  return { regex: cls, nextIndex: close + 1 };
+}
+
+function compileRustGlob(pattern) {
   let regex = "^";
-  for (const char of pattern) {
+  const chars = [...pattern];
+  for (let i = 0; i < chars.length; ) {
+    const char = chars[i];
     if (char === "*") {
-      regex += "[^/]*";
+      regex += ".*";
+      i += 1;
     } else if (char === "?") {
-      regex += "[^/]";
+      regex += ".";
+      i += 1;
+    } else if (char === "[") {
+      const parsed = compileCharClass(chars, i);
+      if (parsed === null) return null;
+      regex += parsed.regex;
+      i = parsed.nextIndex;
     } else {
       regex += char.replace(GLOB_ESCAPE, "\\$&");
+      i += 1;
     }
   }
   regex += "$";
-  return new RegExp(regex).test(value);
+  try {
+    return new RegExp(regex);
+  } catch {
+    return null;
+  }
+}
+
+export function rustGlobMatches(pattern, value) {
+  const compiled = compileRustGlob(pattern);
+  if (compiled === null) return false;
+  return compiled.test(value);
 }
 
 export function extractAllowlistPatterns(capability) {
@@ -38,8 +101,18 @@ export function isUrlAllowed(url, patterns) {
 
 export function isPatternWideOpen(pattern) {
   if (pattern === "*" || pattern === "**") return true;
-  const host = pattern.match(/^https?:\/\/([^/]*)/)?.[1];
-  return host === "*" || host === "**" || host === "";
+  const sep = pattern.indexOf("://");
+  if (sep === -1) {
+    // No scheme separator: a wildcard can match any URL, including hosts.
+    return GLOB_META.test(pattern);
+  }
+  const scheme = pattern.slice(0, sep);
+  const rest = pattern.slice(sep + 3);
+  if (scheme === "" || GLOB_META.test(scheme)) return true;
+  const slash = rest.indexOf("/");
+  const authority = slash === -1 ? rest : rest.slice(0, slash);
+  if (authority === "") return true;
+  return GLOB_META.test(authority);
 }
 
 export function assertAllowlistNotWideOpen(patterns) {
@@ -73,4 +146,3 @@ export function urlSlashVariants(url) {
     return [url];
   }
 }
-
