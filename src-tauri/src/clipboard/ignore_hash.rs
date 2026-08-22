@@ -106,12 +106,13 @@ pub(crate) fn should_ignore_queued_self_paste(
         || ignore_marker_applies(live_marker, clip_hash, now, ttl)
 }
 
-/// Drop the live marker only if this work item owns it, or the live TTL path
-/// ignored a snapshot that had no binding.
+/// Drop the live marker only if this work item owns it, or we ignored via the
+/// live TTL path rather than the queued binding.
 ///
 /// Consuming by hash alone would wipe a newer paste of the same content while
-/// a delayed echo is still draining. That newer marker must stay up so its
-/// own snapshot can bind (SBS-1022 / Bugbot).
+/// a delayed echo is still draining. Requiring `queued` to be `None` would
+/// leave a live marker after an unrelated binding was ignored via TTL, so a
+/// later real copy of that content could be swallowed until the clock expires.
 pub(crate) fn consume_ignore_marker_after_self_paste(
     live: &mut Option<IgnoreMarker>,
     queued: Option<&QueuedIgnore>,
@@ -125,10 +126,10 @@ pub(crate) fn consume_ignore_marker_after_self_paste(
     if marker.hash != clip_hash {
         return;
     }
+    let ignored_via_queued = queued.is_some_and(|bound| bound.hash == clip_hash);
     let owns_this_marker = queued.is_some_and(|bound| bound.generation == marker.generation);
-    let used_live_ttl =
-        queued.is_none() && ignore_marker_applies(live.as_ref(), clip_hash, now, ttl);
-    if owns_this_marker || used_live_ttl {
+    let ignored_via_live = ignore_marker_applies(live.as_ref(), clip_hash, now, ttl);
+    if owns_this_marker || (ignored_via_live && !ignored_via_queued) {
         live.take();
     }
 }
@@ -383,5 +384,38 @@ mod tests {
             IGNORE_HASH_TTL,
         );
         assert!(live.is_none());
+    }
+
+    #[test]
+    fn live_ttl_ignore_consumes_even_when_queued_binding_is_unrelated() {
+        // Snapshot bound to paste A, content is B, live marker is B. We ignore
+        // via the live TTL arm. Leaving B in place would keep binding later
+        // real copies of B until the clock expires.
+        let now = Instant::now();
+        let queued_other = QueuedIgnore {
+            hash: "hash-a".to_string(),
+            generation: 1,
+        };
+        let live_b = marker("hash-b", now, 2);
+        assert!(should_ignore_queued_self_paste(
+            Some(&queued_other),
+            Some(&live_b),
+            "hash-b",
+            now + Duration::from_millis(50),
+            IGNORE_HASH_TTL
+        ));
+
+        let mut live = Some(live_b);
+        consume_ignore_marker_after_self_paste(
+            &mut live,
+            Some(&queued_other),
+            "hash-b",
+            now + Duration::from_millis(50),
+            IGNORE_HASH_TTL,
+        );
+        assert!(
+            live.is_none(),
+            "fail-without-fix: leftover live marker swallows later real copies"
+        );
     }
 }

@@ -2124,8 +2124,9 @@ async fn process_clipboard_snapshot(
             IGNORE_HASH_TTL,
         ) {
             // Only consume the marker this work item owns (same generation),
-            // or a live TTL match on an unbound snapshot. Clearing by hash
-            // alone would drop a newer paste of the same content.
+            // or a live TTL match that is not from the queued binding.
+            // Clearing by hash alone would drop a newer paste of the same
+            // content.
             consume_ignore_marker_after_self_paste(
                 &mut *lock,
                 queued_ignore.as_ref(),
