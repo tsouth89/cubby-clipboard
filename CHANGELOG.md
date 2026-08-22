@@ -2,7 +2,7 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
-## Unreleased
+## v1.3.3
 
 ### Security
 - An abandoned backup or Ditto file-dialog pick is no longer writable for the rest of the process: the grant expires after 60 seconds or when Settings closes (SBS-1015)
