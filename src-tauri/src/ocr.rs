@@ -58,6 +58,41 @@ pub struct OcrRecognition {
 /// what makes drag-select copy the correction (SBS-1010). Extra tokens land on
 /// the last box; leftover boxes are dropped so a selection cannot yield a
 /// pre-correction reading. An empty correction clears every box.
+/// Group words into lines when the stored layout predates line indices. Words
+/// are already in reading order, so this only has to notice where the text
+/// steps down: a word whose vertical center leaves the current line's band
+/// starts a new one. Without it every legacy clip would look like a single
+/// line, and a multi-line selection would copy back as one run-on.
+pub(crate) fn infer_line_indices(words: &[OcrWordBox]) -> Vec<u32> {
+    let mut lines = Vec::with_capacity(words.len());
+    let mut line = 0u32;
+    let mut band_center = f32::NAN;
+    let mut band_height = 0.0f32;
+
+    for word in words {
+        let center = word.y + word.height / 2.0;
+        if band_center.is_nan() {
+            band_center = center;
+            band_height = word.height.max(1.0);
+        } else {
+            // Tolerate half a line height of baseline wobble within a line;
+            // anything beyond that is the next line.
+            let tolerance = band_height.max(word.height).max(1.0) * 0.6;
+            if (center - band_center).abs() > tolerance {
+                line += 1;
+                band_center = center;
+                band_height = word.height.max(1.0);
+            } else {
+                // Track the running center so a gently drifting line stays one.
+                band_center = (band_center + center) / 2.0;
+                band_height = band_height.max(word.height);
+            }
+        }
+        lines.push(line);
+    }
+    lines
+}
+
 pub fn apply_ocr_text_to_layout(mut layout: OcrLayout, text: &str) -> OcrLayout {
     if layout.words.is_empty() {
         return layout;
@@ -72,16 +107,33 @@ pub fn apply_ocr_text_to_layout(mut layout: OcrLayout, text: &str) -> OcrLayout 
         return layout;
     }
 
-    // Words are in reading order, so a run of the same `line` index is one
-    // recognized line. Grouping by consecutive runs rather than by the index
-    // value also does the right thing for a legacy layout, where every `line`
-    // is None and the whole block becomes a single group.
+    // A layout stored before line indices were recorded has `line: None` on
+    // every box. `commands::ocr_text_layout` falls back to inferred bands for
+    // those, so the pane the user corrected was already split into visual
+    // lines; resolving the same way here keeps the saved layout matching what
+    // they saw, instead of treating a legacy clip as one giant line.
+    let inferred = infer_line_indices(&layout.words);
+    let resolved: Vec<u32> = layout
+        .words
+        .iter()
+        .zip(inferred.iter())
+        .map(|(word, fallback)| word.line.unwrap_or(*fallback))
+        .collect();
+
+    // Words are in reading order, so a run of the same resolved index is one
+    // line. Grouping by runs rather than by value also absorbs the gaps the
+    // engine leaves when it skips an empty word.
     let mut groups: Vec<Vec<OcrWordBox>> = Vec::new();
-    for word in layout.words.drain(..) {
-        match groups.last_mut() {
-            Some(group) if group[0].line == word.line => group.push(word),
+    let mut previous: Option<u32> = None;
+    for (word, line) in layout.words.drain(..).zip(resolved) {
+        match previous {
+            Some(last) if last == line => groups
+                .last_mut()
+                .expect("a previous line means a group exists")
+                .push(word),
             _ => groups.push(vec![word]),
         }
+        previous = Some(line);
     }
 
     let group_count = groups.len();
@@ -596,6 +648,49 @@ mod apply_ocr_text_tests {
         assert_eq!(corrected.words.len(), 2);
         assert_eq!(corrected.words[0].text, "one");
         assert_eq!(corrected.words[1].text, "two three");
+    }
+
+    /// A layout stored before line indices were recorded has `line: None`
+    /// everywhere. `commands::ocr_text_layout` already falls back to inferred
+    /// bands, so the pane the user corrected was split into visual lines. If
+    /// this side treated the whole clip as one line, the saved `ocr_words`
+    /// would disagree with the overlay the user just approved.
+    ///
+    /// Deliberately unspaced: with space-separated words both groupings
+    /// happen to agree, so a Latin fixture here would pass either way and
+    /// prove nothing.
+    #[test]
+    fn a_legacy_layout_without_line_indices_still_splits_into_visual_lines() {
+        let legacy = |text: &str, x: f32, y: f32| OcrWordBox {
+            text: text.to_string(),
+            x,
+            y,
+            width: 20.0,
+            height: 10.0,
+            line: None,
+        };
+        let corrected = apply_ocr_text_to_layout(
+            layout(vec![
+                legacy("你", 0.0, 0.0),
+                legacy("好", 20.0, 0.0),
+                legacy("世", 0.0, 40.0),
+                legacy("界", 20.0, 40.0),
+            ]),
+            "你好\n世果",
+        );
+        assert_eq!(corrected.words.len(), 4, "no band may be dropped");
+        assert_eq!(
+            corrected
+                .words
+                .iter()
+                .map(|word| word.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["你", "好", "世", "果"],
+        );
+        assert_eq!(
+            corrected.words[2].y, 40.0,
+            "line 2 text must stay on the lower band"
+        );
     }
 
     #[test]

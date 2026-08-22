@@ -56,41 +56,6 @@ fn clip_to_list_item(clip: &Clip, preview_only: bool) -> ClipboardItem {
     }
 }
 
-/// Group words into lines when the stored layout predates line indices. Words
-/// are already in reading order, so this only has to notice where the text
-/// steps down: a word whose vertical center leaves the current line's band
-/// starts a new one. Without it every legacy clip would look like a single
-/// line, and a multi-line selection would copy back as one run-on.
-fn infer_line_indices(words: &[crate::ocr::OcrWordBox]) -> Vec<u32> {
-    let mut lines = Vec::with_capacity(words.len());
-    let mut line = 0u32;
-    let mut band_center = f32::NAN;
-    let mut band_height = 0.0f32;
-
-    for word in words {
-        let center = word.y + word.height / 2.0;
-        if band_center.is_nan() {
-            band_center = center;
-            band_height = word.height.max(1.0);
-        } else {
-            // Tolerate half a line height of baseline wobble within a line;
-            // anything beyond that is the next line.
-            let tolerance = band_height.max(word.height).max(1.0) * 0.6;
-            if (center - band_center).abs() > tolerance {
-                line += 1;
-                band_center = center;
-                band_height = word.height.max(1.0);
-            } else {
-                // Track the running center so a gently drifting line stays one.
-                band_center = (band_center + center) / 2.0;
-                band_height = band_height.max(word.height);
-            }
-        }
-        lines.push(line);
-    }
-    lines
-}
-
 /// The selectable word layout for an image clip, as fractions of the image.
 /// Returns None when there is nothing usable to select.
 fn ocr_text_layout(ocr_words_json: &str) -> Option<crate::models::OcrTextLayout> {
@@ -103,7 +68,7 @@ fn ocr_text_layout(ocr_words_json: &str) -> Option<crate::models::OcrTextLayout>
 
     // Recorded indices are the engine's own line numbers; fall back to inferred
     // bands for layouts stored before those were kept.
-    let inferred = infer_line_indices(&layout.words);
+    let inferred = crate::ocr::infer_line_indices(&layout.words);
     let recorded: Vec<u32> = layout
         .words
         .iter()
