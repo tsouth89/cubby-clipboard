@@ -59,24 +59,110 @@ pub struct OcrRecognition {
 /// the last box; leftover boxes are dropped so a selection cannot yield a
 /// pre-correction reading. An empty correction clears every box.
 pub fn apply_ocr_text_to_layout(mut layout: OcrLayout, text: &str) -> OcrLayout {
-    let tokens: Vec<&str> = text.split_whitespace().collect();
-    if tokens.is_empty() || layout.words.is_empty() {
+    if layout.words.is_empty() {
+        return layout;
+    }
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
         layout.words.clear();
         return layout;
     }
-    if tokens.len() <= layout.words.len() {
-        layout.words.truncate(tokens.len());
-        for (word, token) in layout.words.iter_mut().zip(tokens) {
-            word.text = token.to_string();
+
+    // Words are in reading order, so a run of the same `line` index is one
+    // recognized line. Grouping by consecutive runs rather than by the index
+    // value also does the right thing for a legacy layout, where every `line`
+    // is None and the whole block becomes a single group.
+    let mut groups: Vec<Vec<OcrWordBox>> = Vec::new();
+    for word in layout.words.drain(..) {
+        match groups.last_mut() {
+            Some(group) if group[0].line == word.line => group.push(word),
+            _ => groups.push(vec![word]),
         }
-        return layout;
     }
-    let last = layout.words.len() - 1;
-    for (word, token) in layout.words.iter_mut().take(last).zip(tokens.iter()) {
-        word.text = (*token).to_string();
+
+    let group_count = groups.len();
+    let mut rewritten: Vec<OcrWordBox> = Vec::new();
+    for (index, group) in groups.into_iter().enumerate() {
+        // A correction with fewer lines removed these; leaving them selectable
+        // would let a drag copy text the user deleted.
+        if index >= lines.len() {
+            break;
+        }
+        // More corrected lines than recognized ones: the surplus has no
+        // geometry of its own, so it folds into the last line rather than
+        // being dropped.
+        let line = if index + 1 == group_count && lines.len() > group_count {
+            lines[index..].join("\n")
+        } else {
+            lines[index].to_string()
+        };
+        rewritten.extend(apply_line_to_boxes(group, &line));
     }
-    layout.words[last].text = tokens[last..].join(" ");
+    layout.words = rewritten;
     layout
+}
+
+/// Map one corrected line onto the boxes recognized for that line.
+fn apply_line_to_boxes(mut boxes: Vec<OcrWordBox>, line: &str) -> Vec<OcrWordBox> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.is_empty() || boxes.is_empty() {
+        return Vec::new();
+    }
+
+    if tokens.len() > boxes.len() {
+        let last = boxes.len() - 1;
+        for (word, token) in boxes.iter_mut().take(last).zip(tokens.iter()) {
+            word.text = (*token).to_string();
+        }
+        boxes[last].text = tokens[last..].join(" ");
+        return boxes;
+    }
+
+    if tokens.len() == 1 && boxes.len() > 1 {
+        // Windows OCR emits one box per character for CJK and a line with no
+        // spaces, so the whole line is a single token. Placing it on the first
+        // box and dropping the rest left one glyph selectable (SBS-1010).
+        let chars: Vec<String> = tokens[0].chars().map(|c| c.to_string()).collect();
+        if chars.len() == boxes.len() {
+            for (word, character) in boxes.iter_mut().zip(chars) {
+                word.text = character;
+            }
+            return boxes;
+        }
+        // The counts disagree, so which glyph belongs in which rectangle is
+        // unknowable. Cover the line with one box instead of dropping the rest
+        // of its area.
+        let mut merged = union_boxes(&boxes);
+        merged.text = tokens[0].to_string();
+        return vec![merged];
+    }
+
+    boxes.truncate(tokens.len());
+    for (word, token) in boxes.iter_mut().zip(tokens) {
+        word.text = token.to_string();
+    }
+    boxes
+}
+
+/// The smallest box covering all of `boxes`, keeping the first box's other
+/// fields. Caller guarantees a non-empty slice.
+fn union_boxes(boxes: &[OcrWordBox]) -> OcrWordBox {
+    let mut merged = boxes[0].clone();
+    let mut right = merged.x + merged.width;
+    let mut bottom = merged.y + merged.height;
+    for word in &boxes[1..] {
+        merged.x = merged.x.min(word.x);
+        merged.y = merged.y.min(word.y);
+        right = right.max(word.x + word.width);
+        bottom = bottom.max(word.y + word.height);
+    }
+    merged.width = right - merged.x;
+    merged.height = bottom - merged.y;
+    merged
 }
 
 const MAX_ENCODED_IMAGE_BYTES: usize = 128 * 1024 * 1024;
@@ -419,6 +505,97 @@ mod apply_ocr_text_tests {
             image_height: 50,
             words,
         }
+    }
+
+    /// SBS-1010, CJK. Windows OCR emits one box per character for CJK and a
+    /// line string with no spaces, so a whole line is a single whitespace
+    /// token against N boxes. Splitting the block on whitespace collapsed the
+    /// line onto its first character's rectangle and dropped the rest, and on
+    /// a two-line image the second line landed on the first line's second
+    /// character. Drag-select then hit one glyph.
+    #[test]
+    fn an_unspaced_line_maps_one_character_per_box() {
+        let corrected = apply_ocr_text_to_layout(
+            layout(vec![
+                box_at("你", 0.0, 0),
+                box_at("好", 20.0, 0),
+                box_at("世", 40.0, 0),
+                box_at("界", 60.0, 0),
+            ]),
+            "你好世果",
+        );
+        assert_eq!(corrected.words.len(), 4, "every character box must survive");
+        let texts: Vec<&str> = corrected.words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(texts, vec!["你", "好", "世", "果"]);
+        assert_eq!(corrected.words[3].x, 60.0, "geometry must be untouched");
+    }
+
+    #[test]
+    fn a_second_unspaced_line_stays_on_its_own_boxes() {
+        let corrected = apply_ocr_text_to_layout(
+            layout(vec![
+                box_at("你", 0.0, 0),
+                box_at("好", 20.0, 0),
+                box_at("世", 0.0, 1),
+                box_at("界", 20.0, 1),
+            ]),
+            "你好\n世果",
+        );
+        assert_eq!(corrected.words.len(), 4, "no line may be dropped");
+        let second: Vec<&str> = corrected
+            .words
+            .iter()
+            .filter(|w| w.line == Some(1))
+            .map(|w| w.text.as_str())
+            .collect();
+        assert_eq!(
+            second,
+            vec!["世", "果"],
+            "line 2 must stay on line 2's boxes"
+        );
+        assert_eq!(
+            corrected.words[2].y, 25.0,
+            "line 2 text must not land on a line 1 rectangle"
+        );
+    }
+
+    /// When the corrected line's character count does not match the box count
+    /// there is no way to know which glyph belongs in which rectangle, but the
+    /// line must stay selectable across its whole area rather than shrink to
+    /// the first box.
+    #[test]
+    fn an_unspaced_line_of_a_different_length_covers_the_whole_line() {
+        let corrected = apply_ocr_text_to_layout(
+            layout(vec![
+                box_at("你", 0.0, 0),
+                box_at("好", 20.0, 0),
+                box_at("世", 40.0, 0),
+            ]),
+            "你好",
+        );
+        assert_eq!(corrected.words.len(), 1);
+        assert_eq!(corrected.words[0].text, "你好");
+        assert_eq!(corrected.words[0].x, 0.0);
+        assert_eq!(
+            corrected.words[0].width, 60.0,
+            "the merged box must span the whole line, not just the first glyph"
+        );
+    }
+
+    /// A user who adds a line has given text with no geometry of its own. It
+    /// folds into the last recognized line so the correction is not silently
+    /// truncated. The added text joins with a space, the same way surplus
+    /// tokens already land on the last box -- one rectangle cannot express a
+    /// line break, and the canonical text is stored separately in `ocr_text`.
+    #[test]
+    fn extra_corrected_lines_fold_into_the_last_line() {
+        let corrected = apply_ocr_text_to_layout(
+            layout(vec![box_at("one", 0.0, 0), box_at("two", 0.0, 1)]),
+            "one\ntwo\nthree",
+        );
+        assert_eq!(corrected.words.len(), 2);
+        assert_eq!(corrected.words[0].text, "one");
+        assert_eq!(corrected.words[1].text, "two three");
     }
 
     #[test]

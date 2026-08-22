@@ -130,21 +130,85 @@ export function joinWords(words: OcrWord[]): string {
 
 /**
  * Rewrite word-box text to match a saved OCR correction, keeping geometry.
- * Extra tokens land on the last box; leftover boxes are dropped so drag-select
- * cannot copy a pre-correction reading (SBS-1010).
+ *
+ * Mirrors `ocr::apply_ocr_text_to_layout` on the Rust side; the two must agree,
+ * because one writes the stored layout and the other renders it.
+ *
+ * Each corrected line maps onto the boxes recognized for that line. Splitting
+ * the whole block on whitespace instead would collapse CJK, where Windows OCR
+ * emits one box per character and a line with no spaces: the line became a
+ * single token, landed on its first character's rectangle, and every later box
+ * -- including the next line's -- was dropped (SBS-1010).
+ *
+ * Within a line: extra tokens land on the last box, and leftover boxes are
+ * dropped so drag-select cannot copy a pre-correction reading.
  */
 export function applyOcrTextToWords(words: OcrWord[], text: string): OcrWord[] {
-  const tokens = text.trim().split(/\s+/).filter(Boolean);
-  if (tokens.length === 0 || words.length === 0) return [];
-  if (tokens.length <= words.length) {
-    return words.slice(0, tokens.length).map((word, index) => ({ ...word, text: tokens[index] }));
+  if (words.length === 0) return [];
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return [];
+
+  // Words are in reading order, so a run of the same line index is one line.
+  const groups: OcrWord[][] = [];
+  for (const word of words) {
+    const current = groups[groups.length - 1];
+    if (current && current[0].line === word.line) current.push(word);
+    else groups.push([word]);
   }
-  const last = words.length - 1;
-  return words.map((word, index) =>
-    index < last
-      ? { ...word, text: tokens[index] }
-      : { ...word, text: tokens.slice(last).join(' ') }
-  );
+
+  const rewritten: OcrWord[] = [];
+  for (let index = 0; index < groups.length; index += 1) {
+    // A correction with fewer lines removed these.
+    if (index >= lines.length) break;
+    // Added lines have no geometry of their own, so they fold into the last
+    // recognized line rather than being dropped.
+    const line =
+      index + 1 === groups.length && lines.length > groups.length
+        ? lines.slice(index).join('\n')
+        : lines[index];
+    rewritten.push(...applyLineToBoxes(groups[index], line));
+  }
+  return rewritten;
+}
+
+/** Map one corrected line onto the boxes recognized for that line. */
+function applyLineToBoxes(boxes: OcrWord[], line: string): OcrWord[] {
+  const tokens = line.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0 || boxes.length === 0) return [];
+
+  if (tokens.length > boxes.length) {
+    const last = boxes.length - 1;
+    return boxes.map((word, index) =>
+      index < last
+        ? { ...word, text: tokens[index] }
+        : { ...word, text: tokens.slice(last).join(' ') }
+    );
+  }
+
+  if (tokens.length === 1 && boxes.length > 1) {
+    // Array.from iterates by code point, matching Rust's chars().
+    const characters = Array.from(tokens[0]);
+    if (characters.length === boxes.length) {
+      return boxes.map((word, index) => ({ ...word, text: characters[index] }));
+    }
+    // Counts disagree, so which glyph belongs in which rectangle is unknowable.
+    // Cover the line with one box instead of dropping the rest of its area.
+    return [{ ...unionBoxes(boxes), text: tokens[0] }];
+  }
+
+  return boxes.slice(0, tokens.length).map((word, index) => ({ ...word, text: tokens[index] }));
+}
+
+/** The smallest box covering all of `boxes`, keeping the first box's other fields. */
+function unionBoxes(boxes: OcrWord[]): OcrWord {
+  const x = Math.min(...boxes.map((word) => word.x));
+  const y = Math.min(...boxes.map((word) => word.y));
+  const right = Math.max(...boxes.map((word) => word.x + word.width));
+  const bottom = Math.max(...boxes.map((word) => word.y + word.height));
+  return { ...boxes[0], x, y, width: right - x, height: bottom - y };
 }
 
 /** The text of a selection range over the layout. Empty when nothing is selected. */
