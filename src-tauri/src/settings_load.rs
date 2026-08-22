@@ -6,6 +6,11 @@
 //! `AppSettings::default()` would adopt 30-day retention and then overwrite
 //! the leftover temp.
 //!
+//! `recover_dest_gone_replace` is the shared dest-gone fallback: settings save,
+//! backup persist, and image `{uuid}.cubby` replace (SBS-1030) all call it
+//! after a failed replace so Drop/cleanup cannot delete the only remaining
+//! copy.
+//!
 //! This file has no crate dependencies so `rustc --test` can pin the contract
 //! on a Linux box that cannot compile the Windows crate.
 
@@ -160,6 +165,30 @@ mod tests {
         assert!(tmp.exists());
         let on_disk = parse_auto_delete_days(&fs::read_to_string(&dest).unwrap()).unwrap();
         assert_eq!(on_disk, 365);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// SBS-1030: image persist Drop used to delete `{uuid}.cubby.tmp` after a
+    /// dest-gone replace. That is both copies gone. Recover first; Drop then
+    /// finds no temp.
+    #[test]
+    fn image_persist_dest_gone_recovers_instead_of_deleting_the_only_copy() {
+        let dir = test_dir();
+        let dest = dir.join("abc.cubby");
+        let tmp = dir.join("abc.cubby.tmp");
+        fs::write(&tmp, b"new-full-res").unwrap();
+        assert!(!dest.exists());
+
+        let recovered = recover_dest_gone_replace(&tmp, &dest);
+        if !recovered && tmp.exists() {
+            // Old StagedImageFile::drop after a failed commit.
+            let _ = fs::remove_file(&tmp);
+        }
+
+        assert!(recovered, "dest-gone must put the staged original in place");
+        assert!(dest.exists(), "the live original path must exist again");
+        assert!(!tmp.exists(), "recovery consumes the temp");
+        assert_eq!(fs::read(&dest).unwrap(), b"new-full-res");
         let _ = fs::remove_dir_all(&dir);
     }
 }

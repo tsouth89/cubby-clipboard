@@ -100,6 +100,11 @@ impl Database {
     /// it. A crash between the write and that drop leaves the encrypted original
     /// on disk forever — including through Clear all history, which only deletes
     /// paths recorded in `clip_images` (SBS-998).
+    ///
+    /// On FAT/exFAT a crash after dest was deleted leaves that temp as the only
+    /// remaining original. Promoting it is the same dest-gone recovery settings
+    /// uses on load (SBS-1030). A leftover beside a live dest is still just a
+    /// crash-left staging file and is removed.
     fn sweep_stale_image_temps(image_dir: &Path) {
         let Ok(entries) = std::fs::read_dir(image_dir) else {
             return;
@@ -108,6 +113,21 @@ impl Database {
             let path = entry.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if !name.ends_with(".cubby.tmp") {
+                continue;
+            }
+            let dest = path.with_file_name(name.strip_suffix(".tmp").unwrap_or(name));
+            if crate::settings_load::recover_dest_gone_replace(&path, &dest) {
+                log::warn!(
+                    "IMAGE: dest-gone leftover staging file was promoted to {} (SBS-1030)",
+                    dest.display()
+                );
+                continue;
+            }
+            if !dest.exists() {
+                log::error!(
+                    "IMAGE: dest-gone leftover staging file could not be promoted; leaving {}",
+                    path.display()
+                );
                 continue;
             }
             match std::fs::remove_file(&path) {
@@ -3119,6 +3139,31 @@ mod tests {
             "a crash-left staging file must not survive"
         );
         assert!(keep.exists(), "committed originals must be left alone");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// SBS-1030: a FAT dest-gone crash leaves `{uuid}.cubby.tmp` and no live
+    /// `{uuid}.cubby`. Sweeping that temp would destroy the only remaining
+    /// original; promote it instead.
+    #[test]
+    fn dest_gone_image_temp_is_promoted_on_open() {
+        let directory = temp_dir();
+        let stale = directory.join("abc.cubby.tmp");
+        let dest = directory.join("abc.cubby");
+        std::fs::write(&stale, b"only remaining original").unwrap();
+        assert!(!dest.exists());
+
+        Database::sweep_stale_image_temps(&directory);
+
+        assert!(
+            dest.exists(),
+            "dest-gone leftover must be promoted onto the live name"
+        );
+        assert!(
+            !stale.exists(),
+            "the leftover temp is consumed by the promotion"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b"only remaining original");
         let _ = std::fs::remove_dir_all(directory);
     }
 
