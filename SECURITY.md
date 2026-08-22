@@ -52,3 +52,8 @@ Existing plaintext history is migrated before the clipboard listener starts. Cub
 Core Windows clipboard representations are retained together: Unicode text, HTML, RTF, and images. Auxiliary formats are encrypted in the same authenticated store. Cubby intentionally does not persist arbitrary private application formats because some contain process-specific handles or unsafe opaque data that cannot be replayed reliably.
 
 Copying files is intentionally not recorded. A file payload is a reference to a path, not durable content, so a history entry for it can silently stop working after a move, a disconnect, or a target-app mismatch. Cubby ignores both physical (`CF_HDROP`) and virtual file payloads before reading any text they advertise, and a migration removes file rows written by earlier versions. The one exception is a screenshot tool that publishes a real bitmap alongside a file reference: Cubby keeps that as an image, never as a path.
+
+## Backup path grants
+
+`export_backup`, `import_backup`, and `import_from_ditto` accept a filesystem path only when the matching file dialog produced that exact string. The grant is in-memory, purpose-keyed, and compared without canonicalization. It is consumed by the first mutating call, expires after 60 seconds, and is dropped when the Settings window is destroyed, so an abandoned pick cannot stay writable until Cubby exits.
+
