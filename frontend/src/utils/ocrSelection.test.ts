@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   anchorWord,
+  applyOcrTextToWords,
   isSelected,
   joinWords,
   nearestWord,
@@ -137,5 +138,95 @@ describe('isSelected', () => {
     const range = { start: 1, end: 2 };
     expect([0, 1, 2, 3].map((i) => isSelected(i, range))).toEqual([false, true, true, false]);
     expect(isSelected(1, null)).toBe(false);
+  });
+});
+
+describe('applyOcrTextToWords', () => {
+  it('rewrites box text for a same-length correction and keeps geometry (SBS-1010)', () => {
+    // OCR misread a URL; the user saved the assembled block. Drag-select must
+    // copy the correction, not the engine's spelling, from the same box.
+    const words: OcrWord[] = [
+      { text: 'htlps://exarnple.com', x: 0.1, y: 0.2, width: 0.5, height: 0.1, line: 0 },
+    ];
+    const corrected = applyOcrTextToWords(words, 'https://example.com');
+    expect(corrected).toEqual([
+      { text: 'https://example.com', x: 0.1, y: 0.2, width: 0.5, height: 0.1, line: 0 },
+    ]);
+    expect(selectedText(corrected, { start: 0, end: 0 })).toBe('https://example.com');
+  });
+
+  it('drops leftover boxes so a shorter correction cannot copy a stale word', () => {
+    const corrected = applyOcrTextToWords(WORDS, 'hello there');
+    expect(corrected.map((word) => word.text)).toEqual(['hello', 'there']);
+    expect(selectedText(corrected, { start: 0, end: corrected.length - 1 })).not.toContain(
+      'second'
+    );
+  });
+
+  it('puts extra tokens on the last box instead of inventing geometry', () => {
+    const corrected = applyOcrTextToWords(WORDS.slice(0, 2), 'hello there extra words');
+    expect(corrected.map((word) => word.text)).toEqual(['hello', 'there extra words']);
+  });
+
+  it('clears every box when the correction is empty', () => {
+    expect(applyOcrTextToWords(WORDS, '   ')).toEqual([]);
+  });
+
+  it('does not invent boxes when the layout had none', () => {
+    expect(applyOcrTextToWords([], 'https://example.com')).toEqual([]);
+  });
+
+  /**
+   * SBS-1010, CJK. Windows OCR emits one box per character and a line string
+   * with no spaces, so splitting the whole block on whitespace made a line a
+   * single token: it landed on the first character's rectangle and every other
+   * box was dropped. Drag-select then hit one glyph. Mirrors the Rust test in
+   * ocr.rs, since that side writes the layout this side renders.
+   */
+  const cjk = (text: string, x: number, line: number): OcrWord => ({
+    text,
+    x,
+    y: line === 0 ? 0 : 0.5,
+    width: 0.2,
+    height: 0.1,
+    line,
+  });
+
+  it('maps one character per box on an unspaced line', () => {
+    const corrected = applyOcrTextToWords(
+      [cjk('你', 0, 0), cjk('好', 0.2, 0), cjk('世', 0.4, 0), cjk('界', 0.6, 0)],
+      '你好世果'
+    );
+    expect(corrected.map((word) => word.text)).toEqual(['你', '好', '世', '果']);
+    expect(corrected[3].x).toBe(0.6);
+  });
+
+  it('keeps a second unspaced line on its own boxes', () => {
+    const corrected = applyOcrTextToWords(
+      [cjk('你', 0, 0), cjk('好', 0.2, 0), cjk('世', 0, 1), cjk('界', 0.2, 1)],
+      '你好\n世果'
+    );
+    expect(corrected).toHaveLength(4);
+    expect(corrected.filter((word) => word.line === 1).map((word) => word.text)).toEqual([
+      '世',
+      '果',
+    ]);
+    expect(corrected[2].y).toBe(0.5);
+  });
+
+  it('covers the whole line when an unspaced correction changes length', () => {
+    const corrected = applyOcrTextToWords(
+      [cjk('你', 0, 0), cjk('好', 0.2, 0), cjk('世', 0.4, 0)],
+      '你好'
+    );
+    expect(corrected).toHaveLength(1);
+    expect(corrected[0].text).toBe('你好');
+    expect(corrected[0].x).toBe(0);
+    expect(corrected[0].width).toBeCloseTo(0.6);
+  });
+
+  it('folds an added line into the last recognized line', () => {
+    const corrected = applyOcrTextToWords([cjk('one', 0, 0), cjk('two', 0, 1)], 'one\ntwo\nthree');
+    expect(corrected.map((word) => word.text)).toEqual(['one', 'two three']);
   });
 });
