@@ -128,6 +128,25 @@ export function joinWords(words: OcrWord[]): string {
   return text;
 }
 
+/**
+ * Rewrite word-box text to match a saved OCR correction, keeping geometry.
+ * Extra tokens land on the last box; leftover boxes are dropped so drag-select
+ * cannot copy a pre-correction reading (SBS-1010).
+ */
+export function applyOcrTextToWords(words: OcrWord[], text: string): OcrWord[] {
+  const tokens = text.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0 || words.length === 0) return [];
+  if (tokens.length <= words.length) {
+    return words.slice(0, tokens.length).map((word, index) => ({ ...word, text: tokens[index] }));
+  }
+  const last = words.length - 1;
+  return words.map((word, index) =>
+    index < last
+      ? { ...word, text: tokens[index] }
+      : { ...word, text: tokens.slice(last).join(' ') }
+  );
+}
+
 /** The text of a selection range over the layout. Empty when nothing is selected. */
 export function selectedText(words: OcrWord[], range: SelectionRange): string {
   if (!range) return '';

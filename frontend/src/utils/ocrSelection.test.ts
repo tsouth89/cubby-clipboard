@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   anchorWord,
+  applyOcrTextToWords,
   isSelected,
   joinWords,
   nearestWord,
@@ -137,5 +138,41 @@ describe('isSelected', () => {
     const range = { start: 1, end: 2 };
     expect([0, 1, 2, 3].map((i) => isSelected(i, range))).toEqual([false, true, true, false]);
     expect(isSelected(1, null)).toBe(false);
+  });
+});
+
+describe('applyOcrTextToWords', () => {
+  it('rewrites box text for a same-length correction and keeps geometry (SBS-1010)', () => {
+    // OCR misread a URL; the user saved the assembled block. Drag-select must
+    // copy the correction, not the engine's spelling, from the same box.
+    const words: OcrWord[] = [
+      { text: 'htlps://exarnple.com', x: 0.1, y: 0.2, width: 0.5, height: 0.1, line: 0 },
+    ];
+    const corrected = applyOcrTextToWords(words, 'https://example.com');
+    expect(corrected).toEqual([
+      { text: 'https://example.com', x: 0.1, y: 0.2, width: 0.5, height: 0.1, line: 0 },
+    ]);
+    expect(selectedText(corrected, { start: 0, end: 0 })).toBe('https://example.com');
+  });
+
+  it('drops leftover boxes so a shorter correction cannot copy a stale word', () => {
+    const corrected = applyOcrTextToWords(WORDS, 'hello there');
+    expect(corrected.map((word) => word.text)).toEqual(['hello', 'there']);
+    expect(selectedText(corrected, { start: 0, end: corrected.length - 1 })).not.toContain(
+      'second'
+    );
+  });
+
+  it('puts extra tokens on the last box instead of inventing geometry', () => {
+    const corrected = applyOcrTextToWords(WORDS.slice(0, 2), 'hello there extra words');
+    expect(corrected.map((word) => word.text)).toEqual(['hello', 'there extra words']);
+  });
+
+  it('clears every box when the correction is empty', () => {
+    expect(applyOcrTextToWords(WORDS, '   ')).toEqual([]);
+  });
+
+  it('does not invent boxes when the layout had none', () => {
+    expect(applyOcrTextToWords([], 'https://example.com')).toEqual([]);
   });
 });

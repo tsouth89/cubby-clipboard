@@ -51,6 +51,34 @@ pub struct OcrRecognition {
     pub layout: OcrLayout,
 }
 
+/// Rewrite each word box's text to match a saved OCR correction, keeping the
+/// original geometry and line indices.
+///
+/// Scan text edits the assembled block, not the boxes. A 1:1 token rewrite is
+/// what makes drag-select copy the correction (SBS-1010). Extra tokens land on
+/// the last box; leftover boxes are dropped so a selection cannot yield a
+/// pre-correction reading. An empty correction clears every box.
+pub fn apply_ocr_text_to_layout(mut layout: OcrLayout, text: &str) -> OcrLayout {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.is_empty() || layout.words.is_empty() {
+        layout.words.clear();
+        return layout;
+    }
+    if tokens.len() <= layout.words.len() {
+        layout.words.truncate(tokens.len());
+        for (word, token) in layout.words.iter_mut().zip(tokens) {
+            word.text = token.to_string();
+        }
+        return layout;
+    }
+    let last = layout.words.len() - 1;
+    for (word, token) in layout.words.iter_mut().take(last).zip(tokens.iter()) {
+        word.text = (*token).to_string();
+    }
+    layout.words[last].text = tokens[last..].join(" ");
+    layout
+}
+
 const MAX_ENCODED_IMAGE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_SOURCE_DIMENSION: u32 = 16_384;
 // Bounds the fully-decoded RGBA buffer (~4 bytes/pixel) and everything derived
@@ -367,5 +395,88 @@ mod tests {
             "small UI OCR result: {ui_text:?}"
         );
         assert!(ui_text.contains("2048"), "small UI OCR result: {ui_text:?}");
+    }
+}
+
+#[cfg(test)]
+mod apply_ocr_text_tests {
+    use super::{apply_ocr_text_to_layout, OcrLayout, OcrWordBox};
+
+    fn box_at(text: &str, x: f32, line: u32) -> OcrWordBox {
+        OcrWordBox {
+            text: text.to_string(),
+            x,
+            y: if line == 0 { 0.0 } else { 25.0 },
+            width: 20.0,
+            height: 10.0,
+            line: Some(line),
+        }
+    }
+
+    fn layout(words: Vec<OcrWordBox>) -> OcrLayout {
+        OcrLayout {
+            image_width: 100,
+            image_height: 50,
+            words,
+        }
+    }
+
+    #[test]
+    fn a_same_length_correction_rewrites_box_text_and_keeps_geometry() {
+        // The SBS-1010 failure: OCR misread a URL, the user fixed the assembled
+        // block, and drag-select still copied the misspelling because the box
+        // text was left alone.
+        let corrected = apply_ocr_text_to_layout(
+            layout(vec![box_at("htlps://exarnple.com", 10.0, 0)]),
+            "https://example.com",
+        );
+        assert_eq!(corrected.words.len(), 1);
+        assert_eq!(corrected.words[0].text, "https://example.com");
+        assert_eq!(corrected.words[0].x, 10.0);
+        assert_eq!(corrected.words[0].line, Some(0));
+        assert_eq!(corrected.image_width, 100);
+    }
+
+    #[test]
+    fn leftover_boxes_are_dropped_so_a_shorter_correction_cannot_copy_old_words() {
+        let corrected = apply_ocr_text_to_layout(
+            layout(vec![
+                box_at("hello", 0.0, 0),
+                box_at("there", 25.0, 0),
+                box_at("second", 0.0, 1),
+            ]),
+            "hello there",
+        );
+        assert_eq!(
+            corrected
+                .words
+                .iter()
+                .map(|word| word.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hello", "there"]
+        );
+    }
+
+    #[test]
+    fn extra_tokens_land_on_the_last_box_instead_of_inventing_geometry() {
+        let corrected = apply_ocr_text_to_layout(
+            layout(vec![box_at("hello", 0.0, 0), box_at("there", 25.0, 0)]),
+            "hello there extra words",
+        );
+        assert_eq!(corrected.words[0].text, "hello");
+        assert_eq!(corrected.words[1].text, "there extra words");
+        assert_eq!(corrected.words.len(), 2);
+    }
+
+    #[test]
+    fn an_empty_correction_clears_every_box() {
+        let corrected = apply_ocr_text_to_layout(layout(vec![box_at("stale", 0.0, 0)]), "   ");
+        assert!(corrected.words.is_empty());
+    }
+
+    #[test]
+    fn a_correction_with_no_existing_boxes_does_not_invent_any() {
+        let corrected = apply_ocr_text_to_layout(layout(Vec::new()), "https://example.com");
+        assert!(corrected.words.is_empty());
     }
 }

@@ -1,4 +1,4 @@
-import { OcrLayout } from './ocrSelection';
+import { applyOcrTextToWords, OcrLayout } from './ocrSelection';
 
 /** Payload of the `get_clip_details` command. */
 export interface ClipDetails {
@@ -75,9 +75,24 @@ export function withSavedText(
       };
 }
 
-/** Keep Scan text in sync after Save correction; `has_ocr_text` often does not change. */
+/**
+ * Keep Scan text and drag-select boxes in sync after Save correction.
+ * `has_ocr_text` often does not change, so the pane would otherwise keep the
+ * engine's word texts while Copy text already uses the fix (SBS-1010).
+ */
 export function withSavedOcrText(details: ClipDetails | null, text: string): ClipDetails | null {
   if (!details) return null;
   const normalized = text.trim();
-  return { ...details, ocr_text: normalized || null };
+  if (!normalized) {
+    return { ...details, ocr_text: null, ocr_layout: null };
+  }
+  if (!details.ocr_layout) {
+    return { ...details, ocr_text: normalized };
+  }
+  const words = applyOcrTextToWords(details.ocr_layout.words, normalized);
+  return {
+    ...details,
+    ocr_text: normalized,
+    ocr_layout: words.length > 0 ? { ...details.ocr_layout, words } : null,
+  };
 }
