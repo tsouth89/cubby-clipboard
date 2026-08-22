@@ -12,6 +12,42 @@ export const PRIVILEGED_WORKFLOWS = [
   '.github/workflows/validate-store-submission.yml',
 ];
 
+// Triggers that run in the base-repo context with the repository's secrets and
+// write scopes. An unpinned third-party action in a workflow with one of these
+// is an escalation path, so such a workflow must be pin-checked (SBS-984).
+export const PRIVILEGED_TRIGGERS = ['pull_request_target', 'workflow_run'];
+
+/**
+ * Return the workflow's `on:` section, comments stripped.
+ *
+ * GitHub accepts the trigger list as a scalar (`on: push`), a flow sequence
+ * (`on: [push, pull_request_target]`), a block sequence, or a mapping. Matching
+ * a single shape misses the others, so take the whole section and look for the
+ * trigger token inside it. Scoping to the section also stops an unrelated
+ * mention further down the file -- in an `if:` or a script step -- from
+ * counting as a trigger.
+ */
+export function triggerSection(source) {
+  const lines = source.split(/\r?\n/);
+  const start = lines.findIndex((line) => /^(?:on|["']on["'])\s*:/.test(line));
+  if (start === -1) return '';
+  const section = [lines[start]];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    // A new top-level key ends the section; blank and indented lines continue it.
+    if (/^\S/.test(lines[index])) break;
+    section.push(lines[index]);
+  }
+  return section.map((line) => line.replace(/#.*$/, '')).join('\n');
+}
+
+/** Which privileged triggers this workflow declares, if any. */
+export function privilegedTriggersIn(source) {
+  const section = triggerSection(source);
+  return PRIVILEGED_TRIGGERS.filter((trigger) =>
+    new RegExp(`\\b${trigger}\\b`).test(section),
+  );
+}
+
 const FIRST_PARTY_OWNERS = new Set(['actions']);
 const SHA_RE = /^[0-9a-f]{40}$/i;
 const USES_RE = /^(?:-\s+)?uses\s*:\s*(?:['"]([^'"]+)['"]|(\S+))/;
