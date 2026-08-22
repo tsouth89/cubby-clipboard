@@ -5,9 +5,13 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 ## Unreleased
 
 ### Security
+- An abandoned backup or Ditto file-dialog pick is no longer writable for the rest of the process: the grant expires after 60 seconds or when Settings closes (SBS-1015)
+- Edited clips now store the same 200-character `text_preview` as capture, so flyout and History search no longer ship 500 characters of an edited body (SBS-994)
 - Search no longer ships full decrypted clip bodies on every keystroke; flyout and History search rows use the same preview-only contract as the list (SBS-912)
 
 ### Fixed
+- Folder and History context menus are announced as folder or history actions, not as clip actions (SBS-1013)
+- Shift+wheel and Ctrl+wheel on a zoomed screenshot no longer also run the browser's native scroll, which had been panning twice and jumping the zoom anchor; React 19 registers `onWheel` as passive, so the viewer now attaches its own non-passive listener (SBS-1011)
 - Encrypted backup export now includes live full-resolution screenshot originals, and refuses the export if one cannot be read, instead of restoring every image as an expired thumbnail; a restore keeps those originals through the destination keep-for window without rewriting the visible capture date (SBS-919)
 - Empty Unicode text is no longer diagnosed as a clipboard lock, so a copy that still has HTML or RTF is stored instead of dropped; an advertised picture still retries before that HTML wrapper is stored (SBS-924)
 - Recover an interrupted settings.json replace from the leftover temp instead of treating it as a first-run 30-day retention (SBS-935)

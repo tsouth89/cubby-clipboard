@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { clsx } from 'clsx';
 import { Copy, Hand, Maximize2, Minus, Plus, TextCursorInput } from 'lucide-react';
+import { bindImageViewerWheel, MAX_SCALE, MIN_SCALE } from '../utils/imageViewerWheel';
 import {
   anchorWord,
   nearestWord,
@@ -12,9 +13,6 @@ import {
 
 /** Fit the image to the pane, or a fixed number of CSS pixels per image pixel. */
 type Zoom = { kind: 'fit' } | { kind: 'scale'; cssPerImagePixel: number };
-
-const MIN_SCALE = 0.05;
-const MAX_SCALE = 8;
 
 /** One image pixel per *device* pixel: the sharpest honest view, and on a
  *  scaled display that is not the same as one CSS pixel. */
@@ -131,6 +129,10 @@ export function ImageTextViewer({
   }, [natural, viewport]);
 
   const scale = zoom.kind === 'fit' ? fitScale : zoom.cssPerImagePixel;
+  // Read by the non-passive wheel listener. Rebinding that listener on every
+  // zoom notch would drop events mid-gesture; the ref stays current instead.
+  const scaleRef = useRef(scale);
+  scaleRef.current = scale;
   const display = useMemo(() => {
     if (!natural || scale === null) return null;
     return { width: natural.width * scale, height: natural.height * scale };
@@ -244,33 +246,25 @@ export function ImageTextViewer({
   // plain wheel scrolls vertically. Sideways is explicit because a zoomed
   // screenshot is usually wider than the pane, and a mouse with only a vertical
   // wheel would otherwise have no way to reach the right-hand side.
-  const handleWheel = useCallback(
-    (event: React.WheelEvent) => {
-      const element = viewportRef.current;
-      if (!element) return;
-
-      if (event.shiftKey && !event.ctrlKey) {
-        event.preventDefault();
-        element.scrollLeft += event.deltaY !== 0 ? event.deltaY : event.deltaX;
-        return;
+  //
+  // Must be a native non-passive listener: React 19's onWheel is passive, so
+  // preventDefault was a no-op and native Shift/Ctrl+wheel still ran (SBS-1011).
+  useEffect(() => {
+    const element = viewportRef.current;
+    if (!element) return;
+    return bindImageViewerWheel(
+      element,
+      () => scaleRef.current,
+      (next, offsetX, offsetY, ratio) => {
+        setZoom({ kind: 'scale', cssPerImagePixel: next });
+        // Keep the pixel under the cursor under the cursor.
+        requestAnimationFrame(() => {
+          element.scrollLeft = (element.scrollLeft + offsetX) * ratio - offsetX;
+          element.scrollTop = (element.scrollTop + offsetY) * ratio - offsetY;
+        });
       }
-      if (!event.ctrlKey || scale === null) return;
-      event.preventDefault();
-      const rect = element.getBoundingClientRect();
-      const offsetX = event.clientX - rect.left;
-      const offsetY = event.clientY - rect.top;
-      const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
-      const next = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale * factor));
-      const ratio = next / scale;
-      setZoom({ kind: 'scale', cssPerImagePixel: next });
-      // Keep the pixel under the cursor under the cursor.
-      requestAnimationFrame(() => {
-        element.scrollLeft = (element.scrollLeft + offsetX) * ratio - offsetX;
-        element.scrollTop = (element.scrollTop + offsetY) * ratio - offsetY;
-      });
-    },
-    [scale]
-  );
+    );
+  }, []);
 
   // Escape clears a selection before anything else acts on it, and Ctrl+C
   // copies it. Capture phase so the History window's own Escape-to-close and
@@ -320,7 +314,6 @@ export function ImageTextViewer({
           // larger than the pane and centering would fight the scroll.
           zoom.kind === 'fit' && 'flex items-center justify-center'
         )}
-        onWheel={handleWheel}
       >
         <div
           ref={surfaceRef}

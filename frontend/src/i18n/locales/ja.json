@@ -9,7 +9,9 @@
     "copied": "クリップボードにコピーしました",
     "pause": "一時停止",
     "resume": "再開",
-    "clipActions": "クリップ操作"
+    "clipActions": "クリップ操作",
+    "folderActions": "フォルダー操作",
+    "historyActions": "履歴操作"
   },
   "clipList": {
     "empty": "まだクリップがありません",

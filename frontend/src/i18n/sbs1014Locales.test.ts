@@ -65,7 +65,23 @@ describe('SBS-1014 locale strings', () => {
       const value = lookup(catalog as Dict, 'settings.portableUpdateNote');
       expect(value, `${name} exe`).toEqual(expect.stringContaining('Cubby Clipboard.exe'));
       expect(value, `${name} portable.txt`).toEqual(expect.stringContaining('portable.txt'));
-      expect(value, `${name} data folder`).toEqual(expect.stringMatching(/data/));
+      // \bdata\b, not /data/: the latter is satisfied by "database" or
+      // "metadata", so a translation that dropped the folder name would still
+      // pass while telling the user to keep the wrong path. A word boundary
+      // also survives the different quoting each locale uses around it
+      // ('data', 「data」, “data”), which stringContaining("'data'") would not.
+      expect(value, `${name} data folder`).toEqual(expect.stringMatching(/\bdata\b/));
     }
+  });
+
+  it('rejects a portable note that mentions data only inside another word', () => {
+    // Guards the assertion above: it must fail for a note that names the exe
+    // and portable.txt but never the 'data' folder itself.
+    const impostor =
+      'Ersetzen Sie Cubby Clipboard.exe. Die database und portable.txt bleiben erhalten.';
+    expect(impostor).toEqual(expect.stringContaining('Cubby Clipboard.exe'));
+    expect(impostor).toEqual(expect.stringContaining('portable.txt'));
+    expect(impostor).toEqual(expect.stringMatching(/data/));
+    expect(impostor).not.toEqual(expect.stringMatching(/\bdata\b/));
   });
 });

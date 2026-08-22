@@ -9,7 +9,9 @@
     "copied": "Copié dans le presse-papiers",
     "pause": "Pause",
     "resume": "Reprendre",
-    "clipActions": "Actions de l'élément"
+    "clipActions": "Actions du clip",
+    "folderActions": "Actions du dossier",
+    "historyActions": "Actions de l'historique"
   },
   "clipList": {
     "empty": "Aucun élément pour le moment",
