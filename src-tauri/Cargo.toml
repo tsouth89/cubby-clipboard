@@ -1,6 +1,6 @@
 [package]
 name = "cubby"
-version = "1.3.2"
+version = "1.3.3"
 description = "A native-feeling clipboard history replacement for Windows 11"
 authors = ["SouthForge AI", "PastePaw contributors"]
 license = "GPL-3.0"
