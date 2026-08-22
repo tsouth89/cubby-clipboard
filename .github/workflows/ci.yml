@@ -154,3 +154,29 @@ jobs:
       - run: mkdir dist
 
       - run: cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} --all-targets ${{ matrix.extra_args }}
+
+  # SBS-1025: one stable check name for branch protection. The matrix
+  # publishes Check <arch> <features> (four names); GitHub required
+  # checks on main currently list only `test`, so a red matrix leg does
+  # not block merge by itself. This job needs the matrix, uses
+  # if: always() so a failed leg reports failure instead of a skip, and
+  # exits non-zero unless every leg succeeded. A repo admin still has to
+  # add `shipped-windows` under Settings → Branches; this workflow cannot
+  # change protection.
+  shipped-windows:
+    name: shipped-windows
+    if: always()
+    needs:
+      - check-shipped-windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail unless every Check <arch> <features> leg succeeded
+        env:
+          MATRIX_RESULT: ${{ needs.check-shipped-windows.result }}
+        run: |
+          echo "check-shipped-windows result: $MATRIX_RESULT"
+          if [ "$MATRIX_RESULT" != "success" ]; then
+            echo "::error::shipped-windows gate failed (matrix result: $MATRIX_RESULT). A Check <arch> <features> leg failed, was cancelled, or was skipped."
+            exit 1
+          fi

@@ -184,7 +184,7 @@ When Dependabot opens an actions pin update:
 5. Merge the pin update. Do not retarget the `uses:` ref back to a floating
    tag such as `@v3` or `@stable`.
 
-## Pre-merge Windows compile matrix (SBS-779)
+## Pre-merge Windows compile matrix (SBS-779, SBS-1025)
 
 Pull-request CI cargo-checks four shipped configurations on `windows-latest`:
 
@@ -193,10 +193,48 @@ Pull-request CI cargo-checks four shipped configurations on `windows-latest`:
 - ARM64 default
 - ARM64 `app-store`
 
-That is a `cargo check --all-targets` per leg, not a bundle. Release still owns
-NSIS packaging, signing, and the Store installer. `.github/scripts/check-shipped-windows-ci.mjs`
-fails the required CI job if a leg is removed or renamed into an opaque matrix.
+Each leg is a `cargo check --all-targets` named `Check <arch> <features>`, not a
+bundle. Release still owns NSIS packaging, signing, and the Store installer.
+`.github/scripts/check-shipped-windows-ci.mjs` fails the required `test` job if a
+leg is removed, renamed into an opaque matrix, or the `shipped-windows`
+aggregator is dropped.
 
-A configuration-specific compile break should now fail the PR (`Check <arch> <features>`)
-instead of the first tag/release build that exercises that pair.
+### What actually blocks merge
+
+GitHub branch protection on `main` requires the `test` job. It does not require
+the four `Check <arch> <features>` names. A red matrix leg fails that check run
+and fails the `shipped-windows` aggregator; it does not, by itself, block merge.
+
+`shipped-windows` in `.github/workflows/ci.yml` is the stable aggregator: it
+`needs: check-shipped-windows`, uses `if: always()` so a failed leg reports
+failure instead of a skipped check, and exits non-zero unless the matrix result
+is `success`. That job name is what branch protection should require.
+
+This repository's automation cannot update protection (the GitHub token is not
+an admin; `GET/PUT .../branches/main/protection` returns 403; rulesets are
+empty). A repo admin still has to add the check after it has run once:
+
+1. Wait until a commit shows a `shipped-windows` check run so GitHub's search
+   box can find the name.
+2. Open **Settings → Branches → Branch protection rules → `main`**. This repo
+   uses classic branch protection, not rulesets.
+3. Keep **Require status checks to pass before merging** enabled.
+4. Search for and add `shipped-windows`. Keep `test`. Do not add the four
+   `Check <arch> <features>` names as the required set — those names change if
+   a leg is renamed, and a fifth shipped pair would not be required.
+5. Save the rule.
+
+The classic API, if an admin token is available later:
+
+```http
+PUT /repos/tsouth89/cubby-clipboard/branches/main/protection/required_status_checks
+```
+
+with `strict` left as it is today and `contexts` including both `test` and
+`shipped-windows`. Prefer the UI if you are unsure whether other required
+contexts already exist; replacing the list blindly can drop them.
+
+A configuration-specific compile break fails `Check <arch> <features>` and
+`shipped-windows` on the pull request. It blocks merge only after
+`shipped-windows` is a required check.
 
