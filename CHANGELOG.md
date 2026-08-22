@@ -9,6 +9,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Edited clips now store the same 200-character `text_preview` as capture, so flyout and History search no longer ship 500 characters of an edited body (SBS-994)
 - Content-hash dedup no longer deletes a file named by `clip_images.file_path` unless it sits in the managed image directory, matching the other delete paths (SBS-987)
 - Backup import refuses a file larger than 256 MiB before reading it into memory or checking the AEAD tag, so a huge unauthenticated bundle cannot abort the process (SBS-981)
+- Encrypted backup now overwrites the passphrase, the key derived from it, and the in-memory JSON history when export or import returns, instead of leaving them in freed heap (SBS-983)
 - Search no longer ships full decrypted clip bodies on every keystroke; flyout and History search rows use the same preview-only contract as the list (SBS-912)
 - The opener release gate now models glob the way tauri-plugin-opener does (star and question-mark match slash) and refuses a host pattern that contains a wildcard, so a dropped-slash glob fails the release check instead of shipping (SBS-997)
 

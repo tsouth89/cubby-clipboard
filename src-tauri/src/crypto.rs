@@ -5,6 +5,11 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::io;
 use std::path::Path;
+use zeroize::Zeroizing;
+// The trait is only needed to wipe the DPAPI output buffer, which is
+// Windows-only; importing it unconditionally warns on every other target.
+#[cfg(target_os = "windows")]
+use zeroize::Zeroize;
 
 const ENVELOPE_MAGIC: &[u8; 4] = b"CUB1";
 const NONCE_LEN: usize = 12;
@@ -50,7 +55,7 @@ impl From<String> for StorageError {
     }
 }
 
-fn load_protected_key(key_path: &Path) -> Result<[u8; KEY_LEN], StorageError> {
+fn load_protected_key(key_path: &Path) -> Result<Zeroizing<[u8; KEY_LEN]>, StorageError> {
     let protected = std::fs::read(key_path)
         .map_err(|e| format!("failed to read protected storage key: {e}"))?;
     // A failure here is an account mismatch, not corruption: the bytes were
@@ -63,14 +68,15 @@ fn load_protected_key(key_path: &Path) -> Result<[u8; KEY_LEN], StorageError> {
             detail,
         }
     })?;
-    plaintext
-        .try_into()
-        .map_err(|_| StorageError::Other("protected storage key has an invalid length".to_string()))
+    let key: [u8; KEY_LEN] = plaintext.as_slice().try_into().map_err(|_| {
+        StorageError::Other("protected storage key has an invalid length".to_string())
+    })?;
+    Ok(Zeroizing::new(key))
 }
 
 #[derive(Clone)]
 pub struct CryptoManager {
-    key: [u8; KEY_LEN],
+    key: Zeroizing<[u8; KEY_LEN]>,
     /// Test-only: content/preview encrypt still works, optional fields fail.
     /// Needed so import can prove SBS-980 without a real entropy outage.
     #[cfg(test)]
@@ -95,10 +101,10 @@ impl CryptoManager {
                             .to_string(),
                     ));
                 }
-                let mut key = [0_u8; KEY_LEN];
-                getrandom::fill(&mut key)
+                let mut key = Zeroizing::new([0_u8; KEY_LEN]);
+                getrandom::fill(&mut *key)
                     .map_err(|e| format!("failed to generate storage key: {e}"))?;
-                let protected = protect_for_current_user(&key)?;
+                let protected = protect_for_current_user(key.as_slice())?;
                 if let Some(parent) = key_path.parent() {
                     std::fs::create_dir_all(parent)
                         .map_err(|e| format!("failed to create storage directory: {e}"))?;
@@ -131,8 +137,8 @@ impl CryptoManager {
 
     #[cfg(test)]
     pub fn ephemeral() -> Self {
-        let mut key = [0_u8; KEY_LEN];
-        getrandom::fill(&mut key).expect("test encryption key should be generated");
+        let mut key = Zeroizing::new([0_u8; KEY_LEN]);
+        getrandom::fill(&mut *key).expect("test encryption key should be generated");
         Self {
             key,
             fail_optional_encrypt: false,
@@ -151,7 +157,7 @@ impl CryptoManager {
     }
 
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
-        let cipher = Aes256Gcm::new_from_slice(&self.key)
+        let cipher = Aes256Gcm::new_from_slice(self.key.as_slice())
             .map_err(|_| "failed to initialize storage encryption".to_string())?;
         let mut nonce = [0_u8; NONCE_LEN];
         getrandom::fill(&mut nonce).map_err(|e| format!("failed to generate nonce: {e}"))?;
@@ -175,7 +181,7 @@ impl CryptoManager {
         }
         let nonce_start = ENVELOPE_MAGIC.len();
         let ciphertext_start = nonce_start + NONCE_LEN;
-        let cipher = Aes256Gcm::new_from_slice(&self.key)
+        let cipher = Aes256Gcm::new_from_slice(self.key.as_slice())
             .map_err(|_| "failed to initialize storage encryption".to_string())?;
         cipher
             .decrypt(
@@ -186,8 +192,8 @@ impl CryptoManager {
     }
 
     pub fn keyed_hash(&self, content: &[u8]) -> String {
-        let mut mac =
-            <Hmac<Sha256> as Mac>::new_from_slice(&self.key).expect("HMAC accepts a 256-bit key");
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.key.as_slice())
+            .expect("HMAC accepts a 256-bit key");
         mac.update(content);
         mac.finalize()
             .into_bytes()
@@ -482,7 +488,7 @@ fn protect_for_current_user(plaintext: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn unprotect_for_current_user(protected: &[u8]) -> Result<Vec<u8>, String> {
+fn unprotect_for_current_user(protected: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{
         CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
@@ -504,7 +510,17 @@ fn unprotect_for_current_user(protected: &[u8]) -> Result<Vec<u8>, String> {
             &mut output,
         )
         .map_err(|e| format!("Windows could not unlock the storage key: {e}"))?;
-        let plaintext = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+        // LocalFree does not wipe. Copy, overwrite the DPAPI buffer, then free
+        // so a crash dump does not keep the storage key in that heap block
+        // (SBS-983).
+        let plaintext = if output.pbData.is_null() {
+            Zeroizing::new(Vec::new())
+        } else {
+            let raw = std::slice::from_raw_parts_mut(output.pbData, output.cbData as usize);
+            let plaintext = Zeroizing::new(raw.to_vec());
+            raw.zeroize();
+            plaintext
+        };
         let _ = LocalFree(Some(HLOCAL(output.pbData.cast())));
         Ok(plaintext)
     }
@@ -516,7 +532,7 @@ fn protect_for_current_user(_plaintext: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn unprotect_for_current_user(_protected: &[u8]) -> Result<Vec<u8>, String> {
+fn unprotect_for_current_user(_protected: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
     Err("Cubby encrypted storage currently requires Windows".to_string())
 }
 
@@ -524,6 +540,21 @@ fn unprotect_for_current_user(_protected: &[u8]) -> Result<Vec<u8>, String> {
 mod tests {
     use super::{CryptoManager, StorageError, KEY_LEN};
     use std::io;
+
+    /// Compile-time pin for SBS-983. The process-lifetime storage key must
+    /// still overwrite itself when the last `CryptoManager` drops.
+    fn must_wipe_on_drop<T: zeroize::ZeroizeOnDrop>(_secret: &T) {}
+
+    #[test]
+    fn storage_key_is_wiped_on_drop() {
+        let crypto = CryptoManager::ephemeral();
+        must_wipe_on_drop(&crypto.key);
+        let encrypted = crypto.encrypt(b"still works after the type wrap").unwrap();
+        assert_eq!(
+            crypto.decrypt(&encrypted).unwrap(),
+            b"still works after the type wrap"
+        );
+    }
 
     #[test]
     fn encrypted_payloads_round_trip_and_detect_tampering() {

@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const MAGIC: &[u8; 8] = b"CUBBAK01";
 const SALT_LEN: usize = 16;
@@ -66,14 +67,14 @@ const NOT_A_BUNDLE: &str = "That does not look like a Cubby backup file";
 /// be imported under `MAX_BUNDLE_BYTES` before the second allocation.
 const GCM_TAG_LEN: u64 = 16;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct BackupBundle {
     version: u32,
     exported_at: String,
     clips: Vec<BackupClip>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct BackupClip {
     clip_type: String,
     /// The clip's stored bytes, decrypted. For an image this is the 320×220
@@ -112,7 +113,7 @@ struct BackupClip {
     formats: Vec<BackupFormat>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct BackupFormat {
     name: String,
     content_b64: String,
@@ -226,16 +227,19 @@ fn export_field_label(field: &str) -> &'static str {
 /// Argon2id parameters. The defaults are the RustCrypto recommendation; they
 /// are pinned here because changing them silently would make every existing
 /// bundle undecryptable.
-fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_LEN], String> {
+fn derive_key(passphrase: &str, salt: &[u8]) -> Result<Zeroizing<[u8; KEY_LEN]>, String> {
     if passphrase.is_empty() {
         return Err("A passphrase is required to encrypt or open a backup".to_string());
     }
     let params = Params::new(19_456, 2, 1, Some(KEY_LEN))
         .map_err(|e| format!("invalid key-derivation parameters: {e}"))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut key = [0_u8; KEY_LEN];
+    // Zeroizing so a failed derive still wipes whatever Argon2 wrote, and so
+    // the caller cannot forget: the key is overwritten when this value drops
+    // (SBS-983).
+    let mut key = Zeroizing::new([0_u8; KEY_LEN]);
     argon
-        .hash_password_into(passphrase.as_bytes(), salt, &mut key)
+        .hash_password_into(passphrase.as_bytes(), salt, key.as_mut_slice())
         .map_err(|e| format!("failed to derive the backup key: {e}"))?;
     Ok(key)
 }
@@ -369,6 +373,42 @@ fn refuse_oversize_bundle(len: u64) -> Result<(), String> {
     }
 }
 
+/// Serialize the bundle to JSON that is wiped on drop (SBS-983).
+fn bundle_plaintext(bundle: &BackupBundle) -> Result<Zeroizing<Vec<u8>>, String> {
+    serde_json::to_vec(bundle)
+        .map(Zeroizing::new)
+        .map_err(|e| format!("Could not build the backup: {e}"))
+}
+
+/// Decrypt the JSON body of a `.cubbybak`. The bytes are wiped on drop (SBS-983).
+///
+/// The caller is responsible for bounding `raw` first; see
+/// `read_backup_file_limited` (SBS-981).
+fn decrypt_backup_file(raw: &[u8], passphrase: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+    if raw.len() < HEADER_LEN || &raw[..MAGIC.len()] != MAGIC {
+        return Err(NOT_A_BUNDLE.to_string());
+    }
+    let salt = &raw[MAGIC.len()..MAGIC.len() + SALT_LEN];
+    let nonce = &raw[MAGIC.len() + SALT_LEN..HEADER_LEN];
+    let key = derive_key(passphrase, salt)?;
+    let cipher = Aes256Gcm::new_from_slice(key.as_slice())
+        .map_err(|e| format!("failed to prepare the cipher: {e}"))?;
+    // The cipher holds its own key copy. Wipe ours as soon as it is not needed.
+    drop(key);
+    cipher
+        .decrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: &raw[HEADER_LEN..],
+                aad: MAGIC,
+            },
+        )
+        .map(Zeroizing::new)
+        // A wrong passphrase and a tampered file are indistinguishable here, and
+        // the wrong passphrase is overwhelmingly the likely one.
+        .map_err(|_| "Wrong passphrase, or the backup file is damaged".to_string())
+}
+
 /// Serialize and encrypt a bundle into the on-disk file bytes.
 ///
 /// Split out of `export_backup` so a test can seal a bundle this database would
@@ -385,8 +425,7 @@ fn seal_bundle_limited(
     passphrase: &str,
     max_bytes: u64,
 ) -> Result<Vec<u8>, String> {
-    let plaintext =
-        serde_json::to_vec(bundle).map_err(|e| format!("Could not build the backup: {e}"))?;
+    let plaintext = bundle_plaintext(bundle)?;
     // Fail before encrypt allocates a second buffer the size of the payload.
     if HEADER_LEN as u64 + plaintext.len() as u64 + GCM_TAG_LEN > max_bytes {
         return Err(oversize_export_error(max_bytes));
@@ -398,8 +437,9 @@ fn seal_bundle_limited(
     getrandom::fill(&mut nonce).map_err(|e| format!("failed to generate a nonce: {e}"))?;
 
     let key = derive_key(passphrase, &salt)?;
-    let cipher = Aes256Gcm::new_from_slice(&key)
+    let cipher = Aes256Gcm::new_from_slice(key.as_slice())
         .map_err(|e| format!("failed to prepare the cipher: {e}"))?;
+    drop(key);
     let ciphertext = cipher
         .encrypt(
             Nonce::from_slice(&nonce),
@@ -438,7 +478,7 @@ fn decrypt_export_clip(
     let mut failed_fields = Vec::new();
 
     let content = match crypto.decrypt(&content) {
-        Ok(value) => Some(value),
+        Ok(value) => Some(Zeroizing::new(value)),
         Err(error) => {
             log::warn!("BACKUP: clip {uuid} content could not be decrypted: {error}");
             failed_fields.push("content");
@@ -474,7 +514,7 @@ fn decrypt_export_clip(
 
     Ok(BackupClip {
         clip_type,
-        content_b64: BASE64.encode(&content),
+        content_b64: BASE64.encode(content.as_slice()),
         text_preview,
         is_pinned,
         is_hidden,
@@ -506,10 +546,13 @@ async fn attach_export_formats(
     let mut formats = Vec::with_capacity(rows.len());
     for (name, content) in rows {
         match db.crypto.decrypt(&content) {
-            Ok(bytes) => formats.push(BackupFormat {
-                name,
-                content_b64: BASE64.encode(bytes),
-            }),
+            Ok(bytes) => {
+                let bytes = Zeroizing::new(bytes);
+                formats.push(BackupFormat {
+                    name,
+                    content_b64: BASE64.encode(bytes.as_slice()),
+                });
+            }
             Err(error) => {
                 log::warn!(
                     "BACKUP: clip {uuid} auxiliary format {name} could not be decrypted: {error}"
@@ -525,7 +568,7 @@ async fn attach_export_formats(
 async fn persist_imported_formats(
     db: &Database,
     uuid: &str,
-    formats: &[(String, Vec<u8>)],
+    formats: &[(String, Zeroizing<Vec<u8>>)],
 ) -> Result<(), String> {
     for (name, bytes) in formats {
         let encrypted = db
@@ -575,7 +618,7 @@ async fn attach_export_full_image(
     }
     match load_export_full_image(db, uuid).await {
         Ok(bytes) => {
-            clip.full_image_b64 = Some(BASE64.encode(&bytes));
+            clip.full_image_b64 = Some(BASE64.encode(bytes.as_slice()));
             Ok(clip)
         }
         Err(error) => {
@@ -607,7 +650,7 @@ async fn attach_export_full_image(
 /// confirmed empty/absent index plus a confirmed-absent managed file plus an
 /// empty legacy blob means "nothing there" — and for a non-expired image that
 /// is still a failure, because the original was supposed to exist.
-async fn load_export_full_image(db: &Database, uuid: &str) -> Result<Vec<u8>, String> {
+async fn load_export_full_image(db: &Database, uuid: &str) -> Result<Zeroizing<Vec<u8>>, String> {
     let index: Option<(Option<String>, Vec<u8>)> =
         sqlx::query_as("SELECT file_path, full_content FROM clip_images WHERE clip_uuid = ?")
             .bind(uuid)
@@ -636,11 +679,11 @@ async fn load_export_full_image(db: &Database, uuid: &str) -> Result<Vec<u8>, St
 
     if let Some((_, full_content)) = index {
         if !full_content.is_empty() {
-            let bytes = if db.crypto.is_encrypted(&full_content) {
+            let bytes = Zeroizing::new(if db.crypto.is_encrypted(&full_content) {
                 db.crypto.decrypt(&full_content)?
             } else {
                 full_content
-            };
+            });
             if bytes.is_empty() {
                 return Err("decrypted original was empty".to_string());
             }
@@ -660,7 +703,7 @@ async fn load_export_full_image(db: &Database, uuid: &str) -> Result<Vec<u8>, St
 fn read_export_image_file(
     crypto: &crate::crypto::CryptoManager,
     path: &str,
-) -> Result<Vec<u8>, String> {
+) -> Result<Zeroizing<Vec<u8>>, String> {
     let encrypted = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -671,7 +714,7 @@ fn read_export_image_file(
     if encrypted.is_empty() {
         return Err("file was empty".to_string());
     }
-    let bytes = crypto.decrypt(&encrypted)?;
+    let bytes = Zeroizing::new(crypto.decrypt(&encrypted)?);
     if bytes.is_empty() {
         return Err("decrypted original was empty".to_string());
     }
@@ -893,28 +936,9 @@ async fn import_backup_limited(
     max_bytes: u64,
 ) -> Result<BackupImportResult, String> {
     let raw = read_backup_file_limited(path, max_bytes)?;
-    if raw.len() < HEADER_LEN || &raw[..MAGIC.len()] != MAGIC {
-        return Err(NOT_A_BUNDLE.to_string());
-    }
+    let plaintext = decrypt_backup_file(&raw, passphrase)?;
 
-    let salt = &raw[MAGIC.len()..MAGIC.len() + SALT_LEN];
-    let nonce = &raw[MAGIC.len() + SALT_LEN..HEADER_LEN];
-    let key = derive_key(passphrase, salt)?;
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| format!("failed to prepare the cipher: {e}"))?;
-    let plaintext = cipher
-        .decrypt(
-            Nonce::from_slice(nonce),
-            Payload {
-                msg: &raw[HEADER_LEN..],
-                aad: MAGIC,
-            },
-        )
-        // A wrong passphrase and a tampered file are indistinguishable here, and
-        // the wrong passphrase is overwhelmingly the likely one.
-        .map_err(|_| "Wrong passphrase, or the backup file is damaged".to_string())?;
-
-    let bundle: BackupBundle = serde_json::from_slice(&plaintext)
+    let mut bundle: BackupBundle = serde_json::from_slice(&plaintext)
         .map_err(|e| format!("That backup could not be understood: {e}"))?;
     if bundle.version != 1 {
         return Err(format!(
@@ -932,9 +956,13 @@ async fn import_backup_limited(
     // lookup cannot see rows this same run has not committed yet.
     let mut planned = std::collections::HashSet::new();
 
-    for clip in bundle.clips {
+    // `ZeroizeOnDrop` on BackupBundle generates `impl Drop`, and Rust forbids
+    // moving a field out of a Drop type. `mem::take` replaces instead of
+    // moving; each BackupClip still carries its own ZeroizeOnDrop, so the wipe
+    // guarantee survives leaving the bundle.
+    for clip in std::mem::take(&mut bundle.clips) {
         let content = match BASE64.decode(clip.content_b64.as_bytes()) {
-            Ok(bytes) => bytes,
+            Ok(bytes) => Zeroizing::new(bytes),
             Err(_) => {
                 result
                     .errors
@@ -959,11 +987,11 @@ async fn import_backup_limited(
             }
         };
 
-        let mut decoded_formats: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut decoded_formats: Vec<(String, Zeroizing<Vec<u8>>)> = Vec::new();
         let mut format_error = false;
         for format in &clip.formats {
             match BASE64.decode(format.content_b64.as_bytes()) {
-                Ok(bytes) => decoded_formats.push((format.name.clone(), bytes)),
+                Ok(bytes) => decoded_formats.push((format.name.clone(), Zeroizing::new(bytes))),
                 Err(_) => {
                     result
                         .errors
@@ -981,13 +1009,16 @@ async fn import_backup_limited(
         // folds HTML/RTF into a text clip's identity. Restore has to use the
         // same material or recopying that clip on the new machine stores a
         // duplicate (SBS-978).
-        let hash_material = crate::clipboard::build_clip_hash_material(
+        let hash_material = Zeroizing::new(crate::clipboard::build_clip_hash_material(
             &clip.clip_type,
-            full_image.as_deref().unwrap_or(&content),
+            full_image
+                .as_ref()
+                .map(|bytes| bytes.as_slice())
+                .unwrap_or(content.as_slice()),
             decoded_formats
                 .iter()
                 .map(|(name, bytes)| (name.as_str(), bytes.as_slice())),
-        );
+        ));
         let content_hash = db.crypto.keyed_hash(&hash_material);
 
         let already: Option<String> =
@@ -1017,7 +1048,7 @@ async fn import_backup_limited(
             None => None,
         };
 
-        let encrypted_content = match db.crypto.encrypt(&content) {
+        let encrypted_content = match db.crypto.encrypt(content.as_slice()) {
             Ok(value) => value,
             Err(error) => {
                 result.errors.push(format!("encrypt failed: {error}"));
@@ -1121,7 +1152,7 @@ async fn import_backup_limited(
                         db,
                         &new_uuid,
                         file_path,
-                        full_image.as_ref().map(Vec::len).unwrap_or(0) as i64,
+                        full_image.as_ref().map(|bytes| bytes.len()).unwrap_or(0) as i64,
                     )
                     .await
                     {
@@ -1193,7 +1224,7 @@ async fn ensure_folder(db: &Database, name: &str) -> Result<i64, String> {
         .map_err(|e| format!("Could not create folder {name}: {e}"))
 }
 
-fn decode_optional_full_image(value: Option<&str>) -> Result<Option<Vec<u8>>, String> {
+fn decode_optional_full_image(value: Option<&str>) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
     let Some(encoded) = value else {
         return Ok(None);
     };
@@ -1203,7 +1234,7 @@ fn decode_optional_full_image(value: Option<&str>) -> Result<Option<Vec<u8>>, St
     if bytes.is_empty() {
         return Err("A clip's full-resolution image was empty".to_string());
     }
-    Ok(Some(bytes))
+    Ok(Some(Zeroizing::new(bytes)))
 }
 
 fn persist_imported_original(
@@ -1243,6 +1274,60 @@ fn remove_imported_original(image_dir: &std::path::Path, file_path: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Compile-time pin for SBS-983. A bare `[u8; 32]` or `Vec<u8>` does not
+    /// implement `ZeroizeOnDrop`, so this fails to compile if the production
+    /// wrap is reverted.
+    fn must_wipe_on_drop<T: zeroize::ZeroizeOnDrop>(_secret: &T) {}
+
+    /// SBS-983: a derived backup key must wipe itself on drop. A freed-but-unwiped
+    /// `[u8; 32]` is what a crash dump or `hiberfil.sys` would still contain.
+    #[test]
+    fn derived_backup_key_is_wiped_on_drop() {
+        let salt = [0x11_u8; SALT_LEN];
+        let key = derive_key("correct-horse-battery-staple", &salt)
+            .expect("a non-empty passphrase must derive");
+        assert_eq!(key.len(), KEY_LEN);
+        let again = derive_key("correct-horse-battery-staple", &salt)
+            .expect("the same passphrase and salt must derive again");
+        assert_eq!(
+            key.as_slice(),
+            again.as_slice(),
+            "wrapping the key must not change the derived bytes"
+        );
+        must_wipe_on_drop(&key);
+    }
+
+    /// SBS-983: the export JSON and the import decrypt buffer hold the entire
+    /// history in the clear. They must wipe on drop, and they must still be
+    /// the same bytes the file was sealed from.
+    #[test]
+    fn backup_plaintext_buffers_are_wiped_on_drop() {
+        let bundle = BackupBundle {
+            version: 1,
+            exported_at: "2026-05-01 09:00:00".to_string(),
+            clips: Vec::new(),
+        };
+        let plaintext = bundle_plaintext(&bundle).expect("an empty bundle must serialize");
+        must_wipe_on_drop(&plaintext);
+        must_wipe_on_drop(&bundle);
+        assert!(
+            std::str::from_utf8(&plaintext)
+                .expect("bundle JSON is UTF-8")
+                .contains("\"clips\":[]"),
+            "the live buffer must still hold the serialized bundle"
+        );
+
+        let file = seal_bundle(&bundle, "passphrase12x").expect("an empty bundle must seal");
+        let opened =
+            decrypt_backup_file(&file, "passphrase12x").expect("the sealed empty bundle must open");
+        must_wipe_on_drop(&opened);
+        assert_eq!(
+            opened.as_slice(),
+            plaintext.as_slice(),
+            "opening must recover the same wiped-on-drop JSON"
+        );
+    }
 
     /// Every export gets its own directory. The sibling temp no longer embeds
     /// the destination file name, so "did this export leave a temp behind?" is

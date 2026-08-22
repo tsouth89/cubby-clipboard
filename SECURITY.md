@@ -45,7 +45,7 @@ Release Info logs persist under the application log directory. The History sourc
 
 ## Clipboard history at rest
 
-Cubby encrypts clipboard payloads, previews, source attribution, metadata, and image files with AES-256-GCM. Dedupe values use a keyed HMAC rather than a plain content hash. The random storage key is protected for the current Windows user with DPAPI and is never stored in plaintext.
+Cubby encrypts clipboard payloads, previews, source attribution, metadata, and image files with AES-256-GCM. Dedupe values use a keyed HMAC rather than a plain content hash. The random storage key is protected for the current Windows user with DPAPI and is never stored in plaintext. The backup passphrase, the key derived from it, the in-memory backup JSON, and the unlocked storage key are wrapped so they are overwritten when those values drop (SBS-983).
 
 Existing plaintext history is migrated before the clipboard listener starts. Cubby fails closed if the key cannot be unlocked or migration cannot complete, preventing new history from being mixed into an unreadable or partially encrypted store.
 

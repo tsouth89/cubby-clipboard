@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
+use zeroize::Zeroizing;
 
 fn clip_to_list_item(clip: &Clip, preview_only: bool) -> ClipboardItem {
     // A hidden clip ships no content and no preview — not even a thumbnail.
@@ -3099,7 +3100,10 @@ pub async fn export_backup(
     passphrase: String,
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<usize, String> {
-    crate::path_grant::export_granted_backup(db.inner(), path, passphrase).await
+    // SBS-983: this is the longest-lived copy of the passphrase, alive for the
+    // whole export. Owning it as Zeroizing wipes it on return instead of
+    // leaving it in freed heap for a crash dump or hiberfil.sys.
+    crate::path_grant::export_granted_backup(db.inner(), path, Zeroizing::new(passphrase)).await
 }
 
 #[tauri::command]
@@ -3109,7 +3113,9 @@ pub async fn import_backup(
     dry_run: bool,
     db: tauri::State<'_, Arc<Database>>,
 ) -> Result<crate::backup::BackupImportResult, String> {
-    crate::path_grant::import_granted_backup(db.inner(), path, passphrase, dry_run).await
+    // SBS-983: see export_backup above.
+    crate::path_grant::import_granted_backup(db.inner(), path, Zeroizing::new(passphrase), dry_run)
+        .await
 }
 
 #[tauri::command]
