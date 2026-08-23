@@ -567,6 +567,7 @@ pub fn run_app() {
             commands::set_clip_ocr_text,
             commands::update_clip_text,
             commands::set_clip_notes,
+            commands::get_bulk_copy_text,
             commands::toggle_clip_hidden,
             commands::move_to_folder,
             commands::create_folder,

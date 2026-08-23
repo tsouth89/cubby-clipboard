@@ -8,6 +8,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Paste and copy no longer emit the full decrypted clip body to the WebView on a `clipboard-write` event that has no frontend listener (SBS-1042)
 
 ### Fixed
+- History bulk Copy now includes recognized text from selected images, including images whose full-resolution original has expired
 - Flood-dropping a queued self-paste echo no longer leaves the ignore hash swallowing the next real copy of that content (SBS-1039)
 - Recover a dest-gone rolling `cubby.db.bak` replace on FAT/exFAT instead of deleting the only remaining copy (SBS-1051)
 - Settings and the support FAQ no longer say the configured hotkey opens Cubby in remote sessions unless Replace Windows clipboard shortcut is on (SBS-1049)
