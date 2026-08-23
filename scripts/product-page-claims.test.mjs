@@ -276,6 +276,15 @@ test('expired originals that do not come back are not a backup claim', () => {
   );
 });
 
+test('a prior export sentence does not flag retention come-back wording', () => {
+  assert.deepEqual(
+    findStaleBackupOmissionClaims(
+      'Export writes a local encrypted file. Full-resolution originals do not come back after retention drops them.'
+    ),
+    []
+  );
+});
+
 test('anaphoric archive omission is a claim', () => {
   const source =
     'The archive is a local encrypted file. It does not hold the HTML and RTF copies of a clip or the full-resolution image files.';

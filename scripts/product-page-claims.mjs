@@ -152,12 +152,11 @@ export function findStaleBackupOmissionClaims(source) {
     }
 
     const previous = i > 0 ? pieces[i - 1] : '';
-    if (!BACKUP_CONTEXT.test(segment) && !BACKUP_CONTEXT.test(previous)) {
-      continue;
-    }
+    const currentBackup = BACKUP_CONTEXT.test(segment);
+    const nearbyBackup = currentBackup || BACKUP_CONTEXT.test(previous);
 
     const omit = segment.match(OMIT_HOLD);
-    if (omit) {
+    if (omit && nearbyBackup) {
       const before = segment.slice(0, omit.index);
       const negatedOmit =
         /^omit(?:s|ted)?$/i.test(omit[0]) &&
@@ -174,7 +173,8 @@ export function findStaleBackupOmissionClaims(source) {
       }
     }
 
-    if (DO_NOT_COME_BACK.test(segment)) {
+    // Come-back wording is only the backup lie if this sentence names the archive.
+    if (DO_NOT_COME_BACK.test(segment) && currentBackup) {
       claims.push(segment);
     }
   }
