@@ -4,7 +4,6 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Settings } from '../types';
 import { SettingsPanel } from '../components/SettingsPanel';
 import { useTheme } from '../hooks/useTheme';
-import { useLanguage } from '../hooks/useLanguage';
 import { useSystemAccent } from '../hooks/useSystemAccent';
 
 import { Toaster } from 'sonner';
@@ -13,7 +12,6 @@ export function SettingsWindow() {
   const [settings, setSettings] = useState<Settings | null>(null);
 
   const effectiveTheme = useTheme(settings?.theme || 'system');
-  useLanguage(settings?.language);
   // Each Tauri window is its own document, so the settings window must apply the
   // Windows accent color itself; without this it falls back to the default token.
   useSystemAccent();

@@ -8,6 +8,7 @@ import {
   claimSegments,
   findFileListHistoryClaims,
   findStaleBackupOmissionClaims,
+  findStaleRemoteRelayPrivacyBypassClaims,
   findUnqualifiedRemoteHotkeyClaims,
   findWeakerFileRetentionClaim,
 } from './product-page-claims.mjs';
@@ -417,10 +418,92 @@ test('remote paste and tray fallback copy are not remote-hotkey claims', () => {
 test('live Settings and support copy name the Win+V replacement dependency', async () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   for (const relative of [
-    'frontend/src/i18n/locales/en.json',
+    'frontend/src/components/SettingsPanel.tsx',
     'product_pages/support.html',
   ]) {
     const source = await readFile(path.join(root, relative), 'utf8');
     assert.deepEqual(findUnqualifiedRemoteHotkeyClaims(source), [], relative);
+  }
+});
+
+// SBS-1071: after SBS-1001, skip_sensitive and skip_likely_secrets return
+// before relay_remote_capture. Privacy said those settings do not stop
+// the relay; Settings said it re-announces "anything."
+
+test('the original privacy.html relay-bypass sentence is a claim', () => {
+  const source =
+    'The relay is on by default. The sensitive-content and skip-likely-secrets settings do not stop it.';
+  const claims = findStaleRemoteRelayPrivacyBypassClaims(source);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0], /do not stop it/);
+});
+
+test('the original privacy.html ignored-list-only sentence is a claim', () => {
+  const sentence =
+    'The relay is on by default and skips a copy only when the remote viewer process itself (mstsc.exe and similar) is on the ignored list, not the application running on the remote host.';
+  const claims = findStaleRemoteRelayPrivacyBypassClaims(sentence);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0], /skips a copy only when/);
+});
+
+test('the original Settings anything-copied sentence is a claim', () => {
+  const sentence =
+    'Re-announce anything copied inside a remote session so your other remote sessions pick it up.';
+  const claims = findStaleRemoteRelayPrivacyBypassClaims(sentence);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0], /anything copied/);
+});
+
+test('a restated relay-bypass claim is reported', () => {
+  assert.equal(
+    findStaleRemoteRelayPrivacyBypassClaims(
+      'Skip likely secrets does not stop remote-session relay.'
+    ).length,
+    1
+  );
+  assert.equal(
+    findStaleRemoteRelayPrivacyBypassClaims(
+      'The sensitive-content setting never stops the relay.'
+    ).length,
+    1
+  );
+});
+
+test('accurate relay copy is not reported', () => {
+  for (const sentence of [
+    'The skip-sensitive and skip-likely-secrets settings also stop it.',
+    'It skips a copy when the remote viewer process itself is on the ignored list, and when Skip passwords and sensitive copies or Skip likely secrets in text would refuse the clip.',
+    'Re-announce a copy from a remote session so your other remote sessions pick it up.',
+    'Copies skipped as sensitive or as likely secrets are not relayed.',
+  ]) {
+    assert.deepEqual(
+      findStaleRemoteRelayPrivacyBypassClaims(sentence),
+      [],
+      sentence
+    );
+  }
+});
+
+test('an unrelated do-not-stop sentence is not reported', () => {
+  assert.deepEqual(
+    findStaleRemoteRelayPrivacyBypassClaims(
+      'Cubby does not stop you from deleting a clip.'
+    ),
+    []
+  );
+});
+
+test('live privacy.html and Settings copy do not claim relay bypasses skip gates', async () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  for (const relative of [
+    'product_pages/privacy.html',
+    'frontend/src/components/SettingsPanel.tsx',
+  ]) {
+    const source = await readFile(path.join(root, relative), 'utf8');
+    assert.deepEqual(
+      findStaleRemoteRelayPrivacyBypassClaims(source),
+      [],
+      relative
+    );
   }
 });

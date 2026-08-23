@@ -1,6 +1,5 @@
 import { X, AlertTriangle } from 'lucide-react';
 import { useEffect, useId } from 'react';
-import { useTranslation } from 'react-i18next';
 import { useModalDialog } from '../hooks/useModalDialog';
 
 interface ConfirmDialogProps {
@@ -26,7 +25,6 @@ export function ConfirmDialog({
   variant = 'danger',
   isBusy = false,
 }: ConfirmDialogProps) {
-  const { t } = useTranslation();
   const titleId = useId();
   const descriptionId = useId();
   // Escape is handled below (it has to respect isBusy), so the hook only
@@ -74,7 +72,7 @@ export function ConfirmDialog({
           <button
             onClick={onCancel}
             disabled={isBusy}
-            aria-label={t('common.cancel')}
+            aria-label={'Cancel'}
             className="text-muted-foreground hover:text-foreground disabled:opacity-40"
           >
             <X size={18} />
@@ -92,7 +90,7 @@ export function ConfirmDialog({
             autoFocus
             className="rounded-md border border-input bg-transparent px-4 py-2 text-sm font-medium hover:bg-accent hover:text-accent-foreground disabled:opacity-40"
           >
-            {cancelText || t('common.cancel')}
+            {cancelText || 'Cancel'}
           </button>
           <button
             onClick={onConfirm}
@@ -103,7 +101,7 @@ export function ConfirmDialog({
                 : 'bg-primary hover:bg-primary/90'
             }`}
           >
-            {confirmText || t('common.confirm')}
+            {confirmText || 'Confirm'}
           </button>
         </div>
       </div>

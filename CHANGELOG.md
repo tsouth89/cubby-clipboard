@@ -9,11 +9,13 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 
 ### Fixed
 - Auto-paste now re-checks that the remembered target still has focus after the settle delay, and leaves the clip on the clipboard instead of synthesizing Ctrl+V if focus moved (SBS-1066)
+- Release `submit-store` now waits for `validate` before `msstore submission publish`, matching the GitHub undraft gate so a red or still-running cargo test / clippy / `release:check` cannot reach Partner Center (SBS-1068)
 - History bulk Copy now includes recognized text from selected images, including images whose full-resolution original has expired
 - Encrypted backup exports now flush a complete sibling temp file before replacing an existing backup, preserving the prior file on write or install failure (#189)
 - Flood-dropping a queued self-paste echo no longer leaves the ignore hash swallowing the next real copy of that content (SBS-1039)
 - Recover a dest-gone rolling `cubby.db.bak` replace on FAT/exFAT instead of deleting the only remaining copy (SBS-1051)
 - Settings and the support FAQ no longer say the configured hotkey opens Cubby in remote sessions unless Replace Windows clipboard shortcut is on (SBS-1049)
+- Privacy and Settings no longer say skip-sensitive and skip-likely-secrets leave remote-session relay running (SBS-1071)
 - CI now publishes a stable `shipped-windows` check that fails when any SBS-779 `Check <arch> <features>` cargo-check fails. Branch protection on main still requires only `test` until a repo admin adds that name; the docs no longer claim the matrix legs already block merge (SBS-1025)
 
 ## v1.3.3

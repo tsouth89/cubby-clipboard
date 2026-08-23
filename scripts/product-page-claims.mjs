@@ -233,6 +233,56 @@ export function findUnqualifiedRemoteHotkeyClaims(source) {
 }
 
 /**
+ * SBS-1071: skip_sensitive and skip_likely_secrets return before
+ * relay_remote_capture (SBS-1001). Privacy and Settings once said those
+ * gates do not stop remote relay, that the relay re-announces "anything,"
+ * and that it skips a copy only for ignored viewer processes.
+ *
+ * A sentence is a claim when it is about remote-session relay and either
+ * says the skip-sensitive / skip-likely-secrets settings do not stop it,
+ * re-announces "anything copied," or skips a copy only for the ignored list.
+ * Accurate copy that says those settings also stop the relay is not a claim.
+ */
+const RELAY_OR_REANNOUNCE = /\b(?:relay(?:s|ed|ing)?|re-?announce(?:s|d)?)\b/i;
+const SENSITIVE_OR_SECRETS =
+  /\b(?:sensitive(?:[\s-]content)?|skip[\s-]likely[\s-]secrets|likely[\s-]secrets?)\b/i;
+const DO_NOT_STOP =
+  /\b(?:do\s+not|does\s+not|don[’']t|doesn[’']t|never)\s+stops?\b/i;
+const ANYTHING_COPIED = /\banything\s+copied\b/i;
+const ONLY_WHEN_IGNORED =
+  /\bskips?\s+a\s+copy\s+only\s+when\b/i;
+
+export function findStaleRemoteRelayPrivacyBypassClaims(source) {
+  const claims = [];
+  const pieces = segments(source);
+  for (let i = 0; i < pieces.length; i++) {
+    const segment = pieces[i];
+    const previous = i > 0 ? pieces[i - 1] : '';
+    // The original privacy lie used "do not stop it" after a relay sentence.
+    const aboutRelay =
+      REMOTE_SESSION.test(segment) ||
+      RELAY_OR_REANNOUNCE.test(segment) ||
+      REMOTE_SESSION.test(previous) ||
+      RELAY_OR_REANNOUNCE.test(previous);
+    if (!aboutRelay) {
+      continue;
+    }
+    if (SENSITIVE_OR_SECRETS.test(segment) && DO_NOT_STOP.test(segment)) {
+      claims.push(segment);
+      continue;
+    }
+    if (ANYTHING_COPIED.test(segment) && RELAY_OR_REANNOUNCE.test(segment)) {
+      claims.push(segment);
+      continue;
+    }
+    if (ONLY_WHEN_IGNORED.test(segment) && /\bignored\s+list\b/i.test(segment)) {
+      claims.push(segment);
+    }
+  }
+  return claims;
+}
+
+/**
  * Weaker scan used by the release check: a sentence that says files are
  * retained or supported without also negating that. Broader than
  * `findFileListHistoryClaims` so "Cubby stores files" still fails even when

@@ -3,9 +3,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { checkPrivilegedActionPins } from '../.github/scripts/check-privileged-action-pins.mjs';
+import { parseTopLevelJobs } from '../.github/scripts/check-shipped-windows-ci.mjs';
 import {
   findFileListHistoryClaims,
   findStaleBackupOmissionClaims,
+  findStaleRemoteRelayPrivacyBypassClaims,
   findUnqualifiedRemoteHotkeyClaims,
   findWeakerFileRetentionClaim,
 } from './product-page-claims.mjs';
@@ -43,7 +45,6 @@ const [
   privacyPageDoc,
   supportPageDoc,
   settingsPanelSource,
-  settingsLocaleText,
   publishStoreWorkflow,
   validateStoreWorkflow,
   verifyInstallerSignature,
@@ -69,7 +70,6 @@ const [
   read('product_pages/privacy.html'),
   read('product_pages/support.html'),
   read('frontend/src/components/SettingsPanel.tsx'),
-  read('frontend/src/i18n/locales/en.json'),
   read('.github/workflows/publish-store-packages.yml'),
   read('.github/workflows/validate-store-submission.yml'),
   read('scripts/verify-installer-signature.ps1'),
@@ -121,6 +121,40 @@ if (!releaseWorkflow.includes('--config src-tauri/tauri.store.conf.json')) {
 
 if (!releaseWorkflow.includes('--features app-store')) {
   throw new Error('Microsoft Store builds must disable Cubby self-update and autostart integration');
+}
+
+// SBS-1068: submit-store runs `msstore submission publish`. It must wait for
+// validate the same way publish-release waits before undrafting GitHub. A
+// red or still-running cargo test / clippy / release:check must not reach
+// Partner Center. create-release stays independent of validate so the draft
+// and installer builds can still run in parallel.
+function jobNeeds(job, id) {
+  const body = job.lines.join('\n');
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return (
+    new RegExp(`^\\s+needs:\\s*${escaped}\\s*$`, 'm').test(body) ||
+    new RegExp(`^\\s+needs:\\s*\\[[^\\]]*\\b${escaped}\\b`, 'm').test(body)
+  );
+}
+
+const releaseJobs = parseTopLevelJobs(releaseWorkflow);
+const submitStoreJob = releaseJobs.find((job) => job.id === 'submit-store');
+if (!submitStoreJob) {
+  throw new Error('Release workflow is missing the submit-store job');
+}
+if (!jobNeeds(submitStoreJob, 'validate')) {
+  throw new Error(
+    'submit-store must need validate so Partner Center cannot receive an unvalidated build'
+  );
+}
+const createReleaseJob = releaseJobs.find((job) => job.id === 'create-release');
+if (!createReleaseJob) {
+  throw new Error('Release workflow is missing the create-release job');
+}
+if (jobNeeds(createReleaseJob, 'validate')) {
+  throw new Error(
+    'create-release must stay independent of validate so the draft release can be created in parallel'
+  );
 }
 
 // SBS-777: a signed outer Store installer is not enough. Publication and
@@ -248,7 +282,7 @@ const userFacingHistoryDocs = [
   ['product_pages/start.html', startPageDoc],
   ['product_pages/terms.html', termsPageDoc],
   ['docs/press-kit/description.txt', pressKitDoc],
-  ['frontend/src/i18n/locales/en.json', settingsLocaleText],
+  ['frontend/src/components/SettingsPanel.tsx', settingsPanelSource],
 ];
 
 for (const [docName, doc] of userFacingHistoryDocs) {
@@ -300,16 +334,28 @@ for (const [docName, doc] of userFacingHistoryDocs) {
   }
 }
 
+// SBS-1071: skip_sensitive and skip_likely_secrets return before
+// relay_remote_capture. Privacy and Settings once said those gates do
+// not stop remote relay, and that the relay re-announces "anything."
+for (const [docName, doc] of userFacingHistoryDocs) {
+  const [claim] = findStaleRemoteRelayPrivacyBypassClaims(doc);
+  if (claim) {
+    throw new Error(
+      `${docName} still claims skip-sensitive or skip-likely-secrets leave remote relay running: ${claim}`
+    );
+  }
+}
+
 // The hint is only true while replacement is on. An unconditional render
 // next to Remote session paste restated the Settings lie when the toggle
 // was off.
 if (
-  !/settings\.replace_win_v\s*&&[\s\S]{0,250}settings\.remoteHotkeyHint/.test(
+  !/settings\.replace_win_v\s*&&[\s\S]{0,500}Replace Windows clipboard shortcut also lets/.test(
     settingsPanelSource
   )
 ) {
   throw new Error(
-    'SettingsPanel must render settings.remoteHotkeyHint only when replace_win_v is on'
+    'SettingsPanel must render the remote hotkey hint only when replace_win_v is on'
   );
 }
 
@@ -327,6 +373,36 @@ if (!/\bHTML\b/.test(backupSection) || !/\bRTF\b/.test(backupSection)) {
 if (!/\bfull[\s-]*resolution\b/i.test(backupSection)) {
   throw new Error(
     'product_pages/privacy.html must say encrypted backups include live full-resolution originals'
+  );
+}
+
+// SBS-1071: the remote-session section must keep saying the skip
+// gates stop relay, not only that ignored viewer processes do.
+const remoteSection = privacyPageDoc.match(
+  /<h2>Remote-session clipboard<\/h2>\s*<p>([\s\S]*?)<\/p>/
+)?.[1];
+if (!remoteSection) {
+  throw new Error('product_pages/privacy.html must keep a Remote-session clipboard section');
+}
+if (
+  !/\bsensitive\b/i.test(remoteSection) ||
+  !/\blikely[\s-]secrets?\b/i.test(remoteSection)
+) {
+  throw new Error(
+    'product_pages/privacy.html must say skip-sensitive and skip-likely-secrets stop remote relay'
+  );
+}
+const relayDesc = settingsPanelSource.match(
+  /Re-announce[\s\S]*?Ctrl\+V in another\./
+)?.[0];
+if (!relayDesc) {
+  throw new Error(
+    'Could not read the remote clipboard relay description in SettingsPanel.tsx'
+  );
+}
+if (!/\bsensitive\b/i.test(relayDesc) || !/\blikely secrets\b/i.test(relayDesc)) {
+  throw new Error(
+    'SettingsPanel remote clipboard relay description must say sensitive and likely-secret skips block relay'
   );
 }
 
@@ -527,14 +603,10 @@ if (defaultSkipLikelySecrets === 'true' && (!securitySaysOn || securitySaysOff))
   );
 }
 
-const skipLikelySecretsDesc = JSON.parse(settingsLocaleText).settings?.skipLikelySecretsDesc;
-if (typeof skipLikelySecretsDesc !== 'string') {
-  throw new Error('Settings locale must describe skipLikelySecrets');
-}
-if (defaultSkipLikelySecrets === 'false' && !saysDefaultOff(skipLikelySecretsDesc)) {
+if (defaultSkipLikelySecrets === 'false' && !saysDefaultOff(settingsPanelSource)) {
   throw new Error('Settings copy must say secret heuristics are off by default');
 }
-if (defaultSkipLikelySecrets === 'true' && !/on by default/i.test(skipLikelySecretsDesc)) {
+if (defaultSkipLikelySecrets === 'true' && !/on by default/i.test(settingsPanelSource)) {
   throw new Error('Settings copy must say secret heuristics are on by default');
 }
 
