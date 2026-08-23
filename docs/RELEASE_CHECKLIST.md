@@ -54,7 +54,7 @@ Pick deliberately. They are not the same thing.
 | Tag | `draft-<sha>` | `v<version>`, must match all four version files |
 | GitHub release | draft prerelease, stays draft | published automatically at the end |
 | Release notes | a fixed "test build" line | awk-extracted from the `## v<version>` CHANGELOG section, which fails the build if missing |
-| `latest.json` | not assembled | assembled, so installed users auto-update |
+| `latest.json` | attached to the private draft for verification only | assembled and published, so installed users auto-update |
 | Microsoft Store | skipped | submitted **and** published when the flag is on |
 | Cleanup | deletes previous test-build drafts on the next dispatch | none; a leftover test draft has to be deleted by hand |
 
