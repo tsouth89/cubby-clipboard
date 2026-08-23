@@ -754,7 +754,7 @@ fn persist_backup_file_with(
     // gives us. A failure after the destination entry is gone leaves the temp
     // holding the only copy of the bundle, so deleting it here would destroy
     // both the old backup and the new one. Try to put it in place instead.
-    if !dest.exists() && temp.exists() && std::fs::rename(&temp, dest).is_ok() {
+    if crate::settings_load::recover_dest_gone_replace(&temp, dest) {
         log::warn!(
             "BACKUP: replacing the destination failed ({error}); the new bundle was renamed into place instead"
         );
