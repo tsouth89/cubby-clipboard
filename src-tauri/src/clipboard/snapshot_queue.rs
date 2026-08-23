@@ -13,6 +13,12 @@
 //! - A single event larger than the byte budget is still accepted after the
 //!   queue is emptied: we never refuse the current clipboard, we refuse an
 //!   unbounded backlog.
+//! - Once that oversized event is queued, a later event that itself fits
+//!   the byte budget (a 0-byte clear, a small text copy) does not evict it.
+//!   The oversize capture stays until the consumer drains it or a later
+//!   oversized event replaces it. Small follow-ups may ride along until
+//!   the count cap; the byte budget still bounds a flood of normal-sized
+//!   payloads.
 //! - A 100-copy text burst (the reliability contract) stays under both
 //!   budgets, so capture order is preserved under normal load.
 //!
@@ -63,9 +69,18 @@ pub(crate) fn enqueue<T: SizedPayload>(
     loop {
         let count_ok = queue.len() < capacity;
         // An empty queue accepts even an oversized item so one screenshot
-        // cannot be refused. A non-empty queue evicts until the new item
-        // fits the byte budget.
-        let bytes_ok = queue.is_empty() || queued_bytes.saturating_add(item_bytes) <= max_bytes;
+        // cannot be refused. A later small event must not evict that
+        // already-accepted capture just because the queue is over budget;
+        // a later oversized event still replaces it (newest clipboard wins).
+        let bytes_ok = if queue.is_empty() {
+            true
+        } else if item_bytes > max_bytes {
+            false
+        } else if *queued_bytes > max_bytes {
+            true
+        } else {
+            queued_bytes.saturating_add(item_bytes) <= max_bytes
+        };
         if count_ok && bytes_ok {
             break;
         }
@@ -251,6 +266,69 @@ mod tests {
         );
         assert_eq!(ids(&queue), vec![3]);
         assert_eq!(bytes, 50);
+    }
+
+    /// Fail-without-fix: after an over-budget snapshot is accepted into an
+    /// empty queue, the next 0-byte/small event must not pop it just because
+    /// `queued_bytes` is already over the budget. A later oversized capture
+    /// may still replace it.
+    #[test]
+    fn a_small_follow_up_does_not_evict_an_accepted_oversize_snapshot() {
+        let mut queue = VecDeque::new();
+        let mut bytes = 0usize;
+        assert_eq!(
+            enqueue(&mut queue, &mut bytes, fake(1, 50), 8, 20),
+            EnqueueOutcome::Queued
+        );
+        assert_eq!(ids(&queue), vec![1]);
+        assert_eq!(bytes, 50);
+
+        assert_eq!(
+            enqueue(&mut queue, &mut bytes, fake(2, 0), 8, 20),
+            EnqueueOutcome::Queued
+        );
+        assert_eq!(ids(&queue), vec![1, 2]);
+        assert_eq!(queue.front().map(|item| item.id), Some(1));
+        assert_eq!(bytes, 50);
+
+        assert_eq!(
+            enqueue(&mut queue, &mut bytes, fake(3, 1), 8, 20),
+            EnqueueOutcome::Queued
+        );
+        assert_eq!(ids(&queue), vec![1, 2, 3]);
+        assert_eq!(bytes, 51);
+
+        let outcome = enqueue(&mut queue, &mut bytes, fake(4, 60), 8, 20);
+        assert_eq!(
+            outcome,
+            EnqueueOutcome::QueuedAfterDrop {
+                dropped: 3,
+                dropped_bytes: 51
+            }
+        );
+        assert_eq!(ids(&queue), vec![4]);
+        assert_eq!(bytes, 60);
+    }
+
+    #[test]
+    fn small_follow_ups_after_oversize_still_respect_the_count_cap() {
+        let mut queue = VecDeque::new();
+        let mut bytes = 0usize;
+        enqueue(&mut queue, &mut bytes, fake(0, 50), 3, 20);
+        enqueue(&mut queue, &mut bytes, fake(1, 1), 3, 20);
+        enqueue(&mut queue, &mut bytes, fake(2, 1), 3, 20);
+        assert_eq!(ids(&queue), vec![0, 1, 2]);
+        let outcome = enqueue(&mut queue, &mut bytes, fake(3, 1), 3, 20);
+        assert_eq!(
+            outcome,
+            EnqueueOutcome::QueuedAfterDrop {
+                dropped: 1,
+                dropped_bytes: 50
+            }
+        );
+        assert_eq!(ids(&queue), vec![1, 2, 3]);
+        assert_eq!(queue.len(), 3);
+        assert_eq!(bytes, 3);
     }
 
     #[test]
