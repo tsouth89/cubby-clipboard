@@ -247,7 +247,8 @@ pub fn get_clipboard_capture_status() -> ClipboardCaptureStatus {
 pub fn init(app: &AppHandle, db: Arc<Database>) {
     crate::ocr_queue::init(app.clone(), db.clone());
     // SBS-1032: snapshots carry full PNG/HTML/RTF bytes. The queue is
-    // bounded (drop-oldest); see `snapshot_queue` for the policy.
+    // bounded (drop-oldest, Cleared retained — SBS-1045); see
+    // `snapshot_queue` for the policy.
     let (event_tx, event_rx) = snapshot_channel::channel();
     let app_for_consumer = app.clone();
     let db_for_consumer = db.clone();
@@ -352,6 +353,14 @@ impl SizedPayload for ClipboardListenerEvent {
             Self::Cleared { .. } => 0,
             Self::Content(snapshot) => snapshot.payload_bytes(),
         }
+    }
+
+    fn retain_on_flood(&self) -> bool {
+        matches!(self, Self::Cleared { .. })
+    }
+
+    fn replaces_queued(&self, older: &Self) -> bool {
+        matches!((self, older), (Self::Cleared { .. }, Self::Cleared { .. }))
     }
 }
 
@@ -3545,10 +3554,69 @@ mod tests {
             ignore: None,
         });
         assert_eq!(event.payload_bytes(), 1000 + 64 + 200 + 50);
+        assert!(!event.retain_on_flood());
         assert_eq!(
             ClipboardListenerEvent::Cleared { sequence: 2 }.payload_bytes(),
             0
         );
+        assert!(ClipboardListenerEvent::Cleared { sequence: 2 }.retain_on_flood());
+        assert!(ClipboardListenerEvent::Cleared { sequence: 3 }
+            .replaces_queued(&ClipboardListenerEvent::Cleared { sequence: 2 }));
+        assert!(!event.replaces_queued(&ClipboardListenerEvent::Cleared { sequence: 2 }));
+    }
+
+    /// SBS-1045: a 0-byte `Cleared` used to be the first byte-budget victim.
+    /// The real event type must stay retained so forget-on-clear still runs.
+    #[test]
+    fn a_queued_cleared_survives_a_content_flood() {
+        use super::snapshot_queue::{enqueue, EnqueueOutcome};
+        use std::collections::VecDeque;
+
+        let cleared = ClipboardListenerEvent::Cleared { sequence: 7 };
+        let content = |sequence: u32, bytes: usize| {
+            ClipboardListenerEvent::Content(ClipboardSnapshot {
+                sequence,
+                source_app_identity: None,
+                content: CapturedContent::Text {
+                    content: vec![b'x'; bytes],
+                    preview: String::new(),
+                    hash: String::new(),
+                },
+                formats: Vec::new(),
+                materialize_ms: 0,
+                sensitive: SensitiveMarkers::default(),
+                ignore: None,
+            })
+        };
+
+        let mut queue = VecDeque::new();
+        let mut queued_bytes = 0usize;
+        assert!(matches!(
+            enqueue(&mut queue, &mut queued_bytes, cleared, 2, 20),
+            EnqueueOutcome::Queued
+        ));
+        assert!(matches!(
+            enqueue(&mut queue, &mut queued_bytes, content(8, 8), 2, 20),
+            EnqueueOutcome::Queued
+        ));
+        let outcome = enqueue(&mut queue, &mut queued_bytes, content(9, 8), 2, 20);
+        assert!(matches!(
+            outcome,
+            EnqueueOutcome::QueuedAfterDrop {
+                dropped: 1,
+                dropped_bytes: 8,
+                evicted,
+            } if evicted.len() == 1
+        ));
+        assert!(matches!(
+            queue.front(),
+            Some(ClipboardListenerEvent::Cleared { sequence: 7 })
+        ));
+        assert!(matches!(
+            queue.back(),
+            Some(ClipboardListenerEvent::Content(snapshot)) if snapshot.sequence == 9
+        ));
+        assert_eq!(queue.len(), 2);
     }
 
     #[test]
