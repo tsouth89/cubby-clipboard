@@ -284,6 +284,41 @@ test('anaphoric archive omission is a claim', () => {
   assert.match(claims[0], /does not hold the HTML and RTF/);
 });
 
+test('negated omit verbs are not claims', () => {
+  assert.deepEqual(
+    findStaleBackupOmissionClaims('The archive does not omit HTML and RTF copies.'),
+    []
+  );
+  assert.deepEqual(
+    findStaleBackupOmissionClaims(
+      'Encrypted backups never omit the full-resolution originals.'
+    ),
+    []
+  );
+});
+
+test('export restatements of the omission are claims', () => {
+  assert.equal(
+    findStaleBackupOmissionClaims('The export omits HTML and RTF copies of a clip.')
+      .length,
+    1
+  );
+  assert.equal(
+    findStaleBackupOmissionClaims(
+      'Exported archives do not include the full-resolution originals.'
+    ).length,
+    1
+  );
+});
+
+test('anaphoric export omission is a claim', () => {
+  const source =
+    'Export writes a local encrypted file. It does not hold the HTML and RTF copies of a clip or the full-resolution image files.';
+  const claims = findStaleBackupOmissionClaims(source);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0], /does not hold the HTML and RTF/);
+});
+
 test('live privacy.html does not claim backups omit formats', async () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const source = await readFile(path.join(root, 'product_pages/privacy.html'), 'utf8');

@@ -137,7 +137,8 @@ const HTML_AND_RTF = /\bHTML\b/i;
 const RTF = /\bRTF\b/i;
 const FULL_RESOLUTION = /\bfull[\s-]*resolution\b/i;
 /** Current or previous sentence names the archive so anaphoric "It" still counts. */
-const BACKUP_CONTEXT = /\b(?:archives?|backups?|import(?:s|ed|ing)?)\b/i;
+const BACKUP_CONTEXT =
+  /\b(?:archives?|backups?|import(?:s|ed|ing)?|export(?:s|ed|ing)?)\b/i;
 
 export function findStaleBackupOmissionClaims(source) {
   const claims = [];
@@ -157,13 +158,19 @@ export function findStaleBackupOmissionClaims(source) {
 
     const omit = segment.match(OMIT_HOLD);
     if (omit) {
-      const after = segment.slice(omit.index + omit[0].length);
-      if (
-        (mentionsFormats && HTML_AND_RTF.test(after) && RTF.test(after)) ||
-        (mentionsFullRes && FULL_RESOLUTION.test(after))
-      ) {
-        claims.push(segment);
-        continue;
+      const before = segment.slice(0, omit.index);
+      const negatedOmit =
+        /^omit(?:s|ted)?$/i.test(omit[0]) &&
+        lastMatchIndex(NEGATION, before.slice(lastClauseStart(before))) !== -1;
+      if (!negatedOmit) {
+        const after = segment.slice(omit.index + omit[0].length);
+        if (
+          (mentionsFormats && HTML_AND_RTF.test(after) && RTF.test(after)) ||
+          (mentionsFullRes && FULL_RESOLUTION.test(after))
+        ) {
+          claims.push(segment);
+          continue;
+        }
       }
     }
 
