@@ -1,11 +1,14 @@
 use crate::crypto::CryptoManager;
+use crate::settings_load::recover_dest_gone_replace;
 use std::path::{Path, PathBuf};
 
 /// A full-resolution original that is already written and encrypted on disk as
 /// `{uuid}.cubby.tmp` but has not yet taken the place of the live
 /// `{uuid}.cubby`. Nothing observes the new bytes until `commit` runs, so every
 /// early return between staging and commit leaves the previous original
-/// byte-identical. Dropping the handle without committing removes the temp file.
+/// byte-identical. Dropping the handle without committing removes the temp file
+/// unless a dest-gone replace left that temp as the only remaining copy
+/// (SBS-1030).
 pub(crate) struct StagedImageFile {
     temp_path: PathBuf,
     final_path: PathBuf,
@@ -21,8 +24,36 @@ impl StagedImageFile {
     }
 
     /// Replace the live original with the staged bytes.
-    pub(crate) fn commit(mut self) -> Result<String, String> {
-        replace_image_file_atomically(&self.temp_path, &self.final_path)?;
+    pub(crate) fn commit(self) -> Result<String, String> {
+        self.commit_with(replace_image_file_atomically)
+    }
+
+    /// `replace` is the real `MoveFileExW`/`rename` in production. Tests inject
+    /// a FAT dest-gone stand-in that deletes dest and then fails, which is the
+    /// mid-replace state NTFS never produces.
+    fn commit_with(
+        mut self,
+        replace: fn(&Path, &Path) -> Result<(), String>,
+    ) -> Result<String, String> {
+        if let Err(error) = replace(&self.temp_path, &self.final_path) {
+            // On exFAT/FAT, replace is delete-then-rename. A failure after dest
+            // is gone leaves the temp as the only remaining original, so Drop
+            // deleting it would destroy both copies (SBS-1030). Same dest-gone
+            // fallback as settings.json and `.cubbybak` persist.
+            if recover_dest_gone_replace(&self.temp_path, &self.final_path) {
+                log::warn!(
+                    "IMAGE: replacing {} failed ({error}); the new original was renamed into place instead",
+                    self.final_path.display()
+                );
+            } else if self.final_path.is_file() {
+                return Err(error);
+            } else {
+                // Dest is gone and the recovery rename also failed. Leave the
+                // temp so Drop cannot destroy the only remaining bytes.
+                self.committed = true;
+                return Err(error);
+            }
+        }
         self.committed = true;
         Ok(self.final_path.to_string_lossy().to_string())
     }
@@ -297,6 +328,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(&image_dir);
     }
 
+    /// SBS-1030: FAT dest-gone mid-replace leaves the temp as the only copy.
+    /// Recovering it into place is success; Drop must not delete those bytes.
+    #[test]
+    fn dest_gone_mid_replace_puts_the_staged_original_in_place() {
+        let crypto = CryptoManager::ephemeral();
+        let image_dir =
+            std::env::temp_dir().join(format!("cubby-image-dest-gone-{}", uuid::Uuid::new_v4()));
+        let uuid = "dest-gone-live";
+        let live_path =
+            persist_full_image_file(&crypto, &image_dir, uuid, b"previous-full-res").unwrap();
+        let temp_path = image_dir.join(format!("{uuid}.cubby.tmp"));
+
+        let staged = stage_full_image_file(&crypto, &image_dir, uuid, b"new-full-res").unwrap();
+        let committed = staged.commit_with(simulate_fat_dest_gone_replace);
+        assert!(
+            committed.is_ok(),
+            "dest-gone must recover the staged original, not fail the commit: {committed:?}"
+        );
+        assert_eq!(committed.unwrap(), live_path);
+        assert_eq!(
+            read_original(&crypto, &live_path),
+            b"new-full-res",
+            "the live path must hold the staged bytes after dest-gone recovery"
+        );
+        assert!(
+            !temp_path.exists(),
+            "recovery consumes the temp so Drop has nothing to delete"
+        );
+
+        let _ = std::fs::remove_dir_all(&image_dir);
+    }
+
+    /// A replace that fails while dest still exists must keep the previous
+    /// original. Dest-gone recovery must not fire and overwrite it.
+    #[test]
+    fn a_failed_replace_that_left_dest_keeps_the_previous_original() {
+        let crypto = CryptoManager::ephemeral();
+        let image_dir = std::env::temp_dir().join(format!(
+            "cubby-image-dest-survived-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let uuid = "dest-survived";
+        let live_path =
+            persist_full_image_file(&crypto, &image_dir, uuid, b"previous-full-res").unwrap();
+        let temp_path = image_dir.join(format!("{uuid}.cubby.tmp"));
+
+        let staged = stage_full_image_file(&crypto, &image_dir, uuid, b"new-full-res").unwrap();
+        let committed = staged.commit_with(replace_that_leaves_dest);
+        assert!(
+            committed.is_err(),
+            "a dest-still-there failure is still an error"
+        );
+        assert_eq!(read_original(&crypto, &live_path), b"previous-full-res");
+        assert!(
+            !temp_path.exists(),
+            "Drop must still clean up the temp when dest survived"
+        );
+
+        let _ = std::fs::remove_dir_all(&image_dir);
+    }
+
     async fn recapture_pool() -> sqlx::SqlitePool {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -429,6 +521,31 @@ mod tests {
         .await
         .unwrap();
         (content, preview)
+    }
+
+    /// FAT/exFAT `MoveFileExW(REPLACE_EXISTING)` is delete-then-rename. This
+    /// stand-in deletes dest and then fails, leaving the temp as the only copy.
+    fn simulate_fat_dest_gone_replace(
+        source: &std::path::Path,
+        dest: &std::path::Path,
+    ) -> Result<(), String> {
+        let _ = std::fs::remove_file(dest);
+        assert!(
+            source.exists(),
+            "the staged temp must still be the only remaining original"
+        );
+        Err("simulated FAT dest-gone replace failure".to_string())
+    }
+
+    fn replace_that_leaves_dest(
+        _source: &std::path::Path,
+        dest: &std::path::Path,
+    ) -> Result<(), String> {
+        assert!(
+            dest.exists(),
+            "this stand-in models a replace that failed before dest was deleted"
+        );
+        Err("simulated replace failure that left dest in place".to_string())
     }
 
     /// Staging succeeded; delete the temp so `StagedImageFile::commit` cannot
