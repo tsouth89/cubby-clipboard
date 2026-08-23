@@ -156,6 +156,56 @@ pub fn should_auto_paste_with_mode(strategy: PasteStrategy, remote_paste_mode: &
     strategy != PasteStrategy::NinjaRemote || remote_paste_mode == "paste_as_keystrokes"
 }
 
+/// True when the remembered paste target is still the foreground window.
+/// Read-only: a click-away during the settle delay must not steal focus back.
+#[cfg(target_os = "windows")]
+pub fn previous_target_has_focus() -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsWindow};
+
+    let value = PREVIOUS_FOREGROUND_WINDOW.load(Ordering::SeqCst);
+    if value == 0 {
+        return false;
+    }
+    let target = HWND(value as _);
+    unsafe { IsWindow(Some(target)).as_bool() && GetForegroundWindow() == target }
+}
+
+/// Sleep for the strategy's clipboard settle window, then synthesize Ctrl+V
+/// only if the remembered target still has focus (SBS-1066).
+#[cfg(target_os = "windows")]
+pub fn send_settled_paste_input(strategy: PasteStrategy) -> Option<u32> {
+    crate::paste_after_settle::send_paste_after_settle(
+        || std::thread::sleep(paste_settle_delay(strategy)),
+        previous_target_has_focus,
+        || send_paste_input(strategy),
+    )
+}
+
+/// After the flyout hides: restore the remembered target, wait for settle,
+/// then send Ctrl+V only if that target still has focus. Matches the
+/// pre-sleep restore abort: the clip stays on the clipboard for a manual
+/// paste instead of landing in whichever window stole focus during the delay.
+#[cfg(target_os = "windows")]
+pub fn complete_auto_paste_after_hide(remote_paste_mode: &str) {
+    let strategy = previous_paste_strategy();
+    if !restore_previous_foreground_window() {
+        // Synthesizing Ctrl+V now would paste into whatever window happens
+        // to hold focus, which is not the one the user chose.
+        log::warn!("PASTE: focus was not restored; clipboard is ready for a manual Ctrl+V");
+        return;
+    }
+    if !should_auto_paste_with_mode(strategy, remote_paste_mode) {
+        log::info!("PASTE: clipboard is ready; waiting for physical Ctrl+V");
+        return;
+    }
+    if send_settled_paste_input(strategy).is_none() {
+        log::warn!(
+            "PASTE: target lost focus during settle delay; clipboard is ready for a manual Ctrl+V"
+        );
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub fn restore_previous_foreground_window() -> bool {
     use windows::Win32::Foundation::HWND;
@@ -487,6 +537,33 @@ mod tests {
 
         assert_eq!(context.target_kind, "ninja");
         assert_eq!(context.remote_paste_mode, "copy_then_paste");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn previous_target_has_focus_tracks_the_remembered_hwnd() {
+        use super::previous_target_has_focus;
+        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+        let foreground = unsafe { GetForegroundWindow() };
+        let hwnd = foreground.0 as isize;
+        if hwnd == 0 {
+            // No foreground window in this session. CI runners usually have
+            // one; this branch documents the live-pin gap when they do not.
+            set_previous_target(1, PasteStrategy::Standard);
+            assert!(!previous_target_has_focus());
+            return;
+        }
+
+        set_previous_target(hwnd, PasteStrategy::Standard);
+        assert!(
+            previous_target_has_focus(),
+            "the remembered foreground window should still have focus"
+        );
+        set_previous_target(0, PasteStrategy::Standard);
+        assert!(!previous_target_has_focus());
+        set_previous_target(isize::MAX, PasteStrategy::Standard);
+        assert!(!previous_target_has_focus());
     }
 
     #[cfg(target_os = "windows")]

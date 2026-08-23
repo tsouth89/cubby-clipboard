@@ -119,14 +119,15 @@ fn main() {
                 "iteration {iteration}: target focus was not restored"
             );
             SetFocus(Some(edit)).expect("restore edit focus");
-            thread::sleep(cubby::paste_engine::paste_settle_delay(
+            match cubby::paste_engine::send_settled_paste_input(
                 cubby::paste_engine::PasteStrategy::Standard,
-            ));
-            assert_eq!(
-                cubby::paste_engine::send_paste_input(cubby::paste_engine::PasteStrategy::Standard),
-                4,
-                "iteration {iteration}: SendInput did not accept all events"
-            );
+            ) {
+                Some(4) => {}
+                Some(sent) => {
+                    panic!("iteration {iteration}: SendInput did not accept all events ({sent})")
+                }
+                None => panic!("iteration {iteration}: target lost focus during settle delay"),
+            }
 
             for _ in 0..20 {
                 pump_messages();
@@ -163,16 +164,17 @@ fn main() {
                 "remote iteration {iteration}: target focus was not restored"
             );
             SetFocus(Some(edit)).expect("restore edit focus");
-            thread::sleep(cubby::paste_engine::paste_settle_delay(
+            match cubby::paste_engine::send_settled_paste_input(
                 cubby::paste_engine::PasteStrategy::RemoteSession,
-            ));
-            assert_eq!(
-                cubby::paste_engine::send_paste_input(
-                    cubby::paste_engine::PasteStrategy::RemoteSession,
+            ) {
+                Some(4) => {}
+                Some(sent) => panic!(
+                    "remote iteration {iteration}: SendInput did not accept all events ({sent})"
                 ),
-                4,
-                "remote iteration {iteration}: SendInput did not accept all events"
-            );
+                None => {
+                    panic!("remote iteration {iteration}: target lost focus during settle delay")
+                }
+            }
             for _ in 0..20 {
                 pump_messages();
                 thread::sleep(Duration::from_millis(5));

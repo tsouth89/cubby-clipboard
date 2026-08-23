@@ -8,6 +8,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Paste and copy no longer emit the full decrypted clip body to the WebView on a `clipboard-write` event that has no frontend listener (SBS-1042)
 
 ### Fixed
+- Auto-paste now re-checks that the remembered target still has focus after the settle delay, and leaves the clip on the clipboard instead of synthesizing Ctrl+V if focus moved (SBS-1066)
 - History bulk Copy now includes recognized text from selected images, including images whose full-resolution original has expired
 - Encrypted backup exports now flush a complete sibling temp file before replacing an existing backup, preserving the prior file on write or install failure (#189)
 - Flood-dropping a queued self-paste echo no longer leaves the ignore hash swallowing the next real copy of that content (SBS-1039)

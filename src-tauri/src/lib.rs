@@ -44,6 +44,7 @@ mod managed_image;
 mod models;
 mod ocr;
 mod ocr_queue;
+mod paste_after_settle;
 pub mod paste_engine;
 mod path_grant;
 // SBS-219 budgets. Compiled for tests (which measure them) and for the
