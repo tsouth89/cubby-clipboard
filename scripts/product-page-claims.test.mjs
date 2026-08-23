@@ -239,6 +239,51 @@ test('an unrelated does-not-include sentence is not reported', () => {
   );
 });
 
+test('omit-verb restatements about the archive are claims', () => {
+  assert.equal(
+    findStaleBackupOmissionClaims('The archive omits HTML and RTF copies').length,
+    1
+  );
+  assert.equal(
+    findStaleBackupOmissionClaims('The archive omits HTML and RTF copies of a clip.').length,
+    1
+  );
+  assert.equal(
+    findStaleBackupOmissionClaims(
+      'Encrypted backups omitted the full-resolution originals.'
+    ).length,
+    1
+  );
+});
+
+test('privacy denials that are not about the archive are not claims', () => {
+  assert.deepEqual(
+    findStaleBackupOmissionClaims('Cubby does not store HTML and RTF on our servers'),
+    []
+  );
+  assert.deepEqual(
+    findStaleBackupOmissionClaims('Cubby does not include HTML and RTF in telemetry.'),
+    []
+  );
+});
+
+test('expired originals that do not come back are not a backup claim', () => {
+  assert.deepEqual(
+    findStaleBackupOmissionClaims(
+      'Full-resolution originals do not come back after retention drops them.'
+    ),
+    []
+  );
+});
+
+test('anaphoric archive omission is a claim', () => {
+  const source =
+    'The archive is a local encrypted file. It does not hold the HTML and RTF copies of a clip or the full-resolution image files.';
+  const claims = findStaleBackupOmissionClaims(source);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0], /does not hold the HTML and RTF/);
+});
+
 test('live privacy.html does not claim backups omit formats', async () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const source = await readFile(path.join(root, 'product_pages/privacy.html'), 'utf8');

@@ -130,19 +130,28 @@ export function findFileListHistoryClaims(source) {
  * the privacy.html lie this helper exists to keep off the public pages.
  */
 const OMIT_HOLD =
-  /\b(?:does\s+not|doesn[’']t|do\s+not|don[’']t)\s+(?:hold|include|contain|store|keep)\b/i;
+  /\b(?:(?:does\s+not|doesn[’']t|do\s+not|don[’']t)\s+(?:hold|include|contain|store|keep)|omits?|omitted)\b/i;
 const DO_NOT_COME_BACK =
   /\b(?:do\s+not|does\s+not|don[’']t|doesn[’']t|never)\s+come\s+back\b/i;
 const HTML_AND_RTF = /\bHTML\b/i;
 const RTF = /\bRTF\b/i;
 const FULL_RESOLUTION = /\bfull[\s-]*resolution\b/i;
+/** Current or previous sentence names the archive so anaphoric "It" still counts. */
+const BACKUP_CONTEXT = /\b(?:archives?|backups?|import(?:s|ed|ing)?)\b/i;
 
 export function findStaleBackupOmissionClaims(source) {
   const claims = [];
-  for (const segment of segments(source)) {
+  const pieces = segments(source);
+  for (let i = 0; i < pieces.length; i++) {
+    const segment = pieces[i];
     const mentionsFormats = HTML_AND_RTF.test(segment) && RTF.test(segment);
     const mentionsFullRes = FULL_RESOLUTION.test(segment);
     if (!mentionsFormats && !mentionsFullRes) {
+      continue;
+    }
+
+    const previous = i > 0 ? pieces[i - 1] : '';
+    if (!BACKUP_CONTEXT.test(segment) && !BACKUP_CONTEXT.test(previous)) {
       continue;
     }
 
