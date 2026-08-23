@@ -77,7 +77,7 @@ pub async fn save_settings(
     let portable = crate::portable_data_dir().is_some();
     let app_store_build = cfg!(feature = "app-store");
 
-    let (mut new_settings, startup_setting_changed) = prepare_settings_for_save(
+    let (new_settings, startup_setting_changed) = prepare_settings_for_save(
         settings,
         changed_keys.as_deref(),
         &current,
