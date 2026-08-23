@@ -66,7 +66,8 @@ jobs:
     name: Create GitHub release
     # Intentionally does NOT depend on validate: the release object is only ever a
     # draft here, so it can be created in parallel with validation. publish-release
-    # gates on validate, so an unvalidated build never becomes public.
+    # and submit-store both gate on validate, so an unvalidated build never
+    # becomes public on GitHub or in Partner Center.
     runs-on: ubuntu-latest
     # Metadata only.
     timeout-minutes: 15
@@ -533,7 +534,12 @@ jobs:
   submit-store:
     name: Submit Microsoft Store update
     if: github.event_name != 'workflow_dispatch'
-    needs: [create-release, build-installers]
+    # SBS-1068: this job runs `msstore submission publish` into Partner Center.
+    # Gate on validate the same way publish-release gates GitHub undraft. A red
+    # or still-running cargo test / clippy / release:check must not reach the
+    # Store. create-release and build-installers stay independent of validate
+    # so the draft release and installer builds can still run in parallel.
+    needs: [validate, create-release, build-installers]
     runs-on: windows-latest
     timeout-minutes: 30
     environment: release

@@ -38,8 +38,9 @@ and maps the existing x64 and ARM64 Store packages to their new versioned URLs
 without changing a submission unless `publish` is explicitly selected.
 
 That validation-only run is what gated turning the flag on; it is now on. Tag
-releases wait for both architecture uploads, update both package URLs together,
-and create one Store submission before the GitHub release is published. Reruns skip existing R2
+releases wait for both architecture uploads and the `validate` job (cargo test,
+clippy, `release:check`), update both package URLs together, and create one Store
+submission before the GitHub release is published. Reruns skip existing R2
 objects only when their bytes match; a different build must use a new version
 instead of replacing an existing versioned URL, even while the GitHub release
 is still a draft.

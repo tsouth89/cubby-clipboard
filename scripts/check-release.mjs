@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { checkPrivilegedActionPins } from '../.github/scripts/check-privileged-action-pins.mjs';
+import { parseTopLevelJobs } from '../.github/scripts/check-shipped-windows-ci.mjs';
 import {
   findFileListHistoryClaims,
   findStaleBackupOmissionClaims,
@@ -119,6 +120,40 @@ if (!releaseWorkflow.includes('--config src-tauri/tauri.store.conf.json')) {
 
 if (!releaseWorkflow.includes('--features app-store')) {
   throw new Error('Microsoft Store builds must disable Cubby self-update and autostart integration');
+}
+
+// SBS-1068: submit-store runs `msstore submission publish`. It must wait for
+// validate the same way publish-release waits before undrafting GitHub. A
+// red or still-running cargo test / clippy / release:check must not reach
+// Partner Center. create-release stays independent of validate so the draft
+// and installer builds can still run in parallel.
+function jobNeeds(job, id) {
+  const body = job.lines.join('\n');
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return (
+    new RegExp(`^\\s+needs:\\s*${escaped}\\s*$`, 'm').test(body) ||
+    new RegExp(`^\\s+needs:\\s*\\[[^\\]]*\\b${escaped}\\b`, 'm').test(body)
+  );
+}
+
+const releaseJobs = parseTopLevelJobs(releaseWorkflow);
+const submitStoreJob = releaseJobs.find((job) => job.id === 'submit-store');
+if (!submitStoreJob) {
+  throw new Error('Release workflow is missing the submit-store job');
+}
+if (!jobNeeds(submitStoreJob, 'validate')) {
+  throw new Error(
+    'submit-store must need validate so Partner Center cannot receive an unvalidated build'
+  );
+}
+const createReleaseJob = releaseJobs.find((job) => job.id === 'create-release');
+if (!createReleaseJob) {
+  throw new Error('Release workflow is missing the create-release job');
+}
+if (jobNeeds(createReleaseJob, 'validate')) {
+  throw new Error(
+    'create-release must stay independent of validate so the draft release can be created in parallel'
+  );
 }
 
 // SBS-777: a signed outer Store installer is not enough. Publication and
