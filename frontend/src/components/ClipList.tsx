@@ -36,6 +36,9 @@ interface ClipListProps {
   checkedIds?: ReadonlySet<string>;
   /** Toggle multi-selection for a row, given its index for shift-extend. */
   onToggleSelect?: (clipId: string, index: number, event: React.MouseEvent) => void;
+  /** Makes the listbox the History window's keyboard focus owner. The flyout
+   *  keeps focus in its search field and therefore leaves this off. */
+  keyboardNavigation?: boolean;
 }
 
 export function ClipList({
@@ -61,6 +64,7 @@ export function ClipList({
   selectable = false,
   checkedIds,
   onToggleSelect,
+  keyboardNavigation = false,
 }: ClipListProps) {
   const listRef = useRef<HTMLDivElement>(null);
   // Arrow-key navigation can scroll a card under a stationary cursor and fire
@@ -79,6 +83,25 @@ export function ClipList({
       ?.querySelector<HTMLElement>(`[data-clip-id="${CSS.escape(selectedClipId)}"]`)
       ?.scrollIntoView({ block: 'nearest' });
   }, [selectedClipId]);
+
+  const handleListKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    // Interactive descendants keep their native key handling. Only the
+    // listbox itself owns History's Up/Down selection model.
+    if (!keyboardNavigation || event.target !== event.currentTarget) return;
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+
+    event.preventDefault();
+    const selectedIndex = clips.findIndex((clip) => clip.id === selectedClipId);
+    const nextIndex =
+      selectedIndex < 0
+        ? 0
+        : Math.min(
+            Math.max(selectedIndex + (event.key === 'ArrowDown' ? 1 : -1), 0),
+            clips.length - 1
+          );
+    const nextClip = clips[nextIndex];
+    if (nextClip) onSelectClip(nextClip.id);
+  };
 
   if (isLoading && clips.length === 0) {
     return (
@@ -128,7 +151,25 @@ export function ClipList({
       id="clip-listbox"
       role="listbox"
       aria-label="Clipboard history"
-      className={`no-scrollbar overflow-y-auto px-2 pb-2 ${errorSurface === 'banner' ? 'min-h-0 flex-1' : 'h-full'}`}
+      // History keeps DOM focus here while aria-activedescendant moves through
+      // the options. That lets Narrator announce the selected clip and its
+      // aria-posinset position without moving focus away from the list.
+      tabIndex={keyboardNavigation ? 0 : undefined}
+      aria-activedescendant={
+        keyboardNavigation && selectedClipId && clips.some((clip) => clip.id === selectedClipId)
+          ? `clip-option-${selectedClipId}`
+          : undefined
+      }
+      onKeyDown={handleListKeyDown}
+      onMouseDown={(event) => {
+        if (!keyboardNavigation) return;
+        const target = event.target as Element;
+        if (target.closest('button, input, select, textarea, a, [contenteditable="true"]')) return;
+        // A mouse-selected option and the next arrow press must use the same
+        // composite widget. Keep nested controls focusable in their own right.
+        event.currentTarget.focus({ preventScroll: true });
+      }}
+      className={`no-scrollbar overflow-y-auto px-2 pb-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary/70 ${errorSurface === 'banner' ? 'min-h-0 flex-1' : 'h-full'}`}
       onScroll={(event) => {
         if (!hasMore || isLoading) return;
         const element = event.currentTarget;
