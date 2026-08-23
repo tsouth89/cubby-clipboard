@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   claimSegments,
   findFileListHistoryClaims,
+  findStaleBackupOmissionClaims,
   findWeakerFileRetentionClaim,
 } from './product-page-claims.mjs';
 
@@ -190,4 +191,145 @@ test('weaker file-retention scan treats no/without as negation', () => {
   assert.equal(findWeakerFileRetentionClaim('No files are retained.'), undefined);
   assert.equal(findWeakerFileRetentionClaim('Without storing files.'), undefined);
   assert.match(findWeakerFileRetentionClaim('Cubby stores files.') ?? '', /stores files/);
+});
+
+// SBS-1028: privacy.html said encrypted backups omit HTML/RTF and
+// full-resolution originals after export_backup started including them.
+
+test('the original privacy.html backup omission is a claim', () => {
+  const sentence =
+    'It does not hold the HTML and RTF copies of a clip or the full-resolution image files, so those do not come back on import.';
+  const claims = findStaleBackupOmissionClaims(sentence);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0], /does not hold the HTML and RTF/);
+});
+
+test('a restated backup omission is a claim', () => {
+  assert.equal(
+    findStaleBackupOmissionClaims(
+      'The archive does not include HTML and RTF copies of a clip.'
+    ).length,
+    1
+  );
+  assert.equal(
+    findStaleBackupOmissionClaims(
+      'Encrypted backups do not contain the full-resolution originals.'
+    ).length,
+    1
+  );
+});
+
+test('accurate backup copy is not reported', () => {
+  for (const sentence of [
+    'The archive holds each clip’s text, HTML and RTF copies, and any live full-resolution original.',
+    'Export refuses to write the file if a live original or format cannot be read.',
+    'An image whose full-resolution original has already been dropped by retention stays thumbnail-only.',
+    'Cubby does not store the passphrase. The archive holds HTML and RTF copies.',
+  ]) {
+    assert.deepEqual(findStaleBackupOmissionClaims(sentence), [], sentence);
+  }
+});
+
+test('an unrelated does-not-include sentence is not reported', () => {
+  assert.deepEqual(
+    findStaleBackupOmissionClaims(
+      'Update checks do not include clipboard content or product-usage events.'
+    ),
+    []
+  );
+});
+
+test('omit-verb restatements about the archive are claims', () => {
+  assert.equal(
+    findStaleBackupOmissionClaims('The archive omits HTML and RTF copies').length,
+    1
+  );
+  assert.equal(
+    findStaleBackupOmissionClaims('The archive omits HTML and RTF copies of a clip.').length,
+    1
+  );
+  assert.equal(
+    findStaleBackupOmissionClaims(
+      'Encrypted backups omitted the full-resolution originals.'
+    ).length,
+    1
+  );
+});
+
+test('privacy denials that are not about the archive are not claims', () => {
+  assert.deepEqual(
+    findStaleBackupOmissionClaims('Cubby does not store HTML and RTF on our servers'),
+    []
+  );
+  assert.deepEqual(
+    findStaleBackupOmissionClaims('Cubby does not include HTML and RTF in telemetry.'),
+    []
+  );
+});
+
+test('expired originals that do not come back are not a backup claim', () => {
+  assert.deepEqual(
+    findStaleBackupOmissionClaims(
+      'Full-resolution originals do not come back after retention drops them.'
+    ),
+    []
+  );
+});
+
+test('a prior export sentence does not flag retention come-back wording', () => {
+  assert.deepEqual(
+    findStaleBackupOmissionClaims(
+      'Export writes a local encrypted file. Full-resolution originals do not come back after retention drops them.'
+    ),
+    []
+  );
+});
+
+test('anaphoric archive omission is a claim', () => {
+  const source =
+    'The archive is a local encrypted file. It does not hold the HTML and RTF copies of a clip or the full-resolution image files.';
+  const claims = findStaleBackupOmissionClaims(source);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0], /does not hold the HTML and RTF/);
+});
+
+test('negated omit verbs are not claims', () => {
+  assert.deepEqual(
+    findStaleBackupOmissionClaims('The archive does not omit HTML and RTF copies.'),
+    []
+  );
+  assert.deepEqual(
+    findStaleBackupOmissionClaims(
+      'Encrypted backups never omit the full-resolution originals.'
+    ),
+    []
+  );
+});
+
+test('export restatements of the omission are claims', () => {
+  assert.equal(
+    findStaleBackupOmissionClaims('The export omits HTML and RTF copies of a clip.')
+      .length,
+    1
+  );
+  assert.equal(
+    findStaleBackupOmissionClaims(
+      'Exported archives do not include the full-resolution originals.'
+    ).length,
+    1
+  );
+});
+
+test('anaphoric export omission is a claim', () => {
+  const source =
+    'Export writes a local encrypted file. It does not hold the HTML and RTF copies of a clip or the full-resolution image files.';
+  const claims = findStaleBackupOmissionClaims(source);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0], /does not hold the HTML and RTF/);
+});
+
+test('live privacy.html does not claim backups omit formats', async () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const source = await readFile(path.join(root, 'product_pages/privacy.html'), 'utf8');
+  assert.deepEqual(findStaleBackupOmissionClaims(source), []);
 });
