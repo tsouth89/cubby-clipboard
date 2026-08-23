@@ -296,11 +296,7 @@ struct HelperAction {
     needs_start: bool,
 }
 
-fn compute_helper_action(
-    state: &HelperState,
-    enabled: bool,
-    hotkey: Option<&str>,
-) -> HelperAction {
+fn compute_helper_action(state: &HelperState, enabled: bool, hotkey: Option<&str>) -> HelperAction {
     let hotkey_changed = state.hotkey.as_deref() != hotkey;
     let needs_stop = !enabled || hotkey_changed;
     // Always start if enabled, ensure_child_running is a no-op if it's already running.
