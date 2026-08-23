@@ -247,7 +247,7 @@ const RELAY_OR_REANNOUNCE = /\b(?:relay(?:s|ed|ing)?|re-?announce(?:s|d)?)\b/i;
 const SENSITIVE_OR_SECRETS =
   /\b(?:sensitive(?:[\s-]content)?|skip[\s-]likely[\s-]secrets|likely[\s-]secrets?)\b/i;
 const DO_NOT_STOP =
-  /\b(?:do\s+not|does\s+not|don[’']t|doesn[’']t|never)\s+stop\b/i;
+  /\b(?:do\s+not|does\s+not|don[’']t|doesn[’']t|never)\s+stops?\b/i;
 const ANYTHING_COPIED = /\banything\s+copied\b/i;
 const ONLY_WHEN_IGNORED =
   /\bskips?\s+a\s+copy\s+only\s+when\b/i;
