@@ -89,6 +89,34 @@ impl IgnoreState {
         );
         true
     }
+
+    /// A flood-dropped snapshot never reaches process time. If it was the
+    /// self-paste echo, consume that generation so the live ignore marker
+    /// cannot keep swallowing later real copies of the same content
+    /// (SBS-1039). A dropped real capture that only carried an unrelated
+    /// binding is left alone.
+    pub(crate) fn release_dropped_queued_work(
+        &mut self,
+        queued: Option<&QueuedIgnore>,
+        clip_hash: &str,
+    ) -> bool {
+        let Some(bound) = queued else {
+            return false;
+        };
+        if bound.hash != clip_hash || Some(bound.generation) == self.consumed_generation {
+            return false;
+        }
+
+        self.consumed_generation = Some(bound.generation);
+        if self
+            .marker
+            .as_ref()
+            .is_some_and(|marker| marker.generation == bound.generation)
+        {
+            self.marker.take();
+        }
+        true
+    }
 }
 
 /// Whether a self-write marker still applies to `hash`.
@@ -593,5 +621,103 @@ mod tests {
             "fail-without-fix: leftover gen-2 live marker swallows later real copies"
         );
         assert_eq!(state.consumed_generation, Some(2));
+    }
+
+    /// Fail-without-fix for SBS-1039: flood-drop the bound echo and do not
+    /// consume. The live marker (and a later same-generation bind) still
+    /// swallow the next real copy of that content.
+    #[test]
+    fn dropping_a_queued_echo_without_release_swallows_the_next_real_copy() {
+        let now = Instant::now();
+        let paste_a = marker("hash-a", now, 1);
+        let echo = bind_ignore_hash_for_queued_work(Some(&paste_a), now, IGNORE_HASH_TTL);
+        drop(echo);
+
+        let mut state = IgnoreState {
+            marker: Some(paste_a.clone()),
+            consumed_generation: None,
+        };
+        let recopy = bind_ignore_hash_for_queued_work(Some(&paste_a), now, IGNORE_HASH_TTL);
+        assert!(
+            state.ignore_and_consume_self_paste(recopy.as_ref(), "hash-a", now, IGNORE_HASH_TTL),
+            "this is the SBS-1039 leak: leftover IGNORE_HASH still swallows the next real copy"
+        );
+    }
+
+    #[test]
+    fn releasing_a_dropped_echo_lets_the_next_real_copy_through() {
+        // Paste A, queue its echo, flood-drop that work. Consume on drop so
+        // the live marker cannot bind or ignore a later genuine copy of A.
+        let now = Instant::now();
+        let paste_a = marker("hash-a", now, 1);
+        let echo = bind_ignore_hash_for_queued_work(Some(&paste_a), now, IGNORE_HASH_TTL);
+
+        let mut state = IgnoreState {
+            marker: Some(paste_a),
+            consumed_generation: None,
+        };
+        assert!(
+            state.release_dropped_queued_work(echo.as_ref(), "hash-a"),
+            "the dropped work was the self-paste echo and must spend that generation"
+        );
+        assert!(state.marker.is_none());
+        assert_eq!(state.consumed_generation, Some(1));
+
+        let recopy = bind_ignore_hash_for_queued_work(state.marker.as_ref(), now, IGNORE_HASH_TTL);
+        assert!(
+            recopy.is_none(),
+            "fail-without-fix: live IGNORE_HASH still binds new copies after the echo was dropped"
+        );
+        assert!(
+            !state.ignore_and_consume_self_paste(recopy.as_ref(), "hash-a", now, IGNORE_HASH_TTL,),
+            "fail-without-fix: dropped echo left IGNORE_HASH swallowing the next real copy"
+        );
+    }
+
+    #[test]
+    fn dropping_unrelated_bound_work_does_not_release_the_echo_ignore() {
+        // Snapshot bound to paste A, content is B. Evicting B must not spend
+        // A's generation: the echo of A may still be in the queue.
+        let now = Instant::now();
+        let paste_a = marker("hash-a", now, 1);
+        let passenger = bind_ignore_hash_for_queued_work(Some(&paste_a), now, IGNORE_HASH_TTL);
+        let echo = bind_ignore_hash_for_queued_work(Some(&paste_a), now, IGNORE_HASH_TTL);
+
+        let mut state = IgnoreState {
+            marker: Some(paste_a),
+            consumed_generation: None,
+        };
+        assert!(!state.release_dropped_queued_work(passenger.as_ref(), "hash-b"));
+        assert_eq!(state.consumed_generation, None);
+        assert!(
+            should_ignore_queued_self_paste(
+                echo.as_ref(),
+                state.marker.as_ref(),
+                "hash-a",
+                now,
+                IGNORE_HASH_TTL,
+                state.consumed_generation,
+            ),
+            "fail-without-fix: dropping B spent A's ignore, so the remaining echo would persist"
+        );
+    }
+
+    #[test]
+    fn dropping_unbound_same_hash_work_does_not_spend_the_live_marker() {
+        let now = Instant::now();
+        let paste_a = marker("hash-a", now, 1);
+        let echo = bind_ignore_hash_for_queued_work(Some(&paste_a), now, IGNORE_HASH_TTL);
+        let mut state = IgnoreState {
+            marker: Some(paste_a),
+            consumed_generation: None,
+        };
+
+        assert!(!state.release_dropped_queued_work(None, "hash-a"));
+        assert_eq!(state.consumed_generation, None);
+        assert!(
+            state.marker.is_some(),
+            "the live marker must remain for its bound echo"
+        );
+        assert!(state.ignore_and_consume_self_paste(echo.as_ref(), "hash-a", now, IGNORE_HASH_TTL,));
     }
 }

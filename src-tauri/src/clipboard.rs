@@ -247,7 +247,8 @@ pub fn get_clipboard_capture_status() -> ClipboardCaptureStatus {
 pub fn init(app: &AppHandle, db: Arc<Database>) {
     crate::ocr_queue::init(app.clone(), db.clone());
     // SBS-1032: snapshots carry full PNG/HTML/RTF bytes. The queue is
-    // bounded (drop-oldest); see `snapshot_queue` for the policy.
+    // bounded (drop-oldest, Cleared retained — SBS-1045); see
+    // `snapshot_queue` for the policy.
     let (event_tx, event_rx) = snapshot_channel::channel();
     let app_for_consumer = app.clone();
     let db_for_consumer = db.clone();
@@ -353,6 +354,14 @@ impl SizedPayload for ClipboardListenerEvent {
             Self::Content(snapshot) => snapshot.payload_bytes(),
         }
     }
+
+    fn retain_on_flood(&self) -> bool {
+        matches!(self, Self::Cleared { .. })
+    }
+
+    fn replaces_queued(&self, older: &Self) -> bool {
+        matches!((self, older), (Self::Cleared { .. }, Self::Cleared { .. }))
+    }
 }
 
 impl ClipboardSnapshot {
@@ -382,10 +391,11 @@ fn enqueue_listener_event(
     event_tx: &snapshot_channel::Sender<ClipboardListenerEvent>,
     event: ClipboardListenerEvent,
 ) -> Result<(), ()> {
-    match event_tx.send(event) {
+    match event_tx.send(event, release_ignore_for_dropped_events) {
         Ok(snapshot_queue::EnqueueOutcome::QueuedAfterDrop {
             dropped,
             dropped_bytes,
+            ..
         }) => {
             log::warn!(
                 "CLIPBOARD: Snapshot queue evicted {dropped} older pending capture(s) ({dropped_bytes} bytes) under flood (SBS-1032)"
@@ -394,6 +404,42 @@ fn enqueue_listener_event(
         }
         Ok(snapshot_queue::EnqueueOutcome::Queued) => Ok(()),
         Err(()) => Err(()),
+    }
+}
+
+/// Identity used for self-paste ignore. Must match process-time `clip_hash`
+/// so a flood-dropped echo consumes the same generation the paste path set.
+fn captured_clip_hash(content: &CapturedContent, formats: &[CapturedFormat]) -> String {
+    let (clip_type, primary) = match content {
+        CapturedContent::Text { content, .. } => ("text", content.as_slice()),
+        CapturedContent::Image { png_bytes, .. } => ("image", png_bytes.as_slice()),
+    };
+    calculate_hash(&build_clip_hash_material(
+        clip_type,
+        primary,
+        formats
+            .iter()
+            .map(|format| (format.name, format.content.as_slice())),
+    ))
+}
+
+/// SBS-1039: a flood-evicted snapshot never reaches
+/// [`process_clipboard_snapshot`]. Consume a matching self-paste binding so
+/// IGNORE_HASH cannot keep suppressing later real copies. Unrelated dropped
+/// work (or a Cleared event) is left alone. LAST_STABLE_HASH is only written
+/// after persist, so a dropped snapshot never stamped consecutive-dedup and
+/// [`reset_capture_dedup`] is the history-delete path, not this one.
+fn release_ignore_for_dropped_events(evicted: &[ClipboardListenerEvent]) {
+    let mut lock = IGNORE_HASH.lock();
+    for event in evicted {
+        if let ClipboardListenerEvent::Content(snapshot) = event {
+            let clip_hash = captured_clip_hash(&snapshot.content, &snapshot.formats);
+            if lock.release_dropped_queued_work(snapshot.ignore.as_ref(), clip_hash.as_str()) {
+                log::info!(
+                    "CLIPBOARD: Released self-paste ignore after snapshot was dropped under flood (SBS-1039)"
+                );
+            }
+        }
     }
 }
 
@@ -840,6 +886,9 @@ fn capture_one_bound_sequence(
 
     if let Some(MaterializeAttempt::Captured(content, formats)) = materialized {
         note_clipboard_event(sequence);
+        // Bind the live marker onto this work item (SBS-1022). If flood
+        // policy later evicts it, enqueue_listener_event must release that
+        // binding (SBS-1039) so IGNORE_HASH cannot keep swallowing copies.
         let ignore = bind_ignore_hash_for_queued_work(
             IGNORE_HASH.lock().marker.as_ref(),
             Instant::now(),
@@ -2040,6 +2089,7 @@ async fn process_clipboard_snapshot(
     let sequence = snapshot.sequence;
     let markers = snapshot.sensitive;
     let queued_ignore = snapshot.ignore;
+    let clip_hash = captured_clip_hash(&snapshot.content, &snapshot.formats);
     let source_app_info = resolve_source_app_info(snapshot.source_app_identity);
     let captured_formats = snapshot.formats;
     let (clip_type, clip_content, clip_preview, _primary_hash, full_image_content, metadata) =
@@ -2105,7 +2155,11 @@ async fn process_clipboard_snapshot(
             .iter()
             .map(|format| (format.name, format.content.as_slice())),
     );
-    let clip_hash = calculate_hash(&hash_material);
+    debug_assert_eq!(
+        clip_hash,
+        calculate_hash(&hash_material),
+        "captured_clip_hash must match process-time clip identity"
+    );
 
     // Ignore our own clipboard writes. When a clip is pasted or reused from
     // Cubby, the paste path sets this ignore hash and already performed the
@@ -3428,16 +3482,47 @@ unsafe fn extract_icon(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_clip_hash_material, calculate_hash, capture_state_name, capture_text,
-        clear_ignore_hash_if_matches, clipboard_retry_delay, is_remote_client_owner,
+        bind_ignore_hash_for_queued_work, build_clip_hash_material, calculate_hash,
+        capture_state_name, capture_text, captured_clip_hash, clear_ignore_hash_if_matches,
+        clipboard_retry_delay, enqueue_listener_event, is_remote_client_owner,
         is_remote_client_process, likely_secret_decision, next_listener_backoff, relayed_clip_hash,
-        rgba_to_cf_dib, set_ignore_hash, should_forget_recent_capture, should_relay_capture,
-        should_skip_sensitive_capture, CapturedContent, CapturedFormat, ClipboardListenerEvent,
-        ClipboardSnapshot, LikelySecretDecision, SensitiveMarkers, SizedPayload,
-        CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED,
-        CLIPBOARD_CLEAR_FORGET_WINDOW, IGNORE_HASH,
+        release_ignore_for_dropped_events, rgba_to_cf_dib, set_ignore_hash,
+        should_forget_recent_capture, should_relay_capture, should_skip_sensitive_capture,
+        CapturedContent, CapturedFormat, ClipboardListenerEvent, ClipboardSnapshot,
+        LikelySecretDecision, SensitiveMarkers, SizedPayload, CAPTURE_STATE_LISTENING,
+        CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED, CLIPBOARD_CLEAR_FORGET_WINDOW,
+        IGNORE_HASH, IGNORE_HASH_TTL,
     };
+    use super::{ignore_hash, snapshot_channel, snapshot_queue};
     use std::time::{Duration, Instant};
+
+    fn text_snapshot(
+        sequence: u32,
+        text: &[u8],
+        ignore: Option<ignore_hash::QueuedIgnore>,
+    ) -> ClipboardSnapshot {
+        ClipboardSnapshot {
+            sequence,
+            source_app_identity: None,
+            content: CapturedContent::Text {
+                content: text.to_vec(),
+                preview: String::from_utf8_lossy(text).into_owned(),
+                hash: "unused".into(),
+            },
+            formats: Vec::new(),
+            materialize_ms: 0,
+            sensitive: SensitiveMarkers::default(),
+            ignore,
+        }
+    }
+
+    fn text_event(
+        sequence: u32,
+        text: &[u8],
+        ignore: Option<ignore_hash::QueuedIgnore>,
+    ) -> ClipboardListenerEvent {
+        ClipboardListenerEvent::Content(text_snapshot(sequence, text, ignore))
+    }
 
     /// SBS-1032: the queue's RAM budget must count the PNG/HTML/RTF bytes
     /// that used to sit on the unbounded channel, not just a slot count.
@@ -3469,10 +3554,244 @@ mod tests {
             ignore: None,
         });
         assert_eq!(event.payload_bytes(), 1000 + 64 + 200 + 50);
+        assert!(!event.retain_on_flood());
         assert_eq!(
             ClipboardListenerEvent::Cleared { sequence: 2 }.payload_bytes(),
             0
         );
+        assert!(ClipboardListenerEvent::Cleared { sequence: 2 }.retain_on_flood());
+        assert!(ClipboardListenerEvent::Cleared { sequence: 3 }
+            .replaces_queued(&ClipboardListenerEvent::Cleared { sequence: 2 }));
+        assert!(!event.replaces_queued(&ClipboardListenerEvent::Cleared { sequence: 2 }));
+    }
+
+    /// SBS-1045: a 0-byte `Cleared` used to be the first byte-budget victim.
+    /// The real event type must stay retained so forget-on-clear still runs.
+    #[test]
+    fn a_queued_cleared_survives_a_content_flood() {
+        use super::snapshot_queue::{enqueue, EnqueueOutcome};
+        use std::collections::VecDeque;
+
+        let cleared = ClipboardListenerEvent::Cleared { sequence: 7 };
+        let content = |sequence: u32, bytes: usize| {
+            ClipboardListenerEvent::Content(ClipboardSnapshot {
+                sequence,
+                source_app_identity: None,
+                content: CapturedContent::Text {
+                    content: vec![b'x'; bytes],
+                    preview: String::new(),
+                    hash: String::new(),
+                },
+                formats: Vec::new(),
+                materialize_ms: 0,
+                sensitive: SensitiveMarkers::default(),
+                ignore: None,
+            })
+        };
+
+        let mut queue = VecDeque::new();
+        let mut queued_bytes = 0usize;
+        assert!(matches!(
+            enqueue(&mut queue, &mut queued_bytes, cleared, 2, 20),
+            EnqueueOutcome::Queued
+        ));
+        assert!(matches!(
+            enqueue(&mut queue, &mut queued_bytes, content(8, 8), 2, 20),
+            EnqueueOutcome::Queued
+        ));
+        let outcome = enqueue(&mut queue, &mut queued_bytes, content(9, 8), 2, 20);
+        assert!(matches!(
+            outcome,
+            EnqueueOutcome::QueuedAfterDrop {
+                dropped: 1,
+                dropped_bytes: 8,
+                evicted,
+            } if evicted.len() == 1
+        ));
+        assert!(matches!(
+            queue.front(),
+            Some(ClipboardListenerEvent::Cleared { sequence: 7 })
+        ));
+        assert!(matches!(
+            queue.back(),
+            Some(ClipboardListenerEvent::Content(snapshot)) if snapshot.sequence == 9
+        ));
+        assert_eq!(queue.len(), 2);
+    }
+
+    #[test]
+    fn captured_clip_hash_matches_process_time_identity() {
+        let text = CapturedContent::Text {
+            content: b"hello".to_vec(),
+            preview: "hello".into(),
+            hash: "unused".into(),
+        };
+        let formats = [CapturedFormat {
+            name: "html",
+            content: b"<p>hello</p>".to_vec(),
+        }];
+        assert_eq!(
+            captured_clip_hash(&text, &formats),
+            calculate_hash(&build_clip_hash_material(
+                "text",
+                b"hello",
+                [("html", b"<p>hello</p>".as_slice())],
+            ))
+        );
+
+        let png = vec![0_u8; 16];
+        let image = CapturedContent::Image {
+            png_bytes: png.clone(),
+            width: 2,
+            height: 2,
+            hash: "unused".into(),
+            decode_ms: 0,
+            source_type: "png",
+        };
+        assert_eq!(
+            captured_clip_hash(&image, &formats),
+            calculate_hash(&build_clip_hash_material("image", &png, std::iter::empty()))
+        );
+    }
+
+    /// SBS-1039: flood-drop a bound self-paste echo. Without
+    /// [`release_ignore_for_dropped_events`], IGNORE_HASH stays live and the
+    /// next real copy of the same content is swallowed.
+    #[test]
+    fn dropping_a_bound_echo_releases_ignore_hash_so_the_next_real_copy_is_captured() {
+        *IGNORE_HASH.lock() = ignore_hash::IgnoreState::default();
+        let clip_hash = captured_clip_hash(
+            &CapturedContent::Text {
+                content: b"echo".to_vec(),
+                preview: "echo".into(),
+                hash: "unused".into(),
+            },
+            &[],
+        );
+        set_ignore_hash(clip_hash.clone());
+        let ignore = bind_ignore_hash_for_queued_work(
+            IGNORE_HASH.lock().marker.as_ref(),
+            Instant::now(),
+            IGNORE_HASH_TTL,
+        );
+        assert!(ignore.is_some());
+
+        release_ignore_for_dropped_events(&[text_event(1, b"echo", ignore)]);
+
+        assert!(
+            IGNORE_HASH.lock().marker.is_none(),
+            "fail-without-fix: dropped echo left the live IGNORE_HASH marker"
+        );
+        let recopy = bind_ignore_hash_for_queued_work(
+            IGNORE_HASH.lock().marker.as_ref(),
+            Instant::now(),
+            IGNORE_HASH_TTL,
+        );
+        assert!(
+            !IGNORE_HASH.lock().ignore_and_consume_self_paste(
+                recopy.as_ref(),
+                clip_hash.as_str(),
+                Instant::now(),
+                IGNORE_HASH_TTL,
+            ),
+            "fail-without-fix: dropped echo left IGNORE_HASH swallowing the next real copy"
+        );
+        *IGNORE_HASH.lock() = ignore_hash::IgnoreState::default();
+    }
+
+    #[test]
+    fn dropping_unrelated_or_cleared_events_does_not_release_ignore_hash() {
+        *IGNORE_HASH.lock() = ignore_hash::IgnoreState::default();
+        let echo_hash = captured_clip_hash(
+            &CapturedContent::Text {
+                content: b"echo".to_vec(),
+                preview: "echo".into(),
+                hash: "unused".into(),
+            },
+            &[],
+        );
+        set_ignore_hash(echo_hash.clone());
+        let generation = IGNORE_HASH
+            .lock()
+            .marker
+            .as_ref()
+            .expect("just set")
+            .generation;
+        let passenger = bind_ignore_hash_for_queued_work(
+            IGNORE_HASH.lock().marker.as_ref(),
+            Instant::now(),
+            IGNORE_HASH_TTL,
+        );
+
+        release_ignore_for_dropped_events(&[
+            text_event(1, b"other", passenger),
+            ClipboardListenerEvent::Cleared { sequence: 2 },
+        ]);
+
+        assert_eq!(
+            IGNORE_HASH
+                .lock()
+                .marker
+                .as_ref()
+                .map(|marked| marked.generation),
+            Some(generation),
+            "fail-without-fix: dropping B or a clear spent A's ignore"
+        );
+        assert_eq!(IGNORE_HASH.lock().consumed_generation, None);
+        *IGNORE_HASH.lock() = ignore_hash::IgnoreState::default();
+    }
+
+    /// Whole path: bind at enqueue, flood-evict via the production channel,
+    /// consume on drop, then a later real copy of the same content is not
+    /// ignored (SBS-1039).
+    #[test]
+    fn enqueue_listener_event_releases_ignore_hash_when_a_bound_echo_is_flood_dropped() {
+        *IGNORE_HASH.lock() = ignore_hash::IgnoreState::default();
+        let clip_hash = captured_clip_hash(
+            &CapturedContent::Text {
+                content: b"echo".to_vec(),
+                preview: "echo".into(),
+                hash: "unused".into(),
+            },
+            &[],
+        );
+        set_ignore_hash(clip_hash.clone());
+        let ignore = bind_ignore_hash_for_queued_work(
+            IGNORE_HASH.lock().marker.as_ref(),
+            Instant::now(),
+            IGNORE_HASH_TTL,
+        );
+        let generation = ignore.as_ref().expect("live marker").generation;
+
+        let (tx, rx) = snapshot_channel::channel();
+        enqueue_listener_event(&tx, text_event(1, b"echo", ignore)).expect("receiver is alive");
+        for sequence in 2..=(snapshot_queue::SNAPSHOT_QUEUE_CAPACITY as u32 + 1) {
+            enqueue_listener_event(&tx, text_event(sequence, b"x", None))
+                .expect("receiver is alive");
+        }
+        drop(rx);
+
+        assert!(
+            IGNORE_HASH.lock().marker.is_none(),
+            "fail-without-fix: enqueue_listener_event did not release IGNORE_HASH on flood drop"
+        );
+        assert_eq!(IGNORE_HASH.lock().consumed_generation, Some(generation));
+
+        let recopy = bind_ignore_hash_for_queued_work(
+            IGNORE_HASH.lock().marker.as_ref(),
+            Instant::now(),
+            IGNORE_HASH_TTL,
+        );
+        assert!(
+            !IGNORE_HASH.lock().ignore_and_consume_self_paste(
+                recopy.as_ref(),
+                clip_hash.as_str(),
+                Instant::now(),
+                IGNORE_HASH_TTL,
+            ),
+            "fail-without-fix: dropped echo left IGNORE_HASH swallowing the next real copy"
+        );
+        *IGNORE_HASH.lock() = ignore_hash::IgnoreState::default();
     }
 
     #[cfg(target_os = "windows")]
