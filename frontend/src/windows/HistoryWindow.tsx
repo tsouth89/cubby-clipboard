@@ -74,6 +74,8 @@ export function HistoryWindow() {
   const [hasMore, setHasMore] = useState(true);
   const [totalClipCount, setTotalClipCount] = useState(0);
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
+  const bulkDeleteInFlightRef = useRef(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [sourceApps, setSourceApps] = useState<SourceAppCount[]>([]);
   const [sourceApp, setSourceApp] = useState<string | null>(null);
@@ -406,7 +408,9 @@ export function HistoryWindow() {
   );
 
   const handleBulkDelete = useCallback(async () => {
-    if (selectionCount === 0) return;
+    if (selectionCount === 0 || bulkDeleteInFlightRef.current) return;
+    bulkDeleteInFlightRef.current = true;
+    setBulkDeleteBusy(true);
     try {
       // Same contract as single-clip delete: Cubby has no trash, so the payload
       // goes immediately rather than leaving a hidden soft-delete.
@@ -414,6 +418,7 @@ export function HistoryWindow() {
         ids: selectedIds,
         hardDelete: true,
       });
+      setBulkDeleteOpen(false);
       selectedIds.forEach((id) => forgetRevealed(id));
       // A failed reload already speaks: ClipList shows the error panel once
       // these rows are dropped. A superseded reload belongs to a newer load.
@@ -423,6 +428,9 @@ export function HistoryWindow() {
     } catch (error) {
       console.error('Failed to delete clips:', error);
       toast.error('Failed to delete clips');
+    } finally {
+      bulkDeleteInFlightRef.current = false;
+      setBulkDeleteBusy(false);
     }
   }, [afterBulkChange, forgetRevealed, selectedIds, selectionCount]);
 
@@ -1125,10 +1133,8 @@ export function HistoryWindow() {
         title={selectionCount === 1 ? 'Delete this clip?' : `Delete ${selectionCount} clips?`}
         message="Cubby has no trash. Deleted clips cannot be recovered."
         confirmText={selectionCount === 1 ? 'Delete clip' : `Delete ${selectionCount} clips`}
-        onConfirm={() => {
-          setBulkDeleteOpen(false);
-          void handleBulkDelete();
-        }}
+        isBusy={bulkDeleteBusy}
+        onConfirm={() => void handleBulkDelete()}
         onCancel={() => setBulkDeleteOpen(false)}
       />
     </div>
