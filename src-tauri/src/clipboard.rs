@@ -2092,7 +2092,7 @@ async fn process_clipboard_snapshot(
     let clip_hash = captured_clip_hash(&snapshot.content, &snapshot.formats);
     let source_app_info = resolve_source_app_info(snapshot.source_app_identity);
     let captured_formats = snapshot.formats;
-    let (clip_type, clip_content, clip_preview, _primary_hash, full_image_content, metadata) =
+    let (clip_type, mut clip_content, clip_preview, _primary_hash, full_image_content, metadata) =
         match snapshot.content {
             CapturedContent::Text {
                 content,
@@ -2120,7 +2120,10 @@ async fn process_clipboard_snapshot(
                 source_type,
             } => {
                 let size_bytes = png_bytes.len();
-                let preview_bytes = create_image_preview(&png_bytes).unwrap_or_default();
+                // Do not decode a thumbnail here. Self-paste, ignored-app,
+                // and consecutive-Skip discard the snapshot below, and the
+                // old path paid a full PNG decode under CLIPBOARD_SYNC for a
+                // preview that was dropped (SBS-1077).
                 log::debug!(
                     "CLIPBOARD: Materialized image sequence={} {}x{} source_type={} png_bytes={} decode_ms={}",
                     sequence,
@@ -2132,7 +2135,7 @@ async fn process_clipboard_snapshot(
                 );
                 (
                     "image",
-                    preview_bytes,
+                    Vec::new(),
                     "[Image]".to_string(),
                     hash,
                     Some(png_bytes),
@@ -2304,6 +2307,15 @@ async fn process_clipboard_snapshot(
             if consecutive_dedup_decision(stored) == ConsecutiveDedupDecision::Skip {
                 return;
             }
+        }
+    }
+
+    if clip_type == "image" {
+        if let Some(png_bytes) = full_image_content.as_deref() {
+            clip_content = image_preview_after_discard(None, png_bytes, |bytes| {
+                create_image_preview(bytes).unwrap_or_default()
+            })
+            .unwrap_or_default();
         }
     }
 
@@ -3013,6 +3025,34 @@ pub fn create_image_preview(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(bytes.into_inner())
 }
 
+/// Why an image snapshot is dropped before storage. Thumbnail decode is
+/// skipped for all of these — the old path decoded under CLIPBOARD_SYNC and
+/// then threw the preview away (SBS-1077).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum ImageSnapshotDiscard {
+    SelfPaste,
+    IgnoredApp,
+    ConsecutiveSkip,
+}
+
+/// Generate a stored thumbnail only when the snapshot will be kept.
+/// `decode` is [`create_image_preview`] in production; tests inject a
+/// counter so a discarded path that still decodes fails.
+pub(crate) fn image_preview_after_discard<F>(
+    discard: Option<ImageSnapshotDiscard>,
+    png_bytes: &[u8],
+    decode: F,
+) -> Option<Vec<u8>>
+where
+    F: FnOnce(&[u8]) -> Vec<u8>,
+{
+    match discard {
+        Some(_) => None,
+        None => Some(decode(png_bytes)),
+    }
+}
+
 pub use crate::image_persist::persist_full_image_file;
 
 /// Stage a recaptured full-resolution original, update the existing image row
@@ -3651,6 +3691,152 @@ mod tests {
         assert_eq!(
             captured_clip_hash(&image, &formats),
             calculate_hash(&build_clip_hash_material("image", &png, std::iter::empty()))
+        );
+    }
+
+    /// Pre-SBS-1077 order: always decode, then drop. Replacing
+    /// [`super::image_preview_after_discard`] with this makes the discarded-path
+    /// tests fail — that is the leak.
+    fn image_preview_before_discard<F>(
+        discard: Option<super::ImageSnapshotDiscard>,
+        png_bytes: &[u8],
+        decode: F,
+    ) -> Option<Vec<u8>>
+    where
+        F: FnOnce(&[u8]) -> Vec<u8>,
+    {
+        let preview = decode(png_bytes);
+        match discard {
+            Some(_) => None,
+            None => Some(preview),
+        }
+    }
+
+    fn counting_decode<'a>(calls: &'a std::cell::Cell<u32>) -> impl FnOnce(&[u8]) -> Vec<u8> + 'a {
+        move |png| {
+            calls.set(calls.get() + 1);
+            png.to_vec()
+        }
+    }
+
+    /// Fail-without-fix for SBS-1077: the old eager preview still decodes a
+    /// PNG that every discard gate then drops.
+    #[test]
+    fn eager_preview_decodes_every_discarded_image() {
+        use super::ImageSnapshotDiscard::{ConsecutiveSkip, IgnoredApp, SelfPaste};
+
+        for discard in [SelfPaste, IgnoredApp, ConsecutiveSkip] {
+            let calls = std::cell::Cell::new(0);
+            let preview =
+                image_preview_before_discard(Some(discard), b"png", counting_decode(&calls));
+            assert!(
+                preview.is_none(),
+                "{discard:?} still discarded after the eager decode"
+            );
+            assert_eq!(
+                calls.get(),
+                1,
+                "fail-without-fix: {discard:?} still decoded a thumbnail that was dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn discarded_image_paths_do_not_decode_a_thumbnail() {
+        use super::{image_preview_after_discard, ImageSnapshotDiscard};
+
+        for discard in [
+            ImageSnapshotDiscard::SelfPaste,
+            ImageSnapshotDiscard::IgnoredApp,
+            ImageSnapshotDiscard::ConsecutiveSkip,
+        ] {
+            let calls = std::cell::Cell::new(0);
+            let preview =
+                image_preview_after_discard(Some(discard), b"png", counting_decode(&calls));
+            assert!(
+                preview.is_none(),
+                "{discard:?} must not produce a thumbnail"
+            );
+            assert_eq!(
+                calls.get(),
+                0,
+                "fail-without-fix: {discard:?} decoded a thumbnail that was dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn kept_image_decodes_a_thumbnail_once() {
+        use super::image_preview_after_discard;
+
+        let calls = std::cell::Cell::new(0);
+        let preview = image_preview_after_discard(None, b"png", counting_decode(&calls))
+            .expect("kept snapshots store a thumbnail");
+        assert_eq!(preview, b"png");
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn kept_image_preview_matches_create_image_preview() {
+        use super::{create_image_preview, image_preview_after_discard};
+
+        let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([10, 20, 30, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut png, image::ImageOutputFormat::Png)
+            .expect("tiny PNG");
+        let png = png.into_inner();
+        let expected = create_image_preview(&png).expect("preview");
+        let stored = image_preview_after_discard(None, &png, |bytes| {
+            create_image_preview(bytes).unwrap_or_default()
+        })
+        .expect("kept");
+        assert_eq!(stored, expected);
+        assert!(!stored.is_empty());
+    }
+
+    /// Re-introducing `create_image_preview` above the discard gates in
+    /// [`super::process_clipboard_snapshot`] makes these assertions fail.
+    #[test]
+    fn process_clipboard_snapshot_decodes_preview_after_discard_gates() {
+        let src = include_str!("clipboard.rs");
+        let start = src
+            .find("async fn process_clipboard_snapshot")
+            .expect("processor");
+        let end = src[start..]
+            .find("async fn process_clipboard_clear")
+            .expect("clear processor follows snapshot processor")
+            + start;
+        let body = &src[start..end];
+
+        let preview = body
+            .find("create_image_preview")
+            .expect("kept images must still generate a thumbnail");
+        let self_paste = body
+            .find("ignore_and_consume_self_paste")
+            .expect("self-paste gate");
+        let ignored_app = body
+            .find("Ignoring content from configured application")
+            .expect("ignored-app gate");
+        let consecutive = body
+            .find("consecutive_dedup_decision")
+            .expect("consecutive-Skip gate");
+
+        assert!(
+            preview > self_paste,
+            "fail-without-fix: thumbnail decode ran before the self-paste discard"
+        );
+        assert!(
+            preview > ignored_app,
+            "fail-without-fix: thumbnail decode ran before the ignored-app discard"
+        );
+        assert!(
+            preview > consecutive,
+            "fail-without-fix: thumbnail decode ran before the consecutive-Skip discard"
+        );
+        assert!(
+            !body[..self_paste].contains("create_image_preview"),
+            "fail-without-fix: thumbnail decode still ran under CLIPBOARD_SYNC before discard"
         );
     }
 
