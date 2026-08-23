@@ -233,7 +233,7 @@ export function HistoryWindow() {
         if (loadId === loadIdRef.current) setIsLoading(false);
       }
     },
-    [contentFilter, dateFrom, dateTo, searchQuery, selectedFolder, sourceApp]
+    [contentFilter, dateFrom, dateTo, searchQuery, selectedFolder, sourceApp, t]
   );
 
   const loadFolders = useCallback(async () => {

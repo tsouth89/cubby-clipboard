@@ -51,7 +51,6 @@ export function Select({
 
   useLayoutEffect(() => {
     if (isOpen) updatePosition();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
   useEffect(() => {
