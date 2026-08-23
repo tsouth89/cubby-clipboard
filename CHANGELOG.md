@@ -4,6 +4,9 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 
 ## Unreleased
 
+### Security
+- Paste and copy no longer emit the full decrypted clip body to the WebView on a `clipboard-write` event that has no frontend listener (SBS-1042)
+
 ### Fixed
 - Flood-dropping a queued self-paste echo no longer leaves the ignore hash swallowing the next real copy of that content (SBS-1039)
 - Recover a dest-gone rolling `cubby.db.bak` replace on FAT/exFAT instead of deleting the only remaining copy (SBS-1051)
