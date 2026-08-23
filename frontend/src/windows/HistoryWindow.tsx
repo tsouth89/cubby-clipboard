@@ -14,9 +14,8 @@ import { useTheme } from '../hooks/useTheme';
 import { useLanguage } from '../hooks/useLanguage';
 import { useSystemAccent } from '../hooks/useSystemAccent';
 import { useRevealedClips } from '../hooks/useRevealedClips';
-import { collectBulkCopyText } from '../utils/bulkCopy';
+import { collectBulkCopyText, type BulkCopyTextResult } from '../utils/bulkCopy';
 import { shortcutsSuspended } from '../utils/flyoutSearch';
-import { ClipDetails } from '../utils/clipPreviewState';
 import { customRange, DATE_PRESET_LABELS, DatePreset, presetRange } from '../utils/dateRange';
 import { folderSelectionAfterReload } from '../utils/folderSelection';
 import { classifyKeyboardTarget } from '../utils/keyboardTarget';
@@ -474,18 +473,11 @@ export function HistoryWindow() {
       const chosen = selectedIds
         .map((id) => clipsRef.current.find((clip) => clip.id === id))
         .filter((clip): clip is ClipboardItem => Boolean(clip));
-      // Fetch each text clip's body by uuid. List and search both load with
-      // `previewOnly: true`, so a text row's `content` is empty and its
-      // `preview` is only the stored prefix — copying either would ship the
-      // wrong text under a success toast. Images have no text to concatenate
-      // and are reported as skipped. Hidden rows are only loaded if this
-      // session already revealed them.
+      // List rows only carry previews and thumbnails. Load full text and image
+      // OCR together without pulling full image blobs into the renderer.
       const { parts, skipped, hidden, failed } = await collectBulkCopyText(
         chosen,
-        async (id) => {
-          const details = await invoke<ClipDetails>('get_clip_details', { id });
-          return details.content;
-        },
+        (ids) => invoke<BulkCopyTextResult[]>('get_bulk_copy_text', { ids }),
         { revealedIds: new Set(revealed.keys()) }
       );
       if (parts.length === 0) {
