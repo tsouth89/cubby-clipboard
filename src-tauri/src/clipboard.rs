@@ -3591,22 +3591,23 @@ mod tests {
 
         let mut queue = VecDeque::new();
         let mut queued_bytes = 0usize;
-        assert_eq!(
+        assert!(matches!(
             enqueue(&mut queue, &mut queued_bytes, cleared, 2, 20),
             EnqueueOutcome::Queued
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             enqueue(&mut queue, &mut queued_bytes, content(8, 8), 2, 20),
             EnqueueOutcome::Queued
-        );
+        ));
         let outcome = enqueue(&mut queue, &mut queued_bytes, content(9, 8), 2, 20);
-        assert_eq!(
+        assert!(matches!(
             outcome,
             EnqueueOutcome::QueuedAfterDrop {
                 dropped: 1,
-                dropped_bytes: 8
-            }
-        );
+                dropped_bytes: 8,
+                evicted,
+            } if evicted.len() == 1
+        ));
         assert!(matches!(
             queue.front(),
             Some(ClipboardListenerEvent::Cleared { sequence: 7 })
