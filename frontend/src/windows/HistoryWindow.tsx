@@ -757,6 +757,8 @@ export function HistoryWindow() {
         event.target,
         '[data-el="history-search-input"]'
       );
+      const isClipListFocusOwner =
+        event.target instanceof Element && event.target.matches('[data-el="clip-list"]');
 
       if (event.key === 'Escape') {
         // Search is an INPUT, so isEditing is true there; Escape still clears
@@ -775,22 +777,10 @@ export function HistoryWindow() {
         document.querySelector<HTMLInputElement>('[data-el="history-search-input"]')?.focus();
         return;
       }
-      // Arrow keys move the list selection, but not while the caret is in the
-      // search box — there they belong to the input, or typing becomes
-      // unworkable without a mouse.
-      if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !isInteractive) {
-        const list = clipsRef.current;
-        if (list.length === 0) return;
-        event.preventDefault();
-        const index = list.findIndex((clip) => clip.id === selectedClipId);
-        const nextIndex =
-          index < 0
-            ? 0
-            : Math.min(Math.max(index + (event.key === 'ArrowDown' ? 1 : -1), 0), list.length - 1);
-        setSelectedClipId(list[nextIndex].id);
-        return;
-      }
-      if (isInteractive) return;
+      // The listbox is intentionally interactive, but its active descendant
+      // still uses History's Enter and Delete actions. Nested controls remain
+      // excluded because only the listbox element itself qualifies here.
+      if (isInteractive && !isClipListFocusOwner) return;
       if (event.key === 'Enter' && selectedClipId) {
         event.preventDefault();
         handleCopy(selectedClipId, event.shiftKey);
@@ -1074,6 +1064,7 @@ export function HistoryWindow() {
             // somewhere else.
             selectOnHover={false}
             selectable
+            keyboardNavigation
             checkedIds={selection.ids}
             onToggleSelect={handleToggleSelect}
             onSelectClip={setSelectedClipId}
@@ -1112,6 +1103,9 @@ export function HistoryWindow() {
       <footer className="flex h-9 shrink-0 items-center border-t border-border px-4 text-[10px] text-muted-foreground">
         <span>{totalClipCount.toLocaleString()} items</span>
         <div className="ml-auto flex items-center gap-3">
+          <span>
+            <kbd>↑↓</kbd> Select
+          </span>
           <span>
             <kbd>Enter</kbd> Copy
           </span>
