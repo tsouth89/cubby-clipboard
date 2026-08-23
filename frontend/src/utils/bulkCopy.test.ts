@@ -1,14 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
-import { BULK_COPY_CONCURRENCY, collectBulkCopyText } from './bulkCopy';
+import { collectBulkCopyText, type BulkCopyTextResult } from './bulkCopy';
 import { ClipboardItem } from '../types';
 
-/** A row as `get_clips` with `previewOnly: true` ships it: no body, prefix only. */
-function previewOnlyRow(id: string, preview: string, clip_type = 'text'): ClipboardItem {
+function row(id: string, clip_type = 'text'): ClipboardItem {
   return {
     id,
     clip_type,
     content: '',
-    preview,
+    preview: '',
     folder_id: null,
     is_pinned: false,
     created_at: '2026-08-15T09:00:00Z',
@@ -19,89 +18,63 @@ function previewOnlyRow(id: string, preview: string, clip_type = 'text'): Clipbo
   };
 }
 
+const result = (id: string, text: string | null, failed = false): BulkCopyTextResult => ({
+  id,
+  text,
+  failed,
+});
+
 describe('collectBulkCopyText', () => {
-  it('copies the full bodies of preview_only text rows, not an empty error', async () => {
-    const bodies: Record<string, string> = {
-      one: `${'copied log line\n'.repeat(200)}FULL-BODY-ONE`,
-      two: 'the whole second clip',
-    };
-    const rows = [previewOnlyRow('one', 'copied log line'), previewOnlyRow('two', 'the whole')];
+  it('loads text clips in one batch', async () => {
+    const load = vi.fn(async () => [result('one', 'first body'), result('two', 'second body')]);
+    const plan = await collectBulkCopyText([row('one'), row('two')], load);
 
-    const plan = await collectBulkCopyText(rows, async (id) => bodies[id]);
-
-    expect(plan.parts).toEqual([bodies.one, bodies.two]);
-    expect(plan.skipped).toBe(0);
-    expect(plan.failed).toBe(0);
-    // The failure this replaces: both rows treated as empty, nothing to copy.
-    expect(plan.parts.length).toBeGreaterThan(0);
+    expect(load).toHaveBeenCalledOnce();
+    expect(load).toHaveBeenCalledWith(['one', 'two']);
+    expect(plan.parts).toEqual(['first body', 'second body']);
   });
 
-  it('never falls back to the row, so a prefix cannot be copied as the clip', async () => {
-    const rows = [previewOnlyRow('one', 'copied log line')];
-    const plan = await collectBulkCopyText(rows, async () => {
-      throw new Error('details unavailable');
-    });
+  it('includes recognized image text in visible selection order', async () => {
+    const load = vi.fn(async () => [result('text', 'plain'), result('shot', 'invoice total')]);
+    const plan = await collectBulkCopyText([row('shot', 'image'), row('text')], load);
+
+    expect(plan.parts).toEqual(['invoice total', 'plain']);
+    expect(plan.skipped).toBe(0);
+  });
+
+  it('includes OCR after the full image has expired', async () => {
+    const expired = { ...row('old-shot', 'image'), image_expired: true, has_ocr_text: true };
+    const plan = await collectBulkCopyText([expired], async () => [
+      result('old-shot', 'retained words'),
+    ]);
+
+    expect(plan.parts).toEqual(['retained words']);
+  });
+
+  it('counts only genuinely blank results as skipped', async () => {
+    const plan = await collectBulkCopyText([row('shot', 'image'), row('blank')], async () => [
+      result('shot', null),
+      result('blank', '   '),
+    ]);
 
     expect(plan.parts).toEqual([]);
-    expect(plan.failed).toBe(1);
-    expect(plan.skipped).toBe(0);
-  });
-
-  it('keeps the loaded clips when only some fail', async () => {
-    const rows = [previewOnlyRow('good', 'first'), previewOnlyRow('bad', 'second')];
-    const plan = await collectBulkCopyText(rows, async (id) => {
-      if (id === 'bad') throw new Error('details unavailable');
-      return 'first body';
-    });
-
-    expect(plan.parts).toEqual(['first body']);
-    expect(plan.failed).toBe(1);
-  });
-
-  it('skips images without fetching them and counts blank text as skipped', async () => {
-    const rows = [
-      previewOnlyRow('shot', 'Screenshot', 'image'),
-      previewOnlyRow('blank', ''),
-      previewOnlyRow('real', 'text'),
-    ];
-    const loadBody = vi.fn(async (id: string) => (id === 'blank' ? '   ' : 'real body'));
-
-    const plan = await collectBulkCopyText(rows, loadBody);
-
-    expect(plan.parts).toEqual(['real body']);
     expect(plan.skipped).toBe(2);
-    expect(loadBody).not.toHaveBeenCalledWith('shot');
-  });
-
-  it('preserves the selected order regardless of which load resolves first', async () => {
-    const rows = [previewOnlyRow('slow', 'a'), previewOnlyRow('fast', 'b')];
-    const plan = await collectBulkCopyText(rows, async (id) => {
-      if (id === 'slow') await new Promise((resolve) => setTimeout(resolve, 5));
-      return `${id} body`;
-    });
-
-    expect(plan.parts).toEqual(['slow body', 'fast body']);
-  });
-
-  it('never loads an unrevealed hidden clip, so Select All cannot copy a secret', async () => {
-    const secret = { ...previewOnlyRow('secret', ''), is_hidden: true };
-    const rows = [secret, previewOnlyRow('plain', 'a note')];
-    const loadBody = vi.fn(async () => 'plain body');
-
-    const plan = await collectBulkCopyText(rows, loadBody);
-
-    expect(loadBody).not.toHaveBeenCalledWith('secret');
-    expect(plan.parts).toEqual(['plain body']);
-    expect(plan.hidden).toBe(1);
-    expect(plan.skipped).toBe(0);
     expect(plan.failed).toBe(0);
   });
 
-  it('copies a hidden clip the user already revealed this session', async () => {
-    const secret = { ...previewOnlyRow('secret', ''), is_hidden: true };
-    const loadBody = vi.fn(async () => 'swordfish');
+  it('does not request an unrevealed hidden clip', async () => {
+    const secret = { ...row('secret'), is_hidden: true };
+    const load = vi.fn(async () => [result('plain', 'visible')]);
+    const plan = await collectBulkCopyText([secret, row('plain')], load);
 
-    const plan = await collectBulkCopyText([secret], loadBody, {
+    expect(load).toHaveBeenCalledWith(['plain']);
+    expect(plan.parts).toEqual(['visible']);
+    expect(plan.hidden).toBe(1);
+  });
+
+  it('loads a hidden clip only after this session revealed it', async () => {
+    const secret = { ...row('secret'), is_hidden: true };
+    const plan = await collectBulkCopyText([secret], async () => [result('secret', 'swordfish')], {
       revealedIds: new Set(['secret']),
     });
 
@@ -109,21 +82,22 @@ describe('collectBulkCopyText', () => {
     expect(plan.hidden).toBe(0);
   });
 
-  it('caps how many bodies are held in memory at once', async () => {
-    const rows = Array.from({ length: 20 }, (_, index) => previewOnlyRow(`row-${index}`, 'x'));
-    let inFlight = 0;
-    let peak = 0;
-    const plan = await collectBulkCopyText(rows, async (id) => {
-      inFlight += 1;
-      peak = Math.max(peak, inFlight);
-      await new Promise((resolve) => setTimeout(resolve, 1));
-      inFlight -= 1;
-      return `${id} body`;
+  it('keeps good rows and reports missing or unreadable rows', async () => {
+    const plan = await collectBulkCopyText([row('good'), row('bad'), row('gone')], async () => [
+      result('bad', null, true),
+      result('good', 'kept'),
+    ]);
+
+    expect(plan.parts).toEqual(['kept']);
+    expect(plan.failed).toBe(2);
+  });
+
+  it('reports every requested row when the batch fails', async () => {
+    const plan = await collectBulkCopyText([row('one'), row('two')], async () => {
+      throw new Error('database unavailable');
     });
 
-    expect(peak).toBeLessThanOrEqual(BULK_COPY_CONCURRENCY);
-    expect(peak).toBeGreaterThan(1);
-    // Bounding the fan-out must not drop or reorder anything.
-    expect(plan.parts).toEqual(rows.map((row) => `${row.id} body`));
+    expect(plan.parts).toEqual([]);
+    expect(plan.failed).toBe(2);
   });
 });
