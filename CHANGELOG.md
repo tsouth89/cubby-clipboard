@@ -9,6 +9,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 
 ### Fixed
 - History bulk Copy now includes recognized text from selected images, including images whose full-resolution original has expired
+- Encrypted backup exports now flush a complete sibling temp file before replacing an existing backup, preserving the prior file on write or install failure (#189)
 - Flood-dropping a queued self-paste echo no longer leaves the ignore hash swallowing the next real copy of that content (SBS-1039)
 - Recover a dest-gone rolling `cubby.db.bak` replace on FAT/exFAT instead of deleting the only remaining copy (SBS-1051)
 - Settings and the support FAQ no longer say the configured hotkey opens Cubby in remote sessions unless Replace Windows clipboard shortcut is on (SBS-1049)
