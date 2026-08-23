@@ -21,6 +21,14 @@ import { useEffect, useRef } from 'react';
  */
 export function useModalDialog<T extends HTMLElement>(onEscape?: () => void, enabled = true) {
   const containerRef = useRef<T>(null);
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  const wasEnabledRef = useRef(false);
+  if (enabled && !wasEnabledRef.current) {
+    // Capture during render, before React applies autoFocus while committing the
+    // dialog. Waiting for the effect would remember the dialog input instead.
+    previouslyFocusedRef.current = document.activeElement as HTMLElement | null;
+  }
+  wasEnabledRef.current = enabled;
   // Read through a ref so changing the handler between renders does not tear
   // down and re-run the focus effect, which would steal focus back on every
   // parent render.
@@ -31,8 +39,6 @@ export function useModalDialog<T extends HTMLElement>(onEscape?: () => void, ena
     if (!enabled) return;
     const container = containerRef.current;
     if (!container) return;
-
-    const previouslyFocused = document.activeElement as HTMLElement | null;
 
     const focusable = () =>
       Array.from(
@@ -93,8 +99,8 @@ export function useModalDialog<T extends HTMLElement>(onEscape?: () => void, ena
       document.removeEventListener('keydown', handleKeyDown, true);
       // The invoking control can be gone by now (deleted clip, closed panel);
       // isConnected keeps that from throwing focus somewhere arbitrary.
-      if (previouslyFocused?.isConnected) {
-        previouslyFocused.focus();
+      if (previouslyFocusedRef.current?.isConnected) {
+        previouslyFocusedRef.current.focus();
       }
     };
   }, [enabled]);

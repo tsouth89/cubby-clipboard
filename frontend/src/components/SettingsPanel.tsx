@@ -19,8 +19,9 @@ import {
   AlertTriangle,
   FlaskConical,
 } from 'lucide-react';
-import { useState, useEffect, useRef, type ReactNode } from 'react';
+import { useState, useEffect, useId, useRef, type ReactNode } from 'react';
 import { useTheme } from '../hooks/useTheme';
+import { useModalDialog } from '../hooks/useModalDialog';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
@@ -336,6 +337,8 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   const [backupPrompt, setBackupPrompt] = useState<'export' | 'import' | null>(null);
   const [backupPassphrase, setBackupPassphrase] = useState('');
   const [backupPassphraseConfirm, setBackupPassphraseConfirm] = useState('');
+  const backupPromptTitleId = useId();
+  const backupPromptDescriptionId = useId();
   const [ocrStatus, setOcrStatus] = useState<OcrQueueStatus | null>(null);
   const [ocrActionBusy, setOcrActionBusy] = useState(false);
   const [storageUsage, setStorageUsage] = useState<StorageUsage | null>(null);
@@ -583,6 +586,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     setBackupPassphrase('');
     setBackupPassphraseConfirm('');
   };
+  const backupPromptRef = useModalDialog<HTMLFormElement>(closeBackupPrompt, backupPrompt !== null);
 
   const handleExportBackup = async (passphrase: string) => {
     let path: string;
@@ -867,6 +871,12 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
       {backupPrompt && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
           <form
+            ref={backupPromptRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={backupPromptTitleId}
+            aria-describedby={backupPromptDescriptionId}
+            tabIndex={-1}
             className="w-full max-w-sm rounded-lg border border-border bg-card p-4 shadow-xl"
             onSubmit={(event) => {
               event.preventDefault();
@@ -877,10 +887,13 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
               else void handleImportBackup(passphrase);
             }}
           >
-            <h2 className="text-sm font-semibold">
+            <h2 id={backupPromptTitleId} className="text-sm font-semibold">
               {backupPrompt === 'export' ? 'Choose a passphrase' : 'Enter the passphrase'}
             </h2>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            <p
+              id={backupPromptDescriptionId}
+              className="mt-1 text-xs leading-5 text-muted-foreground"
+            >
               {backupPrompt === 'export'
                 ? 'This passphrase encrypts the backup file. Cubby does not store it — if you lose it, the backup cannot be opened by anyone, including you.'
                 : 'The passphrase this backup was created with.'}
