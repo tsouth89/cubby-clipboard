@@ -1032,6 +1032,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         control={
                           <div className="w-40">
                             <Select
+                              ariaLabel={t('settings.language')}
                               value={settings.language || 'en'}
                               onChange={handleLanguageChange}
                               options={[
@@ -1348,6 +1349,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         control={
                           <div className="w-40">
                             <Select
+                              ariaLabel={t('settings.keepHistoryFor')}
                               value={String(settings.auto_delete_days ?? 30)}
                               onChange={handleRetentionChange}
                               options={[
