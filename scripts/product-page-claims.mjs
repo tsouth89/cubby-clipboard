@@ -182,13 +182,6 @@ export function findStaleBackupOmissionClaims(source) {
 }
 
 /**
- * Weaker scan used by the release check: a sentence that says files are
- * retained or supported without also negating that. Broader than
- * `findFileListHistoryClaims` so "Cubby stores files" still fails even when
- * it never says "file lists". `no`/`without`/`none`/`neither` have to count
- * as negation or a disclaimer such as "No files are retained" false-fails.
- */
-/**
  * SBS-1049: the remote-session hotkey path is the Win+V helper hook.
  * Settings and support once said the configured hotkey / remote trigger
  * opens Cubby whenever keyboard forwarding is off, which is false with
@@ -196,12 +189,23 @@ export function findStaleBackupOmissionClaims(source) {
  *
  * A sentence is a claim when it names a remote session, a hotkey or
  * trigger, and an open/available verb, without also naming the hook.
+ * A negation in the same clause before that verb is a disclaimer, the
+ * same way the file-list detectors treat "does not store file lists".
  */
 const REMOTE_SESSION = /\bremote(?:[\s-]session)?s?\b/i;
 const HOTKEY_OR_TRIGGER = /\b(?:hotkeys?|(?:remote[\s-]+session\s+)?triggers?)\b/i;
 const OPENS_OR_AVAILABLE = /\b(?:opens?\s+cubby|open\s+cubby|available)\b/i;
 const WIN_V_REPLACEMENT_DEPENDENCY =
   /\b(?:win\s*\+\s*v\s+replacement|replace(?:s|ment)?\s+windows\s+clipboard|helper\s+hook|replacement\s+(?:mode|must|is\s+on|enabled))\b/i;
+
+function isNegatedOpenOrAvailable(segment) {
+  const open = segment.search(OPENS_OR_AVAILABLE);
+  if (open === -1) {
+    return false;
+  }
+  const before = segment.slice(0, open);
+  return lastMatchIndex(NEGATION, before.slice(lastClauseStart(before))) !== -1;
+}
 
 export function findUnqualifiedRemoteHotkeyClaims(source) {
   const claims = [];
@@ -218,11 +222,21 @@ export function findUnqualifiedRemoteHotkeyClaims(source) {
     if (WIN_V_REPLACEMENT_DEPENDENCY.test(segment)) {
       continue;
     }
+    if (isNegatedOpenOrAvailable(segment)) {
+      continue;
+    }
     claims.push(segment);
   }
   return claims;
 }
 
+/**
+ * Weaker scan used by the release check: a sentence that says files are
+ * retained or supported without also negating that. Broader than
+ * `findFileListHistoryClaims` so "Cubby stores files" still fails even when
+ * it never says "file lists". `no`/`without`/`none`/`neither` have to count
+ * as negation or a disclaimer such as "No files are retained" false-fails.
+ */
 export function findWeakerFileRetentionClaim(source) {
   const fileMentionPattern = /\bfiles?\b/i;
   const retentionClaimPattern =

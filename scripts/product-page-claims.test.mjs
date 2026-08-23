@@ -364,6 +364,25 @@ test('a restated remote-hotkey claim without replacement is reported', () => {
   );
 });
 
+test('a negated remote-hotkey sentence is not a claim', () => {
+  for (const sentence of [
+    'The configured hotkey does not open Cubby in remote sessions.',
+    'A remote-session trigger is not available when keyboard forwarding is off.',
+    'Your hotkey never opens Cubby inside a remote session.',
+  ]) {
+    assert.deepEqual(findUnqualifiedRemoteHotkeyClaims(sentence), [], sentence);
+  }
+});
+
+test('a later negation does not hide an earlier remote-hotkey claim', () => {
+  assert.equal(
+    findUnqualifiedRemoteHotkeyClaims(
+      'Your hotkey opens Cubby inside remote sessions, not from the tray.'
+    ).length,
+    1
+  );
+});
+
 test('naming Win+V replacement qualifies the remote-hotkey sentence', () => {
   for (const sentence of [
     'When Replace Windows clipboard shortcut is on, your hotkey opens Cubby inside remote sessions if keyboard forwarding is off.',
