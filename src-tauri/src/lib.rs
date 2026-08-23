@@ -39,6 +39,7 @@ mod crypto;
 mod database;
 mod ditto_import;
 mod image_persist;
+mod image_stage;
 mod log_targets;
 mod managed_image;
 mod models;

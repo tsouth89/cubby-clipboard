@@ -68,9 +68,10 @@ impl Drop for StagedImageFile {
 }
 
 /// Encrypt and write the new original to a sibling temp file without touching
-/// the live `{uuid}.cubby`. `std::fs::write` truncates on open, so writing the
-/// live name in place would destroy the previous good file if the write failed
-/// mid-stream.
+/// the live `{uuid}.cubby`. The temp is created with `create_new` so a dest-gone
+/// leave-temp (the only remaining original after SBS-1030) cannot be truncated
+/// by same-uuid restaging (SBS-1073). Writing the live name in place would
+/// destroy the previous good file if the write failed mid-stream.
 pub(crate) fn stage_full_image_file(
     crypto: &CryptoManager,
     image_dir: &Path,
@@ -81,7 +82,7 @@ pub(crate) fn stage_full_image_file(
     let final_path = image_dir.join(format!("{}.cubby", clip_uuid));
     let temp_path = image_dir.join(format!("{}.cubby.tmp", clip_uuid));
     let encrypted = crypto.encrypt(png_bytes)?;
-    std::fs::write(&temp_path, encrypted).map_err(|e| e.to_string())?;
+    crate::image_stage::write_staged_image_temp(&temp_path, &encrypted)?;
     Ok(StagedImageFile {
         temp_path,
         final_path,
@@ -355,6 +356,86 @@ mod tests {
         assert!(
             !temp_path.exists(),
             "recovery consumes the temp so Drop has nothing to delete"
+        );
+
+        let _ = std::fs::remove_dir_all(&image_dir);
+    }
+
+    /// SBS-1073: a dest-gone leave-temp is the only remaining original. Same-uuid
+    /// restaging used `fs::write`, which truncates that file on open. The retry
+    /// must fail the create instead of destroying those bytes.
+    #[test]
+    fn restaging_does_not_overwrite_a_dest_gone_leave_temp() {
+        let crypto = CryptoManager::ephemeral();
+        let image_dir = std::env::temp_dir().join(format!(
+            "cubby-image-restage-leave-temp-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&image_dir).unwrap();
+        let uuid = "dest-gone-restage";
+        let live_path = image_dir.join(format!("{uuid}.cubby"));
+        let temp_path = image_dir.join(format!("{uuid}.cubby.tmp"));
+        let leave_temp_bytes = crypto.encrypt(b"only-remaining-original").unwrap();
+        std::fs::write(&temp_path, &leave_temp_bytes).unwrap();
+        assert!(
+            !live_path.exists(),
+            "this is the dest-gone leave-temp case: no live original"
+        );
+
+        let staged = stage_full_image_file(&crypto, &image_dir, uuid, b"retry-full-res");
+        assert!(
+            staged.is_err(),
+            "restaging must refuse to open the existing leave-temp: {staged:?}"
+        );
+        let error = staged.unwrap_err();
+        assert!(
+            error.contains("refusing to overwrite"),
+            "the error should describe the staging-file conflict: {}",
+            error
+        );
+        assert_eq!(
+            std::fs::read(&temp_path).expect("leave-temp must still exist"),
+            leave_temp_bytes,
+            "restaging must not truncate the dest-gone leave-temp"
+        );
+        assert_eq!(
+            read_original(&crypto, &temp_path.to_string_lossy()),
+            b"only-remaining-original"
+        );
+        assert!(
+            !live_path.exists(),
+            "a refused restage must not invent a live original"
+        );
+
+        let _ = std::fs::remove_dir_all(&image_dir);
+    }
+
+    /// A leftover temp beside a live dest is not the only copy, but restaging
+    /// still must not truncate it. `create_new` treats that the same as dest-gone.
+    #[test]
+    fn restaging_does_not_overwrite_an_existing_temp_beside_a_live_original() {
+        let crypto = CryptoManager::ephemeral();
+        let image_dir = std::env::temp_dir().join(format!(
+            "cubby-image-restage-beside-live-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let uuid = "restage-beside-live";
+        let live_path =
+            persist_full_image_file(&crypto, &image_dir, uuid, b"previous-full-res").unwrap();
+        let temp_path = image_dir.join(format!("{uuid}.cubby.tmp"));
+        let leftover_bytes = crypto.encrypt(b"leftover-staging-bytes").unwrap();
+        std::fs::write(&temp_path, &leftover_bytes).unwrap();
+
+        let staged = stage_full_image_file(&crypto, &image_dir, uuid, b"retry-full-res");
+        assert!(
+            staged.is_err(),
+            "restaging must refuse to open an existing staging file: {staged:?}"
+        );
+        assert_eq!(read_original(&crypto, &live_path), b"previous-full-res");
+        assert_eq!(
+            std::fs::read(&temp_path).expect("leftover temp must still exist"),
+            leftover_bytes,
+            "restaging must not truncate a leftover staging file"
         );
 
         let _ = std::fs::remove_dir_all(&image_dir);
@@ -998,6 +1079,80 @@ mod tests {
         assert!(
             !image_dir.join(format!("{uuid}.cubby.tmp")).exists(),
             "a committed staged file must leave no temp file behind"
+        );
+
+        let _ = std::fs::remove_dir_all(&image_dir);
+    }
+
+    /// SBS-1073 on the expired-revival Capture retry: dest is already gone
+    /// (retention), and a prior dest-gone commit left `{uuid}.cubby.tmp` as the
+    /// only remaining original. Restaging that uuid must fail the recapture
+    /// without truncating those bytes, and the row must stay expired.
+    #[tokio::test]
+    async fn restaging_an_expired_revive_does_not_overwrite_the_leave_temp() {
+        let pool = recapture_pool().await;
+        let crypto = CryptoManager::ephemeral();
+        let image_dir = std::env::temp_dir().join(format!(
+            "cubby-recapture-restage-leave-temp-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&image_dir).unwrap();
+        let uuid = "expired-image-restage";
+        let (old_content, old_preview) = seed_expired_image_clip(&pool, &crypto, uuid).await;
+
+        let temp_path = image_dir.join(format!("{uuid}.cubby.tmp"));
+        let leave_temp_bytes = crypto.encrypt(b"only-remaining-original").unwrap();
+        std::fs::write(&temp_path, &leave_temp_bytes).unwrap();
+
+        let staged = stage_full_image_file(&crypto, &image_dir, uuid, b"retry-full-res");
+        assert!(
+            staged.is_err(),
+            "expired-revival restaging must refuse to overwrite the leave-temp"
+        );
+
+        let recapture = apply_existing_image_recapture(
+            &pool,
+            uuid,
+            staged,
+            b"retry-full-res".len() as i64,
+            new_fields(b"new-thumbnail", "new-preview"),
+        )
+        .await;
+        assert!(
+            recapture.is_err(),
+            "a refused restage must fail the recapture, not continue as success"
+        );
+
+        let row = load_recapture_row(&pool, uuid).await;
+        assert_eq!(row.0, old_content, "thumbnail must stay the expired one");
+        assert_eq!(
+            row.1.as_deref(),
+            Some(old_preview.as_str()),
+            "preview must stay the expired one"
+        );
+        assert_eq!(
+            row.3, 1,
+            "a refused revive must keep full_image_expired so Paste still says expired"
+        );
+
+        let indexed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM clip_images WHERE clip_uuid = ?")
+                .bind(uuid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            indexed, 0,
+            "no clip_images row may name an original that is not on disk"
+        );
+        assert_eq!(
+            std::fs::read(&temp_path).expect("leave-temp must still exist"),
+            leave_temp_bytes,
+            "the dest-gone leave-temp must stay byte-identical through the retry"
+        );
+        assert!(
+            !image_dir.join(format!("{uuid}.cubby")).exists(),
+            "a refused restage must not invent a live original"
         );
 
         let _ = std::fs::remove_dir_all(&image_dir);
