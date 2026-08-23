@@ -6,6 +6,7 @@ import { checkPrivilegedActionPins } from '../.github/scripts/check-privileged-a
 import {
   findFileListHistoryClaims,
   findStaleBackupOmissionClaims,
+  findStaleRemoteRelayPrivacyBypassClaims,
   findUnqualifiedRemoteHotkeyClaims,
   findWeakerFileRetentionClaim,
 } from './product-page-claims.mjs';
@@ -298,6 +299,18 @@ for (const [docName, doc] of userFacingHistoryDocs) {
   }
 }
 
+// SBS-1071: skip_sensitive and skip_likely_secrets return before
+// relay_remote_capture. Privacy and Settings once said those gates do
+// not stop remote relay, and that the relay re-announces "anything."
+for (const [docName, doc] of userFacingHistoryDocs) {
+  const [claim] = findStaleRemoteRelayPrivacyBypassClaims(doc);
+  if (claim) {
+    throw new Error(
+      `${docName} still claims skip-sensitive or skip-likely-secrets leave remote relay running: ${claim}`
+    );
+  }
+}
+
 // The hint is only true while replacement is on. An unconditional render
 // next to Remote session paste restated the Settings lie when the toggle
 // was off.
@@ -325,6 +338,36 @@ if (!/\bHTML\b/.test(backupSection) || !/\bRTF\b/.test(backupSection)) {
 if (!/\bfull[\s-]*resolution\b/i.test(backupSection)) {
   throw new Error(
     'product_pages/privacy.html must say encrypted backups include live full-resolution originals'
+  );
+}
+
+// SBS-1071: the remote-session section must keep saying the skip
+// gates stop relay, not only that ignored viewer processes do.
+const remoteSection = privacyPageDoc.match(
+  /<h2>Remote-session clipboard<\/h2>\s*<p>([\s\S]*?)<\/p>/
+)?.[1];
+if (!remoteSection) {
+  throw new Error('product_pages/privacy.html must keep a Remote-session clipboard section');
+}
+if (
+  !/\bsensitive\b/i.test(remoteSection) ||
+  !/\blikely[\s-]secrets?\b/i.test(remoteSection)
+) {
+  throw new Error(
+    'product_pages/privacy.html must say skip-sensitive and skip-likely-secrets stop remote relay'
+  );
+}
+const relayDesc = settingsPanelSource.match(
+  /Re-announce[\s\S]*?Ctrl\+V in another\./
+)?.[0];
+if (!relayDesc) {
+  throw new Error(
+    'Could not read the remote clipboard relay description in SettingsPanel.tsx'
+  );
+}
+if (!/\bsensitive\b/i.test(relayDesc) || !/\blikely secrets\b/i.test(relayDesc)) {
+  throw new Error(
+    'SettingsPanel remote clipboard relay description must say sensitive and likely-secret skips block relay'
   );
 }
 
