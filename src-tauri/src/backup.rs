@@ -724,6 +724,15 @@ fn read_export_image_file(
 /// Write `bytes` beside `path`, then replace the destination so a failed
 /// persist cannot leave a truncated backup in the user's chosen file.
 fn persist_backup_file(path: &str, bytes: &[u8]) -> Result<(), String> {
+    persist_backup_file_with(path, bytes, write_backup_temp, replace_exported_backup)
+}
+
+fn persist_backup_file_with(
+    path: &str,
+    bytes: &[u8],
+    write: impl FnOnce(&Path, &[u8]) -> Result<(), String>,
+    install: impl FnOnce(&Path, &Path) -> Result<(), String>,
+) -> Result<(), String> {
     refuse_oversize_bundle(bytes.len() as u64)?;
     let dest = Path::new(path);
     if dest.file_name().is_none() {
@@ -731,12 +740,12 @@ fn persist_backup_file(path: &str, bytes: &[u8]) -> Result<(), String> {
     }
     let temp = backup_temp_path(dest);
 
-    if let Err(error) = std::fs::write(&temp, bytes) {
+    if let Err(error) = write(&temp, bytes) {
         remove_backup_temp(&temp);
         return Err(format!("Could not save the backup: {error}"));
     }
 
-    let Err(error) = replace_exported_backup(&temp, dest) else {
+    let Err(error) = install(&temp, dest) else {
         return Ok(());
     };
 
@@ -745,7 +754,7 @@ fn persist_backup_file(path: &str, bytes: &[u8]) -> Result<(), String> {
     // gives us. A failure after the destination entry is gone leaves the temp
     // holding the only copy of the bundle, so deleting it here would destroy
     // both the old backup and the new one. Try to put it in place instead.
-    if !dest.exists() && temp.exists() && std::fs::rename(&temp, dest).is_ok() {
+    if crate::settings_load::recover_dest_gone_replace(&temp, dest) {
         log::warn!(
             "BACKUP: replacing the destination failed ({error}); the new bundle was renamed into place instead"
         );
@@ -754,6 +763,21 @@ fn persist_backup_file(path: &str, bytes: &[u8]) -> Result<(), String> {
 
     remove_backup_temp(&temp);
     Err(format!("Could not save the backup: {error}"))
+}
+
+/// Write the complete encrypted bundle and make its contents durable before
+/// the destination entry is replaced. `create_new` also ensures an improbable
+/// temp-name collision cannot overwrite another export.
+fn write_backup_temp(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    file.write_all(bytes).map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())
 }
 
 /// Best-effort removal of the sibling temp, retried briefly.
@@ -2234,6 +2258,70 @@ mod tests {
         );
         assert!(dest.is_dir(), "the existing destination must remain");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn injected_partial_write_failure_preserves_destination_and_removes_temp() {
+        use std::io::Write;
+
+        let dest = temp_path("atomic-write-failure");
+        let original = b"last-known-good backup";
+        std::fs::write(&dest, original).unwrap();
+
+        let error = persist_backup_file_with(
+            dest.to_str().unwrap(),
+            b"new encrypted bundle",
+            |temp, _| {
+                let mut file = std::fs::File::create(temp).map_err(|error| error.to_string())?;
+                file.write_all(b"partial")
+                    .map_err(|error| error.to_string())?;
+                Err("simulated disk-full write".to_string())
+            },
+            |_, _| panic!("install must not run after a write failure"),
+        )
+        .expect_err("the injected write must fail");
+
+        assert!(error.contains("simulated disk-full write"));
+        assert_eq!(std::fs::read(&dest).unwrap(), original);
+        assert!(leftover_backup_temps(dest.parent().unwrap()).is_empty());
+        let _ = std::fs::remove_dir_all(dest.parent().unwrap());
+    }
+
+    #[test]
+    fn injected_install_failure_preserves_destination_and_removes_temp() {
+        let dest = temp_path("atomic-install-failure");
+        let original = b"last-known-good backup";
+        std::fs::write(&dest, original).unwrap();
+
+        let error = persist_backup_file_with(
+            dest.to_str().unwrap(),
+            b"new encrypted bundle",
+            write_backup_temp,
+            |temp, destination| {
+                assert_eq!(std::fs::read(temp).unwrap(), b"new encrypted bundle");
+                assert_eq!(std::fs::read(destination).unwrap(), original);
+                Err("simulated install failure".to_string())
+            },
+        )
+        .expect_err("the injected install must fail");
+
+        assert!(error.contains("simulated install failure"));
+        assert_eq!(std::fs::read(&dest).unwrap(), original);
+        assert!(leftover_backup_temps(dest.parent().unwrap()).is_empty());
+        let _ = std::fs::remove_dir_all(dest.parent().unwrap());
+    }
+
+    #[test]
+    fn successful_persist_replaces_an_existing_destination() {
+        let dest = temp_path("atomic-replacement");
+        std::fs::write(&dest, b"old encrypted bundle").unwrap();
+
+        persist_backup_file(dest.to_str().unwrap(), b"new encrypted bundle")
+            .expect("the completed temp should replace the destination");
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new encrypted bundle");
+        assert!(leftover_backup_temps(dest.parent().unwrap()).is_empty());
+        let _ = std::fs::remove_dir_all(dest.parent().unwrap());
     }
 
     /// SBS-772: an unreadable field blocks the whole backup, but the clip list

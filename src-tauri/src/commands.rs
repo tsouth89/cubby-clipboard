@@ -2916,6 +2916,79 @@ pub struct ClipDetails {
     pub notes: Option<String>,
 }
 
+/// Text payload for one History bulk-copy selection. Images return recognized
+/// text only, so selecting screenshots never transfers their image blobs.
+#[derive(serde::Serialize)]
+pub struct BulkCopyTextResult {
+    pub id: String,
+    pub text: Option<String>,
+    pub failed: bool,
+}
+
+#[tauri::command]
+pub async fn get_bulk_copy_text(
+    ids: Vec<String>,
+    db: tauri::State<'_, Arc<Database>>,
+) -> Result<Vec<BulkCopyTextResult>, String> {
+    get_bulk_copy_text_in_database(db.inner(), &ids).await
+}
+
+async fn get_bulk_copy_text_in_database(
+    db: &Database,
+    ids: &[String],
+) -> Result<Vec<BulkCopyTextResult>, String> {
+    let mut results = Vec::new();
+    // Stay well below SQLite's variable limit even for a large Select All.
+    for chunk in ids.chunks(500) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT uuid, clip_type, \
+                    CASE WHEN clip_type = 'image' THEN NULL ELSE content END, ocr_text \
+             FROM clips \
+             WHERE is_deleted = 0 AND uuid IN ({placeholders})"
+        );
+        let mut query =
+            sqlx::query_as::<_, (String, String, Option<Vec<u8>>, Option<String>)>(&sql);
+        for id in chunk {
+            query = query.bind(id);
+        }
+        let rows = query
+            .fetch_all(&db.pool)
+            .await
+            .map_err(|error| error.to_string())?;
+        for (id, clip_type, content, ocr_text) in rows {
+            let decrypted = if clip_type == "image" {
+                ocr_text
+                    .map(|value| db.crypto.decrypt_text(&value))
+                    .transpose()
+            } else {
+                content
+                    .ok_or_else(|| "Selected text clip has no content".to_string())
+                    .and_then(|value| db.crypto.decrypt(&value))
+                    .map(|bytes| Some(String::from_utf8_lossy(&bytes).to_string()))
+            };
+            match decrypted {
+                Ok(text) => results.push(BulkCopyTextResult {
+                    id,
+                    text: text.filter(|value| !value.trim().is_empty()),
+                    failed: false,
+                }),
+                Err(error) => {
+                    log::warn!("BULK: Failed to decrypt selected clip {id}: {error}");
+                    results.push(BulkCopyTextResult {
+                        id,
+                        text: None,
+                        failed: true,
+                    });
+                }
+            }
+        }
+    }
+    Ok(results)
+}
+
 #[tauri::command]
 pub async fn get_clip_details(
     id: String,
@@ -3187,13 +3260,13 @@ mod tests {
     use super::{
         build_ocr_highlights, build_ocr_match, clear_clips_in_pool, clipboard_contents_for_restore,
         delete_folder_in_pool, directory_size_bytes, enforce_retention_in_pool, excluded_log_dir,
-        get_clip_details_in_database, get_clips_in_database, get_clips_request_log,
-        history_disk_bytes, load_recognized_text, mark_clip_used, migrate_clip_format_model,
-        migrate_encrypted_storage, ocr_text_layout, remove_clip_image_files,
-        remove_duplicate_clips_in_database, restore_hash_material, search_clips_in_database,
-        set_clip_notes_in_database, set_clip_ocr_text_in_database, source_app_filter_log_state,
-        toggle_clip_hidden_in_pool, toggle_clip_pin_in_pool, update_clip_text_in_database,
-        ClipboardContent, NOTE_CHAR_LIMIT, OCR_SNIPPET_CHAR_LIMIT,
+        get_bulk_copy_text_in_database, get_clip_details_in_database, get_clips_in_database,
+        get_clips_request_log, history_disk_bytes, load_recognized_text, mark_clip_used,
+        migrate_clip_format_model, migrate_encrypted_storage, ocr_text_layout,
+        remove_clip_image_files, remove_duplicate_clips_in_database, restore_hash_material,
+        search_clips_in_database, set_clip_notes_in_database, set_clip_ocr_text_in_database,
+        source_app_filter_log_state, toggle_clip_hidden_in_pool, toggle_clip_pin_in_pool,
+        update_clip_text_in_database, ClipboardContent, NOTE_CHAR_LIMIT, OCR_SNIPPET_CHAR_LIMIT,
     };
     use crate::clipboard::CapturedFormat;
     use crate::database::Database;
@@ -6353,5 +6426,41 @@ mod tests {
         // No matching word, and too-short tokens, both yield nothing.
         assert!(build_ocr_highlights(&json, "zzz").is_none());
         assert!(build_ocr_highlights(&json, "a").is_none());
+    }
+
+    #[tokio::test]
+    async fn bulk_copy_loads_text_and_image_ocr_without_full_images() {
+        let database = test_database().await;
+        insert_search_clip(
+            &database,
+            SearchFixture::text("plain", "full text body", "2026-08-15T09:00:00Z"),
+        )
+        .await;
+        let mut image =
+            SearchFixture::text("shot", "PNG BYTES MUST NOT LEAVE", "2026-08-15T09:00:00Z");
+        image.clip_type = "image";
+        image.ocr = Some("invoice total");
+        insert_search_clip(&database, image).await;
+        sqlx::query("UPDATE clips SET full_image_expired = 1 WHERE uuid = 'shot'")
+            .execute(&database.pool)
+            .await
+            .unwrap();
+
+        let ids = vec![
+            "shot".to_string(),
+            "plain".to_string(),
+            "missing".to_string(),
+        ];
+        let rows = get_bulk_copy_text_in_database(&database, &ids)
+            .await
+            .unwrap();
+        let by_id: std::collections::HashMap<_, _> =
+            rows.into_iter().map(|row| (row.id.clone(), row)).collect();
+
+        assert_eq!(by_id["plain"].text.as_deref(), Some("full text body"));
+        assert_eq!(by_id["shot"].text.as_deref(), Some("invoice total"));
+        assert!(!by_id["shot"].failed);
+        assert!(!by_id.contains_key("missing"));
+        assert!(!by_id["shot"].text.as_deref().unwrap().contains("PNG BYTES"));
     }
 }
