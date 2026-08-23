@@ -203,11 +203,7 @@ pub async fn save_settings(
         }
     }
 
-    log::info!(
-        "save_settings: language={}, theme={}",
-        new_settings.language,
-        new_settings.theme
-    );
+    log::info!("save_settings: theme={}", new_settings.theme);
     Ok(())
 }
 

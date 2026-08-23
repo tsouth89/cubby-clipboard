@@ -1,19 +1,13 @@
-/** Accessible-name i18n key for a flyout context menu.
- *
- *  Folder and History share `ContextMenu` with clip cards. Mapping by `kind`
- *  keeps those menus from being announced as clip actions (SBS-1013).
- */
+/** Accessible name for a flyout context menu. */
 export type ContextMenuKind = 'card' | 'folder' | 'history';
 
-export function contextMenuLabelKey(
-  kind: ContextMenuKind
-): 'common.clipActions' | 'common.folderActions' | 'common.historyActions' {
+export function contextMenuLabel(kind: ContextMenuKind): string {
   switch (kind) {
     case 'folder':
-      return 'common.folderActions';
+      return 'Folder actions';
     case 'history':
-      return 'common.historyActions';
+      return 'History actions';
     case 'card':
-      return 'common.clipActions';
+      return 'Clip actions';
   }
 }

@@ -1,5 +1,4 @@
 import { useEffect, useRef } from 'react';
-import { useTranslation } from 'react-i18next';
 import { ClipboardItem } from '../types';
 import { ClipCard } from './ClipCard';
 import { AlertCircle, RefreshCw } from 'lucide-react';
@@ -63,7 +62,6 @@ export function ClipList({
   checkedIds,
   onToggleSelect,
 }: ClipListProps) {
-  const { t } = useTranslation();
   const listRef = useRef<HTMLDivElement>(null);
   // Arrow-key navigation can scroll a card under a stationary cursor and fire
   // mouseenter. A mousemove, including the first one after opening the flyout,
@@ -96,9 +94,11 @@ export function ClipList({
     return (
       <div className="flex h-full flex-col items-center justify-center px-10 text-center">
         <AlertCircle size={22} className="mb-3 text-destructive" />
-        <p className="text-sm font-medium text-foreground/90">{t('clipList.loadFailed')}</p>
+        <p className="text-sm font-medium text-foreground/90">
+          {'Couldn’t load clipboard history'}
+        </p>
         <p className="mt-1 text-xs leading-5 text-muted-foreground">
-          {t('clipList.loadFailedDesc')}
+          {'Cubby kept your data. Try loading it again.'}
         </p>
         <button
           type="button"
@@ -106,7 +106,7 @@ export function ClipList({
           className="mt-4 flex items-center gap-1.5 rounded-md border border-white/[0.1] bg-white/[0.05] px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-white/[0.09]"
         >
           <RefreshCw size={13} />
-          {t('clipList.retry')}
+          {'Try again'}
         </button>
       </div>
     );
@@ -187,7 +187,7 @@ export function ClipList({
       >
         <AlertCircle size={14} className="shrink-0 text-destructive" />
         <p className="min-w-0 flex-1 text-xs font-medium text-foreground/90">
-          {t('clipList.refreshFailed')}
+          {'Couldn’t refresh clipboard history'}
         </p>
         <button
           type="button"
@@ -195,7 +195,7 @@ export function ClipList({
           className="flex shrink-0 items-center gap-1.5 rounded-md border border-white/[0.1] bg-white/[0.05] px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-white/[0.09]"
         >
           <RefreshCw size={13} />
-          {t('clipList.retry')}
+          {'Try again'}
         </button>
       </div>
       {list}
