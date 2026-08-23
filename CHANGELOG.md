@@ -4,6 +4,9 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 
 ## Unreleased
 
+### Security
+- Paste and copy no longer emit the full decrypted clip body to the WebView on a `clipboard-write` event that has no frontend listener (SBS-1042)
+
 ### Fixed
 - Recover a dest-gone rolling `cubby.db.bak` replace on FAT/exFAT instead of deleting the only remaining copy (SBS-1051)
 - Settings and the support FAQ no longer say the configured hotkey opens Cubby in remote sessions unless Replace Windows clipboard shortcut is on (SBS-1049)
