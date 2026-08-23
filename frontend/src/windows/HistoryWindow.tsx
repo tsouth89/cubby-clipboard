@@ -14,11 +14,11 @@ import { useTheme } from '../hooks/useTheme';
 import { useLanguage } from '../hooks/useLanguage';
 import { useSystemAccent } from '../hooks/useSystemAccent';
 import { useRevealedClips } from '../hooks/useRevealedClips';
-import { collectBulkCopyText } from '../utils/bulkCopy';
+import { collectBulkCopyText, type BulkCopyTextResult } from '../utils/bulkCopy';
 import { shortcutsSuspended } from '../utils/flyoutSearch';
-import { ClipDetails } from '../utils/clipPreviewState';
 import { customRange, DATE_PRESET_LABELS, DatePreset, presetRange } from '../utils/dateRange';
 import { folderSelectionAfterReload } from '../utils/folderSelection';
+import { classifyKeyboardTarget } from '../utils/keyboardTarget';
 import { clipListPageArgs, nextPageCursor } from '../utils/clipListPage';
 import {
   clipLoadAnnouncesSuccess,
@@ -233,7 +233,7 @@ export function HistoryWindow() {
         if (loadId === loadIdRef.current) setIsLoading(false);
       }
     },
-    [contentFilter, dateFrom, dateTo, searchQuery, selectedFolder, sourceApp]
+    [contentFilter, dateFrom, dateTo, searchQuery, selectedFolder, sourceApp, t]
   );
 
   const loadFolders = useCallback(async () => {
@@ -473,18 +473,11 @@ export function HistoryWindow() {
       const chosen = selectedIds
         .map((id) => clipsRef.current.find((clip) => clip.id === id))
         .filter((clip): clip is ClipboardItem => Boolean(clip));
-      // Fetch each text clip's body by uuid. List and search both load with
-      // `previewOnly: true`, so a text row's `content` is empty and its
-      // `preview` is only the stored prefix — copying either would ship the
-      // wrong text under a success toast. Images have no text to concatenate
-      // and are reported as skipped. Hidden rows are only loaded if this
-      // session already revealed them.
+      // List rows only carry previews and thumbnails. Load full text and image
+      // OCR together without pulling full image blobs into the renderer.
       const { parts, skipped, hidden, failed } = await collectBulkCopyText(
         chosen,
-        async (id) => {
-          const details = await invoke<ClipDetails>('get_clip_details', { id });
-          return details.content;
-        },
+        (ids) => invoke<BulkCopyTextResult[]>('get_bulk_copy_text', { ids }),
         { revealedIds: new Set(revealed.keys()) }
       );
       if (parts.length === 0) {
@@ -756,15 +749,15 @@ export function HistoryWindow() {
       // buttons. App.tsx stands down the same way with useKeyboard's disabled
       // flag.
       if (shortcutsSuspended(event, bulkDeleteOpen)) return;
-      const target = event.target as HTMLElement | null;
-      const isEditing =
-        target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
+      const { isEditing, isInteractive, isSearch } = classifyKeyboardTarget(
+        event.target,
+        '[data-el="history-search-input"]'
+      );
 
       if (event.key === 'Escape') {
         // Search is an INPUT, so isEditing is true there; Escape still clears
         // the query / closes. Notes and other fields must not close the window
         // even if they forget to stopPropagation (SBS-1008).
-        const isSearch = target?.getAttribute('data-el') === 'history-search-input';
         if (isEditing && !isSearch) return;
         if (searchQuery) {
           setSearchQuery('');
@@ -781,7 +774,7 @@ export function HistoryWindow() {
       // Arrow keys move the list selection, but not while the caret is in the
       // search box — there they belong to the input, or typing becomes
       // unworkable without a mouse.
-      if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !isEditing) {
+      if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !isInteractive) {
         const list = clipsRef.current;
         if (list.length === 0) return;
         event.preventDefault();
@@ -793,7 +786,7 @@ export function HistoryWindow() {
         setSelectedClipId(list[nextIndex].id);
         return;
       }
-      if (isEditing) return;
+      if (isInteractive) return;
       if (event.key === 'Enter' && selectedClipId) {
         event.preventDefault();
         handleCopy(selectedClipId, event.shiftKey);

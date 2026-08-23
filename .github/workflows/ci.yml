@@ -49,6 +49,7 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm run format:check
+      - run: pnpm run lint
       - run: pnpm run release:check
       - run: pnpm run build
       - run: node .github/scripts/check-site.mjs

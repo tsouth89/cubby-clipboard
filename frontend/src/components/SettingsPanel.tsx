@@ -295,7 +295,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     return settingsSaveQueue.current;
   };
 
-  const updateSetting = (key: keyof Settings, value: any) => {
+  const updateSetting = <K extends keyof Settings>(key: K, value: Settings[K]) => {
     updateSettings({ [key]: value });
   };
 
@@ -1067,7 +1067,9 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         control={
                           <Segmented
                             value={settings.density ?? 'comfortable'}
-                            onChange={(val) => updateSetting('density', val)}
+                            onChange={(val) =>
+                              updateSetting('density', val as NonNullable<Settings['density']>)
+                            }
                             options={[
                               { value: 'comfortable', label: t('settings.densityComfortable') },
                               { value: 'compact', label: t('settings.densityCompact') },

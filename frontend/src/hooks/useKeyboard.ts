@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { classifyKeyboardTarget } from '../utils/keyboardTarget';
 
 interface KeyboardOptions {
   disabled?: boolean;
@@ -26,11 +27,11 @@ export function useKeyboard(options: KeyboardOptions) {
 
       const current = optionsRef.current;
       if (current.disabled) return;
-      const target = e.target as HTMLElement | null;
-      const isEditing =
-        target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
-      const isSearchInput = target?.matches('[data-el="search-input"]') ?? false;
-      const canNavigateHistory = !isEditing || isSearchInput;
+      const { isInteractive, isSearch } = classifyKeyboardTarget(
+        e.target,
+        '[data-el="search-input"]'
+      );
+      const canNavigateHistory = !isInteractive || isSearch;
       const isRepeatableAction = e.key === 'ArrowUp' || e.key === 'ArrowDown';
 
       if (e.repeat && !isRepeatableAction) return;
@@ -47,7 +48,7 @@ export function useKeyboard(options: KeyboardOptions) {
         return;
       }
 
-      if (!isEditing && e.key === 'Delete' && current.onDelete) {
+      if (!isInteractive && e.key === 'Delete' && current.onDelete) {
         e.preventDefault();
         current.onDelete();
         return;

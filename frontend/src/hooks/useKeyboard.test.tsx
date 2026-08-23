@@ -72,6 +72,23 @@ describe('useKeyboard', () => {
     expect(handlers.onNavigateDown).toHaveBeenCalledOnce();
   });
 
+  it('leaves clip shortcuts to focused buttons and selects', () => {
+    const handlers = callbacks();
+    renderHook(() => useKeyboard(handlers));
+    const button = document.createElement('button');
+    const select = document.createElement('select');
+    document.body.append(button, select);
+
+    fireEvent.keyDown(button, { key: 'Enter' });
+    fireEvent.keyDown(button, { key: 'Delete' });
+    fireEvent.keyDown(select, { key: 'ArrowDown' });
+    fireEvent.keyDown(select, { key: 'Home' });
+
+    expect(handlers.onPaste).not.toHaveBeenCalled();
+    expect(handlers.onDelete).not.toHaveBeenCalled();
+    expect(handlers.onNavigateDown).not.toHaveBeenCalled();
+  });
+
   it('ignores composition and non-arrow repeats', () => {
     const handlers = callbacks();
     renderHook(() => useKeyboard(handlers));
