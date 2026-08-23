@@ -188,6 +188,41 @@ export function findStaleBackupOmissionClaims(source) {
  * it never says "file lists". `no`/`without`/`none`/`neither` have to count
  * as negation or a disclaimer such as "No files are retained" false-fails.
  */
+/**
+ * SBS-1049: the remote-session hotkey path is the Win+V helper hook.
+ * Settings and support once said the configured hotkey / remote trigger
+ * opens Cubby whenever keyboard forwarding is off, which is false with
+ * replacement disabled.
+ *
+ * A sentence is a claim when it names a remote session, a hotkey or
+ * trigger, and an open/available verb, without also naming the hook.
+ */
+const REMOTE_SESSION = /\bremote(?:[\s-]session)?s?\b/i;
+const HOTKEY_OR_TRIGGER = /\b(?:hotkeys?|(?:remote[\s-]+session\s+)?triggers?)\b/i;
+const OPENS_OR_AVAILABLE = /\b(?:opens?\s+cubby|open\s+cubby|available)\b/i;
+const WIN_V_REPLACEMENT_DEPENDENCY =
+  /\b(?:win\s*\+\s*v\s+replacement|replace(?:s|ment)?\s+windows\s+clipboard|helper\s+hook|replacement\s+(?:mode|must|is\s+on|enabled))\b/i;
+
+export function findUnqualifiedRemoteHotkeyClaims(source) {
+  const claims = [];
+  for (const segment of segments(source)) {
+    if (!REMOTE_SESSION.test(segment)) {
+      continue;
+    }
+    if (!HOTKEY_OR_TRIGGER.test(segment)) {
+      continue;
+    }
+    if (!OPENS_OR_AVAILABLE.test(segment)) {
+      continue;
+    }
+    if (WIN_V_REPLACEMENT_DEPENDENCY.test(segment)) {
+      continue;
+    }
+    claims.push(segment);
+  }
+  return claims;
+}
+
 export function findWeakerFileRetentionClaim(source) {
   const fileMentionPattern = /\bfiles?\b/i;
   const retentionClaimPattern =
