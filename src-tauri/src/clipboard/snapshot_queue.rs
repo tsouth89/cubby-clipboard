@@ -17,6 +17,8 @@
 //!   unbounded backlog. A later oversized event replaces that capture.
 //! - A 100-copy text burst (the reliability contract) stays under both
 //!   budgets, so capture order is preserved under normal load.
+//! - Evicted items are returned (not dropped in place) so a bound
+//!   self-paste ignore can be released (SBS-1039).
 //!
 //! Kept free of the Windows-only crate graph so
 //! `rustc --test src-tauri/src/clipboard/snapshot_queue.rs` can prove the
@@ -36,12 +38,16 @@ pub(crate) trait SizedPayload {
     fn payload_bytes(&self) -> usize;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EnqueueOutcome {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EnqueueOutcome<T> {
     Queued,
     QueuedAfterDrop {
         dropped: usize,
         dropped_bytes: usize,
+        /// Evicted work, oldest first. Callers that bound ignore-hash to a
+        /// snapshot must release that binding here (SBS-1039): process time
+        /// never sees these items.
+        evicted: Vec<T>,
     },
 }
 
@@ -53,7 +59,7 @@ pub(crate) fn enqueue<T: SizedPayload>(
     item: T,
     capacity: usize,
     max_bytes: usize,
-) -> EnqueueOutcome {
+) -> EnqueueOutcome<T> {
     debug_assert!(
         capacity >= 1,
         "SBS-1032: the queue must be able to hold the current capture"
@@ -61,6 +67,7 @@ pub(crate) fn enqueue<T: SizedPayload>(
     let item_bytes = item.payload_bytes();
     let mut dropped = 0;
     let mut dropped_bytes = 0;
+    let mut evicted = Vec::new();
 
     if item_bytes > max_bytes {
         // Newest oversized capture wins: refuse an unbounded backlog of
@@ -70,6 +77,7 @@ pub(crate) fn enqueue<T: SizedPayload>(
             *queued_bytes = queued_bytes.saturating_sub(old_bytes);
             dropped += 1;
             dropped_bytes += old_bytes;
+            evicted.push(old);
         }
     } else {
         // Counted bytes skip an already-accepted oversize resident so a
@@ -92,6 +100,7 @@ pub(crate) fn enqueue<T: SizedPayload>(
                 }
                 dropped += 1;
                 dropped_bytes += old_bytes;
+                evicted.push(old);
             } else if let Some(index) = queue
                 .iter()
                 .position(|queued| queued.payload_bytes() <= max_bytes)
@@ -104,6 +113,7 @@ pub(crate) fn enqueue<T: SizedPayload>(
                 counted_bytes = counted_bytes.saturating_sub(old_bytes);
                 dropped += 1;
                 dropped_bytes += old_bytes;
+                evicted.push(old);
             } else {
                 break;
             }
@@ -119,6 +129,7 @@ pub(crate) fn enqueue<T: SizedPayload>(
         EnqueueOutcome::QueuedAfterDrop {
             dropped,
             dropped_bytes,
+            evicted,
         }
     }
 }
@@ -272,7 +283,8 @@ mod tests {
             enqueue(&mut queue, &mut bytes, fake(3, 8), 8, 20),
             EnqueueOutcome::QueuedAfterDrop {
                 dropped: 1,
-                dropped_bytes: 8
+                dropped_bytes: 8,
+                evicted: vec![fake(1, 8)],
             }
         );
         assert_eq!(ids(&queue), vec![2, 3]);
@@ -290,7 +302,8 @@ mod tests {
             outcome,
             EnqueueOutcome::QueuedAfterDrop {
                 dropped: 2,
-                dropped_bytes: 20
+                dropped_bytes: 20,
+                evicted: vec![fake(1, 10), fake(2, 10)],
             }
         );
         assert_eq!(ids(&queue), vec![3]);
@@ -332,7 +345,8 @@ mod tests {
             outcome,
             EnqueueOutcome::QueuedAfterDrop {
                 dropped: 3,
-                dropped_bytes: 51
+                dropped_bytes: 51,
+                evicted: vec![fake(1, 50), fake(2, 0), fake(3, 1)],
             }
         );
         assert_eq!(ids(&queue), vec![4]);
@@ -352,7 +366,8 @@ mod tests {
             outcome,
             EnqueueOutcome::QueuedAfterDrop {
                 dropped: 1,
-                dropped_bytes: 50
+                dropped_bytes: 50,
+                evicted: vec![fake(0, 50)],
             }
         );
         assert_eq!(ids(&queue), vec![1, 2, 3]);
@@ -381,7 +396,8 @@ mod tests {
             outcome,
             EnqueueOutcome::QueuedAfterDrop {
                 dropped: 1,
-                dropped_bytes: 8
+                dropped_bytes: 8,
+                evicted: vec![fake(2, 8)],
             }
         );
         assert_eq!(ids(&queue), vec![1, 3, 4]);
@@ -434,6 +450,26 @@ mod tests {
         assert_eq!(dequeue(&mut queue, &mut bytes).map(|item| item.id), Some(2));
         assert_eq!(bytes, 0);
         assert!(dequeue(&mut queue, &mut bytes).is_none());
+    }
+
+    /// Fail-without-fix for SBS-1039: counting drops is not enough. The
+    /// evicted items themselves must come back so a bound ignore-hash can
+    /// be released. Replacing the return with counts-only makes this fail.
+    #[test]
+    fn enqueue_returns_the_evicted_items() {
+        let mut queue = VecDeque::new();
+        let mut bytes = 0usize;
+        enqueue(&mut queue, &mut bytes, fake(1, 1), 2, 100);
+        enqueue(&mut queue, &mut bytes, fake(2, 1), 2, 100);
+        let outcome = enqueue(&mut queue, &mut bytes, fake(3, 1), 2, 100);
+        match outcome {
+            EnqueueOutcome::QueuedAfterDrop { evicted, .. } => {
+                assert_eq!(evicted, vec![fake(1, 1)]);
+            }
+            EnqueueOutcome::Queued => {
+                panic!("fail-without-fix: enqueue discarded the evicted item")
+            }
+        }
     }
 
     #[test]
