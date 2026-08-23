@@ -417,7 +417,7 @@ test('remote paste and tray fallback copy are not remote-hotkey claims', () => {
 test('live Settings and support copy name the Win+V replacement dependency', async () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   for (const relative of [
-    'frontend/src/i18n/locales/en.json',
+    'frontend/src/components/SettingsPanel.tsx',
     'product_pages/support.html',
   ]) {
     const source = await readFile(path.join(root, relative), 'utf8');

@@ -22,7 +22,6 @@ import {
 import { useState, useEffect, useId, useRef, type ReactNode } from 'react';
 import { useTheme } from '../hooks/useTheme';
 import { useModalDialog } from '../hooks/useModalDialog';
-import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -248,9 +247,6 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   // Apply theme immediately when settings.theme changes
   useTheme(settings.theme);
 
-  // i18n hook
-  const { i18n, t } = useTranslation();
-
   // Generic handler for immediate settings updates
   const updateSettings = (updates: Partial<Settings>) => {
     settingsSaveQueue.current = settingsSaveQueue.current
@@ -304,13 +300,6 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     updateSetting('theme', newTheme);
   };
 
-  const handleLanguageChange = (newLanguage: string) => {
-    updateSetting('language', newLanguage);
-    // Change language immediately
-    i18n.changeLanguage(newLanguage);
-    localStorage.setItem('cubby_language', newLanguage);
-  };
-
   // Use use-shortcut-recorder for recording (shows current keys held in real-time)
   const {
     shortcut,
@@ -346,14 +335,14 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   const ocrRemaining = (ocrStatus?.pending ?? 0) + (ocrStatus?.processing ?? 0);
   const ocrFailures = (ocrStatus?.failed ?? 0) + (ocrStatus?.unavailable ?? 0);
   const ocrStatusLabel = !ocrStatus
-    ? t('common.loading')
+    ? 'Loading...'
     : ocrStatus.paused
-      ? t('settings.ocrPaused')
+      ? 'Screenshot indexing paused'
       : ocrRemaining > 0
-        ? t('settings.ocrIndexing')
+        ? 'Indexing screenshots'
         : ocrFailures > 0
-          ? t('settings.ocrNeedsAttention')
-          : t('settings.ocrReady');
+          ? 'Screenshot index needs attention'
+          : 'Screenshot index ready';
 
   // Confirmation Dialog State
   const [confirmDialog, setConfirmDialog] = useState({
@@ -446,7 +435,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     setOcrActionBusy(true);
     try {
       const count = await invoke<number>('retry_failed_ocr');
-      toast.success(t('settings.ocrRetryQueued', { count }));
+      toast.success(`Queued ${count} images for another OCR attempt`);
       await loadOcrStatus();
     } catch (error) {
       toast.error(String(error));
@@ -461,7 +450,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   const handleOpenUrl = (url: string) => {
     openUrl(url).catch((error) => {
       console.error(`Could not open ${url}:`, error);
-      toast.error(t('settings.linkFailed', { url }));
+      toast.error(`Could not open ${url} in your browser.`);
     });
   };
 
@@ -470,31 +459,31 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     try {
       const update = await check();
       if (update?.available) {
-        toast(t('updater.available', { version: update.version }), {
+        toast(`Cubby ${update.version} is available.`, {
           duration: Infinity,
           action: {
-            label: t('updater.install'),
+            label: 'Update now',
             onClick: () => {
-              const toastId = toast.loading(t('updater.installing'));
+              const toastId = toast.loading('Downloading update…');
               update
                 .downloadAndInstall()
                 .then(() => {
-                  toast.success(t('updater.restarting'), { id: toastId });
+                  toast.success('Update ready — restarting Cubby…', { id: toastId });
                   return relaunch();
                 })
                 .catch((error) => {
                   console.error('Update install failed:', error);
-                  toast.error(t('updater.failed'), { id: toastId });
+                  toast.error('Update failed. Please try again later.', { id: toastId });
                 });
             },
           },
         });
       } else {
-        toast.success(t('settings.upToDate'));
+        toast.success("You're on the latest version.");
       }
     } catch (error) {
       console.error('Update check failed:', error);
-      toast.error(t('updater.failed'));
+      toast.error('Update failed. Please try again later.');
     } finally {
       setCheckingUpdate(false);
     }
@@ -536,7 +525,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     try {
       preview = await invoke<DittoImportResult>('import_from_ditto', { dbPath, dryRun: true });
     } catch (e) {
-      toast.error(t('settings.dittoImportError', { error: String(e) }));
+      toast.error(`Ditto import failed: ${String(e)}`);
       return;
     } finally {
       setDittoBusy(false);
@@ -545,16 +534,16 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
     if (preview.imported === 0) {
       toast.info(
         preview.duplicates > 0
-          ? t('settings.dittoAllDuplicates')
-          : t('settings.dittoNothingToImport')
+          ? 'Everything in that Ditto database is already in Cubby.'
+          : 'No importable clips were found in that Ditto database.'
       );
       return;
     }
 
     setConfirmDialog({
       isOpen: true,
-      title: t('settings.dittoImportTitle'),
-      message: t('settings.dittoImportConfirm', { count: preview.imported }),
+      title: 'Import from Ditto',
+      message: `Import ${preview.imported} clips from Ditto? Items already in Cubby are skipped.`,
       action: async () => {
         setDittoBusy(true);
         try {
@@ -564,16 +553,13 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
           });
           if (result.errors.length > 0) {
             toast.warning(
-              t('settings.dittoImportPartial', {
-                count: result.imported,
-                failed: result.errors.length,
-              })
+              `Imported ${result.imported} clips from Ditto; ${result.errors.length} could not be imported`
             );
           } else {
-            toast.success(t('settings.dittoImportSuccess', { count: result.imported }));
+            toast.success(`Imported ${result.imported} clips from Ditto`);
           }
         } catch (e) {
-          toast.error(t('settings.dittoImportError', { error: String(e) }));
+          toast.error(`Ditto import failed: ${String(e)}`);
         } finally {
           setDittoBusy(false);
         }
@@ -691,9 +677,9 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
       const result = await invoke<StorageReclaim>('reclaim_storage');
       setStorageUsage(result.usage);
       if (result.freed_bytes > 0) {
-        toast.success(t('settings.reclaimSuccess', { size: formatBytes(result.freed_bytes) }));
+        toast.success(`Freed ${formatBytes(result.freed_bytes)}`);
       } else {
-        toast.success(t('settings.reclaimNothing'));
+        toast.success('Already compact — nothing to reclaim');
       }
     } catch (error) {
       console.error('Failed to reclaim space:', error);
@@ -706,7 +692,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   const handleRemoveDuplicates = async () => {
     try {
       const count = await invoke<number>('remove_duplicate_clips');
-      toast.success(t('settings.removeDuplicatesSuccess', { count }));
+      toast.success(`Removed ${count} duplicate clips`);
       loadStorageUsage();
     } catch (error) {
       console.error(error);
@@ -717,13 +703,14 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   const confirmClearHistory = () => {
     setConfirmDialog({
       isOpen: true,
-      title: t('settings.clearHistoryTitle'),
-      message: t('settings.clearHistoryMessage'),
+      title: 'Clear History',
+      message:
+        'Are you sure you want to clear your ENTIRE clipboard history? This cannot be undone.',
       action: async () => {
         try {
           await invoke('clear_all_clips');
           loadStorageUsage();
-          toast.success(t('settings.clearHistorySuccess'));
+          toast.success('Clipboard history cleared successfully.');
         } catch (error) {
           console.error('Failed to clear history:', error);
           toast.error(`Failed to clear history: ${error}`);
@@ -813,10 +800,10 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
   const customFolders = folders.filter((folder) => !folder.is_system);
 
   const tabs: { id: Tab; label: string; icon: ReactNode }[] = [
-    { id: 'general', label: t('settings.general'), icon: <SettingsIcon size={17} /> },
-    { id: 'privacy', label: t('settings.privacy'), icon: <ShieldCheck size={17} /> },
-    { id: 'folders', label: t('settings.folders'), icon: <FolderIcon size={17} /> },
-    { id: 'about', label: t('settings.about'), icon: <Info size={17} /> },
+    { id: 'general', label: 'General', icon: <SettingsIcon size={17} /> },
+    { id: 'privacy', label: 'Privacy', icon: <ShieldCheck size={17} /> },
+    { id: 'folders', label: 'Folders', icon: <FolderIcon size={17} /> },
+    { id: 'about', label: 'About', icon: <Info size={17} /> },
   ];
 
   // Roving tabindex: only the selected tab is in the Tab order, and Up/Down move
@@ -922,7 +909,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
             )}
             <div className="mt-4 flex justify-end gap-2">
               <button type="button" onClick={closeBackupPrompt} className={ghostButton}>
-                {t('common.cancel')}
+                {'Cancel'}
               </button>
               <button
                 type="submit"
@@ -955,7 +942,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
         >
           <div className="flex items-center gap-2.5">
             <CubbyMark className="h-[18px] w-[18px]" />
-            <span className="text-sm font-semibold">{t('settings.title')}</span>
+            <span className="text-sm font-semibold">{'Settings'}</span>
           </div>
           <button
             onClick={onClose}
@@ -973,7 +960,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
             <div
               role="tablist"
               aria-orientation="vertical"
-              aria-label={t('settings.title')}
+              aria-label={'Settings'}
               className="flex flex-col gap-0.5"
             >
               {tabs.map((tab, index) => (
@@ -1002,7 +989,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
               ))}
             </div>
             <div className="mt-auto px-3 pt-3 text-[11px] leading-relaxed text-muted-foreground/70">
-              {t('settings.sidebarNote')}
+              {'Encrypted and local-only. No account required.'}
             </div>
           </div>
 
@@ -1019,49 +1006,30 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
               {activeTab === 'general' && (
                 <div className="space-y-7">
                   <PaneHeader
-                    title={t('settings.general')}
-                    subtitle={t('settings.generalSubtitle')}
+                    title={'General'}
+                    subtitle={'How Cubby looks and behaves on this PC.'}
                   />
 
                   <section>
-                    <SectionLabel>{t('settings.appearance')}</SectionLabel>
+                    <SectionLabel>{'Appearance'}</SectionLabel>
                     <SettingCard>
                       <Row
-                        title={t('settings.theme')}
+                        title={'Theme'}
                         control={
                           <Segmented
                             value={settings.theme}
                             onChange={handleThemeChange}
                             options={[
-                              { value: 'dark', label: t('settings.themeDark') },
-                              { value: 'system', label: t('settings.themeSystem') },
-                              { value: 'light', label: t('settings.themeLight') },
+                              { value: 'dark', label: 'Dark' },
+                              { value: 'system', label: 'System' },
+                              { value: 'light', label: 'Light' },
                             ]}
                           />
                         }
                       />
                       <Row
-                        title={t('settings.language')}
-                        control={
-                          <div className="w-40">
-                            <Select
-                              ariaLabel={t('settings.language')}
-                              value={settings.language || 'en'}
-                              onChange={handleLanguageChange}
-                              options={[
-                                { value: 'de', label: 'Deutsch' },
-                                { value: 'en', label: 'English' },
-                                { value: 'fr', label: 'Francais' },
-                                { value: 'ja', label: '日本語' },
-                                { value: 'zh', label: '中文' },
-                              ]}
-                            />
-                          </div>
-                        }
-                      />
-                      <Row
-                        title={t('settings.windowEffect')}
-                        desc={t('settings.windowEffectDesc')}
+                        title={'Window Effect'}
+                        desc={'Surface style of the popup window.'}
                         control={
                           <Segmented
                             value={windowEffectValue}
@@ -1075,8 +1043,8 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         }
                       />
                       <Row
-                        title={t('settings.density')}
-                        desc={t('settings.densityDesc')}
+                        title={'History density'}
+                        desc={'Fit more clips, or show larger previews.'}
                         control={
                           <Segmented
                             value={settings.density ?? 'comfortable'}
@@ -1084,22 +1052,22 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                               updateSetting('density', val as NonNullable<Settings['density']>)
                             }
                             options={[
-                              { value: 'comfortable', label: t('settings.densityComfortable') },
-                              { value: 'compact', label: t('settings.densityCompact') },
+                              { value: 'comfortable', label: 'Comfortable' },
+                              { value: 'compact', label: 'Compact' },
                             ]}
                           />
                         }
                       />
                       <Row
-                        title={t('settings.roundCorners')}
-                        desc={t('settings.roundCornersDesc')}
+                        title={'Rounded Corners'}
+                        desc={'Use rounded corners for the Cubby flyout.'}
                         control={
                           <Toggle
                             checked={settings.round_corners ?? false}
                             onChange={() =>
                               updateSetting('round_corners', !(settings.round_corners ?? false))
                             }
-                            label={t('settings.roundCorners')}
+                            label={'Rounded Corners'}
                           />
                         }
                       />
@@ -1107,18 +1075,18 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                   </section>
 
                   <section>
-                    <SectionLabel>{t('settings.windowBehavior')}</SectionLabel>
+                    <SectionLabel>{'Window behavior'}</SectionLabel>
                     <SettingCard>
                       <Row
-                        title={t('settings.startupWithWindows')}
+                        title={'Startup with Windows'}
                         desc={
                           settings.startup_unavailable_reason === 'error'
-                            ? t('settings.startupWithWindowsError')
+                            ? 'Cubby could not read Windows startup permissions. Restart Cubby and try again.'
                             : settings.startup_unavailable_reason === 'app_store'
-                              ? t('settings.startupWithWindowsStore')
+                              ? 'Not available in the Microsoft Store version. Windows manages Store app startup permissions.'
                               : settings.is_portable
-                                ? t('settings.startupWithWindowsPortable')
-                                : t('settings.startupWithWindowsDesc')
+                                ? 'Not available in the portable version (it never touches the registry).'
+                                : 'Automatically start when Windows boots'
                         }
                         control={
                           <Toggle
@@ -1127,13 +1095,13 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                             onChange={() =>
                               updateSetting('startup_with_windows', !settings.startup_with_windows)
                             }
-                            label={t('settings.startupWithWindows')}
+                            label={'Startup with Windows'}
                           />
                         }
                       />
                       <Row
-                        title={t('settings.floatAboveTaskbar')}
-                        desc={t('settings.floatAboveTaskbarDesc')}
+                        title={'Float Above Taskbar'}
+                        desc={'Show the window on top of the taskbar'}
                         control={
                           <Toggle
                             checked={settings.float_above_taskbar ?? true}
@@ -1143,7 +1111,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                                 !(settings.float_above_taskbar ?? true)
                               )
                             }
-                            label={t('settings.floatAboveTaskbar')}
+                            label={'Float Above Taskbar'}
                           />
                         }
                       />
@@ -1151,9 +1119,9 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                   </section>
 
                   <section>
-                    <SectionLabel>{t('settings.shortcuts')}</SectionLabel>
+                    <SectionLabel>{'Shortcuts'}</SectionLabel>
                     <SettingCard>
-                      <Row title={t('settings.openCubby')} desc={t('settings.hotkeyDesc')}>
+                      <Row title={'Open Cubby'} desc={'Shortcut to show or hide Cubby'}>
                         {isRecordingMode ? (
                           <div className="space-y-2">
                             <div className="flex w-full items-center gap-2 rounded-lg border border-primary bg-input px-3 py-2 text-sm ring-2 ring-primary">
@@ -1162,7 +1130,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                                   ? formatHotkey(shortcut)
                                   : savedShortcut.length > 0
                                     ? formatHotkey(savedShortcut)
-                                    : t('settings.hotkeyRecording')}
+                                    : 'Press keys...'}
                               </span>
                             </div>
                             <div className="flex gap-2">
@@ -1171,13 +1139,13 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                                 disabled={savedShortcut.length === 0}
                                 className="rounded bg-primary px-3 py-1 text-xs text-primary-foreground disabled:opacity-50"
                               >
-                                {t('common.save')}
+                                {'Save'}
                               </button>
                               <button
                                 onClick={handleCancelRecording}
                                 className="rounded bg-muted px-3 py-1 text-xs text-muted-foreground"
                               >
-                                {t('common.cancel')}
+                                {'Cancel'}
                               </button>
                             </div>
                           </div>
@@ -1187,25 +1155,29 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                               {settings.hotkey}
                             </span>
                             <button onClick={handleStartRecording} className={ghostButton}>
-                              {t('settings.changeHotkey')}
+                              {'Change'}
                             </button>
                           </div>
                         )}
                       </Row>
                       <Row
-                        title={t('settings.replaceWinV')}
-                        desc={t('settings.replaceWinVDesc')}
+                        title={'Replace Windows clipboard shortcut'}
+                        desc={
+                          'Cubby takes over Win+V, so Windows Clipboard History will not open. Emoji picker remains available with Win+Period.'
+                        }
                         control={
                           <Toggle
                             checked={settings.replace_win_v}
                             onChange={() => updateSetting('replace_win_v', !settings.replace_win_v)}
-                            label={t('settings.replaceWinV')}
+                            label={'Replace Windows clipboard shortcut'}
                           />
                         }
                       />
                       <Row
-                        title={t('settings.remotePasteMode')}
-                        desc={t('settings.remotePasteModeDesc')}
+                        title={'Remote session paste'}
+                        desc={
+                          'Choose how Cubby handles clips selected while a supported remote-control app is focused.'
+                        }
                       >
                         <div className="grid grid-cols-2 gap-2">
                           <button
@@ -1217,11 +1189,11 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                                 : 'border-border bg-accent/30 text-muted-foreground hover:border-primary/40'
                             )}
                           >
-                            <span className="block font-medium">
-                              {t('settings.remotePasteCopy')}
-                            </span>
+                            <span className="block font-medium">{'Copy, then Ctrl+V'}</span>
                             <span className="mt-1 block leading-snug">
-                              {t('settings.remotePasteCopyDesc')}
+                              {
+                                'Recommended for large logs and everyday use. Cubby restores the remote app, then you press Ctrl+V.'
+                              }
                             </span>
                           </button>
                           <button
@@ -1235,23 +1207,27 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                                 : 'border-border bg-accent/30 text-muted-foreground hover:border-primary/40'
                             )}
                           >
-                            <span className="block font-medium">
-                              {t('settings.remotePasteKeystrokes')}
-                            </span>
+                            <span className="block font-medium">{'Paste as keystrokes'}</span>
                             <span className="mt-1 block leading-snug">
-                              {t('settings.remotePasteKeystrokesDesc')}
+                              {
+                                'Automatically types short text through Ninja Remote. Slow for large content.'
+                              }
                             </span>
                           </button>
                         </div>
                         {settings.replace_win_v && (
                           <p className="mt-3 text-xs text-muted-foreground">
-                            {t('settings.remoteHotkeyHint')}
+                            {
+                              "Replace Windows clipboard shortcut also lets your hotkey open Cubby inside remote sessions when the remote client's keyboard forwarding is off. With forwarding on, open Cubby from the tray icon."
+                            }
                           </p>
                         )}
                       </Row>
                       <Row
-                        title={t('settings.remoteClipboardRelay')}
-                        desc={t('settings.remoteClipboardRelayDesc')}
+                        title={'Sync clipboard between remote sessions'}
+                        desc={
+                          'Re-announce anything copied inside a remote session so your other remote sessions pick it up. Copy in one session, Ctrl+V in another.'
+                        }
                         control={
                           <Toggle
                             checked={settings.remote_clipboard_relay !== false}
@@ -1261,7 +1237,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                                 settings.remote_clipboard_relay === false
                               )
                             }
-                            label={t('settings.remoteClipboardRelay')}
+                            label={'Sync clipboard between remote sessions'}
                           />
                         }
                       />
@@ -1274,41 +1250,47 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
               {activeTab === 'privacy' && (
                 <div className="space-y-7">
                   <PaneHeader
-                    title={t('settings.privacyAndData')}
-                    subtitle={t('settings.privacySubtitle')}
+                    title={'Privacy & data'}
+                    subtitle={'Choose what Cubby remembers, and manage what it already has.'}
                   />
 
                   <section>
-                    <SectionLabel>{t('settings.localHistory')}</SectionLabel>
+                    <SectionLabel>{'Local history'}</SectionLabel>
                     <SettingCard>
                       <Row
                         title={
                           <span className="flex items-center gap-2">
-                            {t('settings.clipboardHistory')}
+                            {'Clipboard history'}
                             <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-emerald-500">
                               <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
                               AES-256-GCM
                             </span>
                           </span>
                         }
-                        desc={t('settings.clipboardHistoryDesc')}
+                        desc={
+                          "Encrypted in Cubby's database on this computer. Nothing leaves your PC."
+                        }
                       />
                       <Row
-                        title={t('settings.skipSensitive')}
-                        desc={t('settings.skipSensitiveDesc')}
+                        title={'Skip passwords and sensitive copies'}
+                        desc={
+                          "When an app such as a password manager marks a copy as sensitive, Cubby won't save it (Windows' own clipboard history does the same). Turn this off to capture everything, including passwords."
+                        }
                         control={
                           <Toggle
                             checked={settings.skip_sensitive ?? true}
                             onChange={() =>
                               updateSetting('skip_sensitive', !(settings.skip_sensitive ?? true))
                             }
-                            label={t('settings.skipSensitive')}
+                            label={'Skip passwords and sensitive copies'}
                           />
                         }
                       />
                       <Row
-                        title={t('settings.skipLikelySecrets')}
-                        desc={t('settings.skipLikelySecretsDesc')}
+                        title={'Skip likely secrets in text'}
+                        desc={
+                          "Don't save text that looks like API tokens, private keys, or payment card numbers. Off by default. Turn it on if you'd rather keep these out of your history (the matching is conservative, but it can skip a clip you meant to keep). Large pastes are still checked: Cubby scans the first 8 KB, which is enough to catch those markers at the start of a log or key."
+                        }
                         control={
                           <Toggle
                             checked={settings.skip_likely_secrets ?? false}
@@ -1318,13 +1300,15 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                                 !(settings.skip_likely_secrets ?? false)
                               )
                             }
-                            label={t('settings.skipLikelySecrets')}
+                            label={'Skip likely secrets in text'}
                           />
                         }
                       />
                       <Row
-                        title={t('settings.forgetOnClipboardClear')}
-                        desc={t('settings.forgetOnClipboardClearDesc')}
+                        title={'Forget copies the app clears'}
+                        desc={
+                          'If something clears the clipboard soon after a copy (common for password manager browser extensions), remove that last item from history. Only password-shaped items are removed; notes, links, and pinned items stay.'
+                        }
                         control={
                           <Toggle
                             checked={settings.forget_on_clipboard_clear ?? true}
@@ -1334,20 +1318,20 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                                 !(settings.forget_on_clipboard_clear ?? true)
                               )
                             }
-                            label={t('settings.forgetOnClipboardClear')}
+                            label={'Forget copies the app clears'}
                           />
                         }
                       />
                       <Row
-                        title={t('settings.ignoreGhostClips')}
-                        desc={t('settings.ignoreGhostClipsDesc')}
+                        title={'Ignore Ghost Clips'}
+                        desc={'Ignore temporary clipboard items'}
                         control={
                           <Toggle
                             checked={settings.ignore_ghost_clips}
                             onChange={() =>
                               updateSetting('ignore_ghost_clips', !settings.ignore_ghost_clips)
                             }
-                            label={t('settings.ignoreGhostClips')}
+                            label={'Ignore Ghost Clips'}
                           />
                         }
                       />
@@ -1355,22 +1339,22 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                   </section>
 
                   <section>
-                    <SectionLabel>{t('settings.historyRetention')}</SectionLabel>
+                    <SectionLabel>{'History retention'}</SectionLabel>
                     <SettingCard>
                       <Row
-                        title={t('settings.keepHistoryFor')}
+                        title={'Keep history for'}
                         control={
                           <div className="w-40">
                             <Select
-                              ariaLabel={t('settings.keepHistoryFor')}
+                              ariaLabel={'Keep history for'}
                               value={String(settings.auto_delete_days ?? 30)}
                               onChange={handleRetentionChange}
                               options={[
-                                { value: '7', label: t('settings.retention7') },
-                                { value: '30', label: t('settings.retention30') },
-                                { value: '90', label: t('settings.retention90') },
-                                { value: '365', label: t('settings.retention365') },
-                                { value: '0', label: t('settings.retentionForever') },
+                                { value: '7', label: '7 days' },
+                                { value: '30', label: '30 days' },
+                                { value: '90', label: '90 days' },
+                                { value: '365', label: '1 year' },
+                                { value: '0', label: 'Forever' },
                               ]}
                             />
                           </div>
@@ -1383,53 +1367,55 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                             className="mt-0.5 flex-shrink-0 text-amber-500"
                           />
                           <p className="text-xs leading-relaxed text-muted-foreground">
-                            {t('settings.retentionForeverWarning')}
+                            {
+                              'Cubby keeps everything you copy, including screenshots, until you clear it. This can use noticeable disk space over time.'
+                            }
                           </p>
                         </div>
                       )}
                       <Row
-                        title={t('settings.storageUsed')}
+                        title={'Storage used'}
                         control={
                           <span className="text-xs text-muted-foreground">
                             {storageUsage
-                              ? `${t('settings.folderItemCount', {
-                                  count: storageUsage.items,
-                                })} · ${formatBytes(storageUsage.bytes)}`
+                              ? `${`${storageUsage.items} items`} · ${formatBytes(storageUsage.bytes)}`
                               : '…'}
                           </span>
                         }
                       />
                       <Row
-                        title={t('settings.reclaimSpace')}
-                        desc={t('settings.reclaimSpaceDesc')}
+                        title={'Reclaim space'}
+                        desc={
+                          'Compact the database and remove leftover files to return freed space to your disk.'
+                        }
                         control={
                           <button
                             onClick={handleReclaimStorage}
                             disabled={reclaiming}
                             className={ghostButton}
                           >
-                            {reclaiming
-                              ? t('settings.reclaiming')
-                              : t('settings.reclaimSpaceButton')}
+                            {reclaiming ? 'Reclaiming…' : 'Reclaim'}
                           </button>
                         }
                       />
                     </SettingCard>
                     <p className="ml-1 mt-2 text-xs text-muted-foreground">
-                      {t('settings.pinnedAlwaysKept')}
+                      {'Pinned items are always kept.'}
                     </p>
                   </section>
 
                   <section>
-                    <SectionLabel>{t('settings.ignoredApps')}</SectionLabel>
+                    <SectionLabel>{'Ignored Applications'}</SectionLabel>
                     <p className="-mt-1 mb-2 ml-1 text-xs text-muted-foreground">
-                      {t('settings.ignoredAppsDesc')}
+                      {
+                        "Don't capture clipboard from these apps. Major password managers are added once by default; remove any you want Cubby to capture."
+                      }
                     </p>
                     <SettingCard>
                       <div className="p-2">
                         {ignoredApps.length === 0 ? (
                           <p className="px-2 py-3 text-center text-xs text-muted-foreground">
-                            {t('settings.noIgnoredApps')}
+                            {'No ignored applications'}
                           </p>
                         ) : (
                           <div className="space-y-0.5">
@@ -1478,34 +1464,34 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                           className={ghostButton}
                         >
                           <Plus size={14} />
-                          {t('settings.add')}
+                          {'Add'}
                         </button>
                       </div>
                     </SettingCard>
                   </section>
 
                   <section>
-                    <SectionLabel>{t('settings.screenshotText')}</SectionLabel>
+                    <SectionLabel>{'Screenshot text search'}</SectionLabel>
                     <SettingCard>
                       <Row>
                         <div className="flex items-start justify-between gap-4">
                           <div className="min-w-0">
                             <div className="text-sm font-medium">{ocrStatusLabel}</div>
                             <p className="mt-1 text-xs leading-snug text-muted-foreground">
-                              {t('settings.ocrIndexDesc')}
+                              {
+                                'Cubby indexes screenshot text locally in the background. Images are never uploaded.'
+                              }
                             </p>
                             {ocrStatus && (
                               <p className="mt-2 text-xs text-muted-foreground">
-                                {t('settings.ocrProgress', {
-                                  completed: ocrStatus.completed,
-                                  remaining: ocrRemaining,
-                                  failed: ocrFailures,
-                                })}
+                                {`${ocrStatus.completed} indexed · ${ocrRemaining} remaining · ${ocrFailures} need attention`}
                               </p>
                             )}
                             {!!ocrStatus?.unavailable && (
                               <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
-                                {t('settings.ocrUnavailableDesc')}
+                                {
+                                  'Windows OCR is unavailable. Install an OCR language pack in Windows Language settings, then retry.'
+                                }
                               </p>
                             )}
                           </div>
@@ -1515,7 +1501,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                             className={clsx(ghostButton, 'flex-shrink-0')}
                           >
                             {ocrStatus?.paused ? <Play size={14} /> : <Pause size={14} />}
-                            {ocrStatus?.paused ? t('common.resume') : t('common.pause')}
+                            {ocrStatus?.paused ? 'Resume' : 'Pause'}
                           </button>
                         </div>
                         {!!ocrStatus && ocrFailures > 0 && (
@@ -1525,7 +1511,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                             className={clsx(ghostButton, 'mt-3')}
                           >
                             <RefreshCw size={14} />
-                            {t('settings.ocrRetry')}
+                            {'Retry failed images'}
                           </button>
                         )}
                       </Row>
@@ -1533,20 +1519,20 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                   </section>
 
                   <section>
-                    <SectionLabel>{t('settings.yourData')}</SectionLabel>
+                    <SectionLabel>{'Your data'}</SectionLabel>
                     <SettingCard>
                       <Row
-                        title={t('settings.dittoImport')}
-                        desc={t('settings.dittoImportDesc')}
+                        title={'Import from Ditto'}
+                        desc={
+                          'Bring your clipboard history and pinned items over from a Ditto database.'
+                        }
                         control={
                           <button
                             onClick={handleImportFromDitto}
                             disabled={dittoBusy}
                             className={ghostButton}
                           >
-                            {dittoBusy
-                              ? t('settings.dittoImporting')
-                              : t('settings.dittoImportButton')}
+                            {dittoBusy ? 'Importing…' : 'Import…'}
                           </button>
                         }
                       />
@@ -1577,24 +1563,24 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         }
                       />
                       <Row
-                        title={t('settings.removeDuplicates')}
-                        desc={t('settings.removeDuplicatesDesc')}
+                        title={'Remove Duplicates'}
+                        desc={'Collapse repeated clips into a single entry.'}
                         control={
                           <button onClick={handleRemoveDuplicates} className={ghostButton}>
-                            {t('settings.removeDuplicatesButton')}
+                            {'Clean up'}
                           </button>
                         }
                       />
                       <Row
-                        title={t('settings.clearHistory')}
-                        desc={t('settings.clearHistoryDesc')}
+                        title={'Clear History'}
+                        desc={'Permanently delete every stored clip on this PC.'}
                         control={
                           <button
                             onClick={confirmClearHistory}
                             className="inline-flex items-center gap-2 rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive transition-colors hover:bg-destructive/20"
                           >
                             <Trash2 size={14} />
-                            {t('settings.clearHistory')}
+                            {'Clear History'}
                           </button>
                         }
                       />
@@ -1604,10 +1590,10 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                   <div className="flex gap-3 rounded-xl border border-primary/20 bg-primary/[0.06] p-3.5">
                     <ShieldCheck size={16} className="mt-0.5 flex-shrink-0 text-primary" />
                     <p className="text-xs leading-relaxed text-muted-foreground">
-                      <span className="font-semibold text-foreground">
-                        {t('settings.privacyNoteTitle')}
-                      </span>{' '}
-                      {t('settings.privacyNote')}
+                      <span className="font-semibold text-foreground">{'No tracking.'}</span>{' '}
+                      {
+                        "Cubby's desktop app sends no product analytics, and your clipboard history never leaves this computer."
+                      }
                     </p>
                   </div>
                 </div>
@@ -1617,16 +1603,16 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
               {activeTab === 'folders' && (
                 <div className="space-y-7">
                   <PaneHeader
-                    title={t('settings.folders')}
-                    subtitle={t('settings.foldersSubtitle')}
+                    title={'Folders'}
+                    subtitle={'Group pinned clips into folders you can jump to.'}
                   />
                   <section>
-                    <SectionLabel>{t('settings.manageFolders')}</SectionLabel>
+                    <SectionLabel>{'Manage Folders'}</SectionLabel>
                     <SettingCard>
                       <div className="p-2">
                         {customFolders.length === 0 ? (
                           <p className="px-2 py-3 text-center text-xs text-muted-foreground">
-                            {t('settings.noFolders')}
+                            {'No custom folders created.'}
                           </p>
                         ) : (
                           <div className="space-y-0.5">
@@ -1652,13 +1638,13 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                                       onClick={saveRenameFolder}
                                       className="text-xs text-primary hover:underline"
                                     >
-                                      {t('common.save')}
+                                      {'Save'}
                                     </button>
                                     <button
                                       onClick={() => setEditingFolderId(null)}
                                       className="text-xs text-muted-foreground hover:underline"
                                     >
-                                      {t('common.cancel')}
+                                      {'Cancel'}
                                     </button>
                                   </div>
                                 ) : (
@@ -1669,9 +1655,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                                     <span className="flex-1 text-sm font-medium">
                                       {folder.name}
                                       <span className="ml-2 text-xs font-normal text-muted-foreground">
-                                        {t('settings.folderItemCount', {
-                                          count: folder.item_count,
-                                        })}
+                                        {`${folder.item_count} items`}
                                       </span>
                                     </span>
                                     <button
@@ -1700,7 +1684,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                           type="text"
                           value={newFolderName}
                           onChange={(e) => setNewFolderName(e.target.value)}
-                          placeholder={t('settings.newFolderPlaceholder')}
+                          placeholder={'New Folder Name'}
                           className="flex-1 rounded-lg border border-border bg-input px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                           onKeyDown={(e) => e.key === 'Enter' && handleCreateFolder()}
                         />
@@ -1710,7 +1694,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                           className={ghostButton}
                         >
                           <Plus size={14} />
-                          {t('settings.add')}
+                          {'Add'}
                         </button>
                       </div>
                     </SettingCard>
@@ -1721,7 +1705,10 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
               {/* --- ABOUT TAB --- */}
               {activeTab === 'about' && (
                 <div className="space-y-7">
-                  <PaneHeader title={t('settings.about')} subtitle={t('settings.aboutSubtitle')} />
+                  <PaneHeader
+                    title={'About'}
+                    subtitle={'Version, updates, and the open-source project.'}
+                  />
                   <section>
                     <SettingCard>
                       <div className="flex items-center gap-4 px-4 py-4">
@@ -1729,7 +1716,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         <div className="min-w-0 flex-1">
                           <div className="text-base font-semibold">Cubby</div>
                           <div className="text-xs text-muted-foreground">
-                            {t('settings.versionLabel', { version: appVersion || '…' })}
+                            {`Version ${appVersion || '…'}`}
                           </div>
                         </div>
                         {settings.self_update_available !== false && (
@@ -1739,7 +1726,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                             className={ghostButton}
                           >
                             <RefreshCw size={14} className={checkingUpdate ? 'animate-spin' : ''} />
-                            {t('settings.checkUpdates')}
+                            {'Check for updates'}
                           </button>
                         )}
                       </div>
@@ -1753,7 +1740,9 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         <div className="flex gap-3 px-4 py-3.5">
                           <Info size={16} className="mt-0.5 flex-shrink-0 text-muted-foreground" />
                           <p className="text-xs leading-relaxed text-muted-foreground">
-                            {t('settings.portableUpdateNote')}
+                            {
+                              "The portable version does not update itself. To upgrade, download the newest portable ZIP and replace Cubby Clipboard.exe. Keep the 'data' folder and portable.txt next to it and your history, settings, and folders carry over."
+                            }
                           </p>
                         </div>
                       )}
@@ -1762,7 +1751,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         className="flex w-full items-center gap-3 px-4 py-3 text-sm transition-colors hover:bg-accent/40"
                       >
                         <Github size={16} className="text-muted-foreground" />
-                        <span className="flex-1 text-left">{t('settings.sourceCode')}</span>
+                        <span className="flex-1 text-left">{'Source code on GitHub'}</span>
                         <ExternalLink size={14} className="text-muted-foreground" />
                       </button>
                       <button
@@ -1778,7 +1767,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                         className="flex w-full items-center gap-3 px-4 py-3 text-sm transition-colors hover:bg-accent/40"
                       >
                         <ShieldCheck size={16} className="text-muted-foreground" />
-                        <span className="flex-1 text-left">{t('settings.privacyPolicy')}</span>
+                        <span className="flex-1 text-left">{'Privacy policy'}</span>
                         <ExternalLink size={14} className="text-muted-foreground" />
                       </button>
                     </SettingCard>
@@ -1786,9 +1775,9 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                       <Info size={16} className="mt-0.5 flex-shrink-0 text-muted-foreground" />
                       <p className="text-xs leading-relaxed text-muted-foreground">
                         <span className="font-semibold text-foreground">
-                          {t('settings.openSourceTitle')}
+                          {'Free and open source.'}
                         </span>{' '}
-                        {t('settings.openSourceNote')}
+                        {'Cubby is GPL-3.0, a fork of PastePaw. © 2026 SouthForge AI.'}
                       </p>
                     </div>
                   </section>

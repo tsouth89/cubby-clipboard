@@ -3,7 +3,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { CheckSquare, Copy, History, Pin, PinOff, Search, Trash2, X } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
 import { ClipboardItem, FolderItem, Settings } from '../types';
 import { ClipList } from '../components/ClipList';
@@ -11,7 +10,6 @@ import { ClipPreview } from '../components/ClipPreview';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ContentFilter } from '../components/FlyoutHeader';
 import { useTheme } from '../hooks/useTheme';
-import { useLanguage } from '../hooks/useLanguage';
 import { useSystemAccent } from '../hooks/useSystemAccent';
 import { useRevealedClips } from '../hooks/useRevealedClips';
 import { collectBulkCopyText, type BulkCopyTextResult } from '../utils/bulkCopy';
@@ -62,7 +60,6 @@ const CONTENT_FILTERS: ReadonlyArray<readonly [ContentFilter, string]> = [
  * honor, so its primary action is copy rather than paste.
  */
 export function HistoryWindow() {
-  const { t } = useTranslation();
   const [clips, setClips] = useState<ClipboardItem[]>([]);
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
@@ -92,7 +89,6 @@ export function HistoryWindow() {
       : presetRange(datePreset, new Date());
 
   const effectiveTheme = useTheme(settings?.theme ?? 'system');
-  useLanguage(settings?.language);
   // Each Tauri window is its own document, so this one has to apply the Windows
   // accent color itself.
   useSystemAccent();
@@ -224,7 +220,7 @@ export function HistoryWindow() {
           setLoadError(true);
         }
         if (failure.notify) {
-          toast.error(t(append ? 'clipList.loadMoreFailed' : 'clipList.refreshFailed'), {
+          toast.error(append ? 'Couldn’t load more clips' : 'Couldn’t refresh clipboard history', {
             // One id, so a backend that keeps failing on every clipboard change
             // replaces its own message instead of stacking a wall of them.
             id: 'clip-load-failed',
@@ -235,7 +231,7 @@ export function HistoryWindow() {
         if (loadId === loadIdRef.current) setIsLoading(false);
       }
     },
-    [contentFilter, dateFrom, dateTo, searchQuery, selectedFolder, sourceApp, t]
+    [contentFilter, dateFrom, dateTo, searchQuery, selectedFolder, sourceApp]
   );
 
   const loadFolders = useCallback(async () => {

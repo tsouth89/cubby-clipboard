@@ -43,7 +43,6 @@ const [
   privacyPageDoc,
   supportPageDoc,
   settingsPanelSource,
-  settingsLocaleText,
   publishStoreWorkflow,
   validateStoreWorkflow,
   verifyInstallerSignature,
@@ -69,7 +68,6 @@ const [
   read('product_pages/privacy.html'),
   read('product_pages/support.html'),
   read('frontend/src/components/SettingsPanel.tsx'),
-  read('frontend/src/i18n/locales/en.json'),
   read('.github/workflows/publish-store-packages.yml'),
   read('.github/workflows/validate-store-submission.yml'),
   read('scripts/verify-installer-signature.ps1'),
@@ -248,7 +246,7 @@ const userFacingHistoryDocs = [
   ['product_pages/start.html', startPageDoc],
   ['product_pages/terms.html', termsPageDoc],
   ['docs/press-kit/description.txt', pressKitDoc],
-  ['frontend/src/i18n/locales/en.json', settingsLocaleText],
+  ['frontend/src/components/SettingsPanel.tsx', settingsPanelSource],
 ];
 
 for (const [docName, doc] of userFacingHistoryDocs) {
@@ -304,12 +302,12 @@ for (const [docName, doc] of userFacingHistoryDocs) {
 // next to Remote session paste restated the Settings lie when the toggle
 // was off.
 if (
-  !/settings\.replace_win_v\s*&&[\s\S]{0,250}settings\.remoteHotkeyHint/.test(
+  !/settings\.replace_win_v\s*&&[\s\S]{0,500}Replace Windows clipboard shortcut also lets/.test(
     settingsPanelSource
   )
 ) {
   throw new Error(
-    'SettingsPanel must render settings.remoteHotkeyHint only when replace_win_v is on'
+    'SettingsPanel must render the remote hotkey hint only when replace_win_v is on'
   );
 }
 
@@ -527,14 +525,10 @@ if (defaultSkipLikelySecrets === 'true' && (!securitySaysOn || securitySaysOff))
   );
 }
 
-const skipLikelySecretsDesc = JSON.parse(settingsLocaleText).settings?.skipLikelySecretsDesc;
-if (typeof skipLikelySecretsDesc !== 'string') {
-  throw new Error('Settings locale must describe skipLikelySecrets');
-}
-if (defaultSkipLikelySecrets === 'false' && !saysDefaultOff(skipLikelySecretsDesc)) {
+if (defaultSkipLikelySecrets === 'false' && !saysDefaultOff(settingsPanelSource)) {
   throw new Error('Settings copy must say secret heuristics are off by default');
 }
-if (defaultSkipLikelySecrets === 'true' && !/on by default/i.test(skipLikelySecretsDesc)) {
+if (defaultSkipLikelySecrets === 'true' && !/on by default/i.test(settingsPanelSource)) {
   throw new Error('Settings copy must say secret heuristics are on by default');
 }
 

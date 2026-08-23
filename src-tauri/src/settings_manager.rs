@@ -336,10 +336,6 @@ impl SettingsManager {
         if let Some(v) = get_val(pool, "mica_effect").await {
             settings.mica_effect = v;
         }
-        if let Some(v) = get_val(pool, "language").await {
-            settings.language = v;
-        }
-
         // Retention is time-only. Ignore any persisted item cap (legacy installs
         // may carry a nonzero max_items from before this was exposed) so the age
         // window is the sole lever; max_items stays 0 = no count cap.
@@ -457,6 +453,26 @@ mod tests {
         let recovered = SettingsManager::safe_default_settings();
         assert_eq!(recovered.auto_delete_days, 0);
         assert_eq!(recovered.max_items, 0);
+    }
+
+    #[test]
+    fn pre_i18n_removal_settings_ignore_the_language_key() {
+        let dir =
+            std::env::temp_dir().join(format!("cubby-settings-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let mut persisted = serde_json::to_value(AppSettings::default()).unwrap();
+        persisted
+            .as_object_mut()
+            .unwrap()
+            .insert("language".to_string(), serde_json::json!("de"));
+        fs::write(&path, serde_json::to_string_pretty(&persisted).unwrap()).unwrap();
+
+        let loaded = SettingsManager::parse_settings_file(&path)
+            .expect("obsolete language setting must not break an upgrade");
+        assert_eq!(loaded.theme, AppSettings::default().theme);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

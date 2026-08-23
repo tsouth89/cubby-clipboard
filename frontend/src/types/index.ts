@@ -66,7 +66,6 @@ export interface Settings {
   hotkey: string;
   replace_win_v: boolean;
   theme: string;
-  language?: string;
   mica_effect?: string;
   round_corners?: boolean;
   float_above_taskbar?: boolean;

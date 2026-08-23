@@ -9,7 +9,6 @@ use std::collections::HashSet;
 pub struct AppSettings {
     pub theme: String,
     pub mica_effect: String,
-    pub language: String,
     pub max_items: i64,
     pub auto_delete_days: i64,
     pub hotkey: String,
@@ -58,7 +57,6 @@ impl Default for AppSettings {
         Self {
             theme: "system".to_string(),
             mica_effect: "solid".to_string(),
-            language: "en".to_string(),
             // 0 = no item-count cap; retention is driven by age (auto_delete_days)
             // so "keep history for N days" means exactly that. Pinned items are
             // always kept regardless.
