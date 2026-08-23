@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ContextMenuKind, contextMenuLabelKey } from '../utils/contextMenuLabel';
 
@@ -40,9 +40,11 @@ export function ContextMenu({ x, y, options, onClose, kind, label }: ContextMenu
 
   // Indices of items a keyboard user can land on. Disabled items are skipped
   // rather than focused-and-inert, which is what a menu widget is expected to do.
-  const enabledIndices = options
-    .map((option, index) => (option.disabled ? -1 : index))
-    .filter((index) => index >= 0);
+  const enabledIndices = useMemo(
+    () =>
+      options.map((option, index) => (option.disabled ? -1 : index)).filter((index) => index >= 0),
+    [options]
+  );
 
   const focusItem = (index: number) => itemRefs.current[index]?.focus();
 
@@ -128,7 +130,7 @@ export function ContextMenu({ x, y, options, onClose, kind, label }: ContextMenu
       document.removeEventListener('mousedown', handleClickOutside);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [onClose, enabledIndices.join(',')]);
+  }, [onClose, enabledIndices]);
 
   const style = {
     top: position.y,
