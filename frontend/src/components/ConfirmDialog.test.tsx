@@ -31,7 +31,8 @@ describe('ConfirmDialog', () => {
     expect(screen.getByRole('dialog')).toHaveAccessibleDescription(
       'Deleted clips cannot be recovered.'
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    const cancelButtons = screen.getAllByRole('button', { name: 'Cancel' });
+    fireEvent.click(cancelButtons[cancelButtons.length - 1]);
     fireEvent.click(screen.getByRole('button', { name: 'Delete 2 clips' }));
 
     expect(onCancel).toHaveBeenCalledOnce();
@@ -41,12 +42,12 @@ describe('ConfirmDialog', () => {
   it('blocks repeated actions while busy', () => {
     const { onConfirm, onCancel } = renderDialog({ isBusy: true });
     const confirm = screen.getByRole('button', { name: 'Delete 2 clips' });
-    const cancel = screen.getByRole('button', { name: 'Cancel' });
+    const cancelButtons = screen.getAllByRole('button', { name: 'Cancel' });
 
     expect(confirm).toBeDisabled();
-    expect(cancel).toBeDisabled();
+    cancelButtons.forEach((button) => expect(button).toBeDisabled());
     fireEvent.click(confirm);
-    fireEvent.click(cancel);
+    cancelButtons.forEach((button) => fireEvent.click(button));
 
     expect(onConfirm).not.toHaveBeenCalled();
     expect(onCancel).not.toHaveBeenCalled();

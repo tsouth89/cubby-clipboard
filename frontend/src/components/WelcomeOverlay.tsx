@@ -1,5 +1,4 @@
 import { Clipboard, Keyboard, Lock, Pin } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
 import { useModalDialog } from '../hooks/useModalDialog';
 
 interface WelcomeOverlayProps {
@@ -12,14 +11,16 @@ interface WelcomeOverlayProps {
  * which replaces the native flyout by default.
  */
 export function WelcomeOverlay({ onDismiss }: WelcomeOverlayProps) {
-  const { t } = useTranslation();
   const dialogRef = useModalDialog<HTMLDivElement>(onDismiss);
 
   const points = [
-    { icon: Keyboard, text: t('onboarding.pointOpen') },
-    { icon: Clipboard, text: t('onboarding.pointAuto') },
-    { icon: Pin, text: t('onboarding.pointUse') },
-    { icon: Lock, text: t('onboarding.pointPrivate') },
+    { icon: Keyboard, text: 'Press Win+V any time to open Cubby.' },
+    { icon: Clipboard, text: 'Everything you copy is saved here automatically — no extra steps.' },
+    {
+      icon: Pin,
+      text: 'Click an item (or press Enter) to paste it. Pin the ones you want to keep.',
+    },
+    { icon: Lock, text: 'Your history is encrypted and stays on this PC. Nothing is uploaded.' },
   ];
 
   return (
@@ -35,10 +36,12 @@ export function WelcomeOverlay({ onDismiss }: WelcomeOverlayProps) {
       >
         <div className="flex flex-col gap-1 px-5 pt-5">
           <h2 id="welcome-title" className="text-base font-semibold text-foreground">
-            {t('onboarding.title')}
+            {'Welcome to Cubby'}
           </h2>
           <p id="welcome-intro" className="text-xs text-muted-foreground">
-            {t('onboarding.intro')}
+            {
+              'Cubby keeps a history of everything you copy, so you can paste it back whenever you need it.'
+            }
           </p>
         </div>
         <ul className="flex flex-col gap-3 overflow-y-auto px-5 py-4">
@@ -57,7 +60,7 @@ export function WelcomeOverlay({ onDismiss }: WelcomeOverlayProps) {
             autoFocus
             className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-primary/90"
           >
-            {t('onboarding.dismiss')}
+            {'Got it'}
           </button>
         </div>
       </div>

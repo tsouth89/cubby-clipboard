@@ -104,15 +104,16 @@ test('locale helper accepts the same off-phrasings as the security-doc gate', ()
   assert.equal(saysDefaultOff('Always on.'), false);
 });
 
-test('live models.rs, SECURITY.md, and en.json agree the default is off', async () => {
+test('live models.rs, SECURITY.md, and Settings agree the default is off', async () => {
   const models = await readFile(path.join(repoRoot, 'src-tauri/src/models.rs'), 'utf8');
   const security = await readFile(path.join(repoRoot, 'SECURITY.md'), 'utf8');
-  const en = JSON.parse(
-    await readFile(path.join(repoRoot, 'frontend/src/i18n/locales/en.json'), 'utf8'),
+  const settingsPanel = await readFile(
+    path.join(repoRoot, 'frontend/src/components/SettingsPanel.tsx'),
+    'utf8',
   );
   assert.equal(extractDefaultSkipLikelySecrets(models), 'false');
   const { sayOn, sayOff } = evaluateSecretHeuristicsDoc(security);
   assert.equal(sayOn, false);
   assert.equal(sayOff, true);
-  assert.equal(saysDefaultOff(en.settings.skipLikelySecretsDesc), true);
+  assert.equal(saysDefaultOff(settingsPanel), true);
 });

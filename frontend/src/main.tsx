@@ -1,8 +1,9 @@
 import ReactDOM from 'react-dom/client';
 import { lazy, Suspense } from 'react';
 import { attachConsole } from '@tauri-apps/plugin-log';
-import './i18n/config'; // Initialize i18n
 import './index.css';
+
+localStorage.removeItem('cubby_language');
 
 attachConsole()
   .then(() => console.log('[WinPaste] Tauri console attached successfully'))

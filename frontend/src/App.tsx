@@ -12,7 +12,6 @@ import { ConfirmDialog } from './components/ConfirmDialog';
 import { WelcomeOverlay } from './components/WelcomeOverlay';
 import { useKeyboard } from './hooks/useKeyboard';
 import { useTheme } from './hooks/useTheme';
-import { useLanguage } from './hooks/useLanguage';
 import { useSystemAccent } from './hooks/useSystemAccent';
 import { useUpdater } from './hooks/useUpdater';
 import { useRevealedClips } from './hooks/useRevealedClips';
@@ -25,7 +24,6 @@ import {
   type ClipLoadResult,
   sidecarReloadFailure,
 } from './utils/clipLoadFailure';
-import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
 import { generateDemoClips } from './debug/demoData';
 
@@ -84,8 +82,6 @@ function App() {
   const effectiveTheme = useTheme(theme);
   useSystemAccent();
   useUpdater(settings?.self_update_available === true);
-  useLanguage(settings?.language);
-  const { t } = useTranslation();
   const hasRoundedCorners = settings?.round_corners ?? true;
   const density = settings?.density ?? 'comfortable';
   const windowEffect =
@@ -215,17 +211,12 @@ function App() {
     pendingHotkeyNotice.current = null;
     const message =
       notice.kind === 'fallback_hotkey'
-        ? t('notifications.hotkeyFallback', {
-            requested: notice.requested_hotkey,
-            active: notice.active_hotkey,
-          })
+        ? `${notice.requested_hotkey} is in use by another app. Using ${notice.active_hotkey} for this session — your setting is unchanged.`
         : notice.kind === 'win_v_disabled'
-          ? t('notifications.hotkeyWinVDisabled', {
-              hotkey: notice.active_hotkey ?? notice.requested_hotkey,
-            })
-          : t('notifications.hotkeyFailed');
+          ? `Win+V replacement is unavailable right now. Open Cubby with ${notice.active_hotkey ?? notice.requested_hotkey} for this session.`
+          : 'No global hotkey could be registered. Open Cubby from the tray icon and try a different hotkey in Settings.';
     toast.warning(message, { duration: 10000 });
-  }, [t]);
+  }, []);
 
   const refreshPasteContext = useCallback(() => {
     if (assetCaptureEnabled) {
@@ -471,7 +462,7 @@ function App() {
           setLoadError(true);
         }
         if (failure.notify) {
-          toast.error(t(append ? 'clipList.loadMoreFailed' : 'clipList.refreshFailed'), {
+          toast.error(append ? 'Couldn’t load more clips' : 'Couldn’t refresh clipboard history', {
             // One id, so a backend that keeps failing on every clipboard change
             // replaces its own message instead of stacking a wall of them.
             id: 'clip-load-failed',
@@ -482,7 +473,7 @@ function App() {
         if (perfId === loadPerfIdRef.current) setIsLoading(false);
       }
     },
-    [perfLogEnabled, t]
+    [perfLogEnabled]
   );
 
   const loadFolders = useCallback(async () => {
@@ -642,10 +633,10 @@ function App() {
       // Refresh counts
       loadFolders();
       refreshTotalCount();
-      toast.success(t('notifications.clipDeleted'));
+      toast.success('Clip deleted');
     } catch (error) {
       console.error('Failed to delete clip:', error);
-      toast.error(t('notifications.clipDeleteFailed'));
+      toast.error('Failed to delete clip');
     }
   };
 
@@ -685,13 +676,13 @@ function App() {
 
         await invoke('copy_clip', { id: clipId, plainText });
 
-        toast.success(t('common.copied'));
+        toast.success('Copied to clipboard');
       } catch (error) {
         console.error('Failed to copy clip:', error);
-        toast.error(t('notifications.copyFailed'));
+        toast.error('Failed to copy');
       }
     },
-    [clips, t]
+    [clips]
   );
 
   const handlePasteOcrText = useCallback(async (clipId: string) => {
@@ -703,18 +694,15 @@ function App() {
     }
   }, []);
 
-  const handleCopyOcrText = useCallback(
-    async (clipId: string) => {
-      try {
-        await invoke('copy_ocr_text', { id: clipId });
-        toast.success(t('common.copied'));
-      } catch (error) {
-        console.error('Failed to copy recognized text:', error);
-        toast.error(t('notifications.copyFailed'));
-      }
-    },
-    [t]
-  );
+  const handleCopyOcrText = useCallback(async (clipId: string) => {
+    try {
+      await invoke('copy_ocr_text', { id: clipId });
+      toast.success('Copied to clipboard');
+    } catch (error) {
+      console.error('Failed to copy recognized text:', error);
+      toast.error('Failed to copy');
+    }
+  }, []);
 
   // Persist the hidden flag. Distinct from revealing for the session: this is
   // the state that survives a restart.
@@ -786,33 +774,33 @@ function App() {
   const emptyState = useMemo(() => {
     if (searchQuery.trim()) {
       return {
-        title: t('clipList.noMatches'),
-        description: t('clipList.noMatchesDesc'),
+        title: 'No matching clips',
+        description: 'Try a different search or clear the current filters.',
       };
     }
     if (selectedFolder) {
       return {
-        title: t('clipList.emptyFolder'),
-        description: t('clipList.emptyFolderDesc'),
+        title: 'This folder is empty',
+        description: 'Move a clip here or choose another folder.',
       };
     }
     if (contentFilter === 'images') {
       return {
-        title: t('clipList.noImages'),
-        description: t('clipList.noImagesDesc'),
+        title: 'No images in this view',
+        description: 'Copy an image or switch back to All.',
       };
     }
     if (contentFilter === 'text') {
       return {
-        title: t('clipList.noText'),
-        description: t('clipList.noTextDesc'),
+        title: 'No text in this view',
+        description: 'Copy some text or switch back to All.',
       };
     }
     return {
-      title: t('clipList.empty'),
-      description: t('clipList.emptyDesc'),
+      title: 'No clips yet',
+      description: 'Copy something to your clipboard and it will appear here.',
     };
-  }, [contentFilter, searchQuery, selectedFolder, t]);
+  }, [contentFilter, searchQuery, selectedFolder]);
 
   useEffect(() => {
     if (visibleClips.length === 0) {
@@ -936,7 +924,7 @@ function App() {
       return { created: true, reloaded: await loadFolders() };
     } catch (error) {
       console.error('Failed to create folder:', error);
-      toast.error(t('notifications.folderCreateFailed'));
+      toast.error('Failed to create folder');
       return { created: false, reloaded: false };
     }
   };
@@ -1013,18 +1001,18 @@ function App() {
       // The folder exists, so the modal closes either way. Resubmitting the
       // same name would only fail as a duplicate. loadFolders already said the
       // sidebar is stale, so do not add a success toast next to that error.
-      if (reloaded) toast.success(t('folders.folderCreated', { name }));
+      if (reloaded) toast.success(`Folder "${name}" created`);
       setShowAddFolderModal(false);
       setNewFolderName('');
     } else if (folderModalMode === 'rename' && editingFolderId) {
       try {
         await invoke('rename_folder', { id: editingFolderId, name });
-        if (await loadFolders()) toast.success(t('folders.folderRenamed', { name }));
+        if (await loadFolders()) toast.success(`Renamed to "${name}"`);
         setShowAddFolderModal(false);
         setNewFolderName('');
       } catch (error) {
         console.error('Failed to rename folder:', error);
-        toast.error(t('notifications.folderRenameFailed'));
+        toast.error('Failed to rename folder');
       }
     }
   };
@@ -1043,10 +1031,10 @@ function App() {
       const foldersReloaded = await loadFolders();
       await refreshTotalCount();
       if (!foldersReloaded) return;
-      toast.success(t('folders.folderDeleted'));
+      toast.success('Folder deleted');
     } catch (error) {
       console.error('Failed to delete folder:', error);
-      toast.error(t('notifications.folderDeleteFailed'));
+      toast.error('Failed to delete folder');
     }
   };
 
@@ -1077,13 +1065,15 @@ function App() {
       clearRevealed();
       toast.success(
         mode === 'unpinned'
-          ? t('notifications.clearUnpinnedSuccess', { count: deleted })
-          : t('notifications.clearAllSuccess')
+          ? deleted === 1
+            ? `Cleared ${deleted} unpinned item`
+            : `Cleared ${deleted} unpinned items`
+          : 'Clipboard history cleared'
       );
       setClearRequest(null);
     } catch (error) {
       console.error('Failed to clear clipboard history:', error);
-      toast.error(t('notifications.clearFailed'));
+      toast.error('Failed to clear clipboard history');
     } finally {
       setIsClearing(false);
     }
@@ -1111,12 +1101,12 @@ function App() {
                 contextMenu.type === 'history'
                   ? [
                       {
-                        label: t('contextMenu.clearUnpinned'),
+                        label: 'Clear unpinned items…',
                         disabled: totalClipCount === 0,
                         onClick: () => setClearRequest('unpinned'),
                       },
                       {
-                        label: t('contextMenu.clearAll'),
+                        label: 'Clear everything…',
                         danger: true,
                         disabled: totalClipCount === 0,
                         onClick: () => setClearRequest('all'),
@@ -1135,40 +1125,40 @@ function App() {
                             onClick: () => handleToggleHidden(contextMenu.itemId),
                           },
                           {
-                            label: t('contextMenu.paste'),
+                            label: 'Paste',
                             onClick: () => handlePaste(contextMenu.itemId),
                           },
                           ...(clip?.clip_type === 'image'
                             ? clip.has_ocr_text
                               ? [
                                   {
-                                    label: t('contextMenu.pasteOcrText'),
+                                    label: 'Paste recognized text',
                                     onClick: () => handlePasteOcrText(contextMenu.itemId),
                                   },
                                 ]
                               : []
                             : [
                                 {
-                                  label: t('contextMenu.pastePlainText'),
+                                  label: 'Paste as plain text',
                                   onClick: () => handlePaste(contextMenu.itemId, true),
                                 },
                               ]),
                           {
-                            label: t('contextMenu.copy'),
+                            label: 'Copy',
                             onClick: () => handleCopy(contextMenu.itemId),
                           },
                           ...(clip?.clip_type === 'image'
                             ? clip.has_ocr_text
                               ? [
                                   {
-                                    label: t('contextMenu.copyOcrText'),
+                                    label: 'Copy recognized text',
                                     onClick: () => handleCopyOcrText(contextMenu.itemId),
                                   },
                                 ]
                               : []
                             : [
                                 {
-                                  label: t('contextMenu.copyPlainText'),
+                                  label: 'Copy as plain text',
                                   onClick: () => handleCopy(contextMenu.itemId, true),
                                 },
                               ]),
@@ -1186,7 +1176,7 @@ function App() {
                             onClick: () => handleMoveClip(contextMenu.itemId, folder.id),
                           })),
                           {
-                            label: t('contextMenu.delete'),
+                            label: 'Delete',
                             danger: true,
                             onClick: () => handleDelete(contextMenu.itemId),
                           },
@@ -1194,7 +1184,7 @@ function App() {
                       })()
                     : [
                         {
-                          label: t('contextMenu.rename'),
+                          label: 'Rename',
                           onClick: () => {
                             setFolderModalMode('rename');
                             setEditingFolderId(contextMenu.itemId);
@@ -1204,7 +1194,7 @@ function App() {
                           },
                         },
                         {
-                          label: t('contextMenu.delete'),
+                          label: 'Delete',
                           danger: true,
                           onClick: () => handleDeleteFolder(contextMenu.itemId),
                         },
@@ -1215,20 +1205,18 @@ function App() {
 
           <ConfirmDialog
             isOpen={clearRequest !== null}
-            title={
-              clearRequest === 'all' ? t('clearHistory.allTitle') : t('clearHistory.unpinnedTitle')
-            }
+            title={clearRequest === 'all' ? 'Clear everything?' : 'Clear unpinned items?'}
             message={
               clearRequest === 'all'
-                ? t('clearHistory.allMessage')
-                : t('clearHistory.unpinnedMessage')
+                ? 'Remove every item from Cubby, including pinned items? This cannot be undone.'
+                : 'Remove every unpinned item from Cubby? Your pinned items will stay.'
             }
             confirmText={
               isClearing
-                ? t('clearHistory.clearing')
+                ? 'Clearing…'
                 : clearRequest === 'all'
-                  ? t('clearHistory.confirmAll')
-                  : t('clearHistory.confirmUnpinned')
+                  ? 'Clear everything'
+                  : 'Clear unpinned'
             }
             isBusy={isClearing}
             onConfirm={() => {
@@ -1316,9 +1304,9 @@ function App() {
                   <span className="truncate text-foreground/75">
                     {pasteContext?.target_kind === 'ninja'
                       ? pasteContext.remote_paste_mode === 'copy_then_paste'
-                        ? t('pasteContext.ninjaCopy')
-                        : t('pasteContext.ninjaKeystrokes')
-                      : t('pasteContext.remote')}
+                        ? 'Ninja Remote · Select, then press Ctrl+V'
+                        : 'Ninja Remote · Paste as keystrokes'
+                      : 'Remote session · Clipboard sync enabled'}
                   </span>
                 </>
               )}
@@ -1328,8 +1316,8 @@ function App() {
                 <kbd>Enter</kbd>{' '}
                 {pasteContext?.target_kind === 'ninja' &&
                 pasteContext.remote_paste_mode === 'copy_then_paste'
-                  ? t('pasteContext.copyAction')
-                  : t('contextMenu.paste')}
+                  ? 'Copy'
+                  : 'Paste'}
               </span>
               {(() => {
                 const selected = selectedClipId

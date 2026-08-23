@@ -1,5 +1,4 @@
 import { useEffect, useRef } from 'react';
-import { useTranslation } from 'react-i18next';
 import { ClipboardItem } from '../types';
 import { ClipCard } from './ClipCard';
 import { AlertCircle, RefreshCw } from 'lucide-react';
@@ -37,6 +36,9 @@ interface ClipListProps {
   checkedIds?: ReadonlySet<string>;
   /** Toggle multi-selection for a row, given its index for shift-extend. */
   onToggleSelect?: (clipId: string, index: number, event: React.MouseEvent) => void;
+  /** Makes the listbox the History window's keyboard focus owner. The flyout
+   *  keeps focus in its search field and therefore leaves this off. */
+  keyboardNavigation?: boolean;
 }
 
 export function ClipList({
@@ -62,8 +64,8 @@ export function ClipList({
   selectable = false,
   checkedIds,
   onToggleSelect,
+  keyboardNavigation = false,
 }: ClipListProps) {
-  const { t } = useTranslation();
   const listRef = useRef<HTMLDivElement>(null);
   // Arrow-key navigation can scroll a card under a stationary cursor and fire
   // mouseenter. A mousemove, including the first one after opening the flyout,
@@ -82,6 +84,25 @@ export function ClipList({
       ?.scrollIntoView({ block: 'nearest' });
   }, [selectedClipId]);
 
+  const handleListKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    // Interactive descendants keep their native key handling. Only the
+    // listbox itself owns History's Up/Down selection model.
+    if (!keyboardNavigation || event.target !== event.currentTarget) return;
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+
+    event.preventDefault();
+    const selectedIndex = clips.findIndex((clip) => clip.id === selectedClipId);
+    const nextIndex =
+      selectedIndex < 0
+        ? 0
+        : Math.min(
+            Math.max(selectedIndex + (event.key === 'ArrowDown' ? 1 : -1), 0),
+            clips.length - 1
+          );
+    const nextClip = clips[nextIndex];
+    if (nextClip) onSelectClip(nextClip.id);
+  };
+
   if (isLoading && clips.length === 0) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -96,9 +117,11 @@ export function ClipList({
     return (
       <div className="flex h-full flex-col items-center justify-center px-10 text-center">
         <AlertCircle size={22} className="mb-3 text-destructive" />
-        <p className="text-sm font-medium text-foreground/90">{t('clipList.loadFailed')}</p>
+        <p className="text-sm font-medium text-foreground/90">
+          {'Couldn’t load clipboard history'}
+        </p>
         <p className="mt-1 text-xs leading-5 text-muted-foreground">
-          {t('clipList.loadFailedDesc')}
+          {'Cubby kept your data. Try loading it again.'}
         </p>
         <button
           type="button"
@@ -106,7 +129,7 @@ export function ClipList({
           className="mt-4 flex items-center gap-1.5 rounded-md border border-white/[0.1] bg-white/[0.05] px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-white/[0.09]"
         >
           <RefreshCw size={13} />
-          {t('clipList.retry')}
+          {'Try again'}
         </button>
       </div>
     );
@@ -128,7 +151,25 @@ export function ClipList({
       id="clip-listbox"
       role="listbox"
       aria-label="Clipboard history"
-      className={`no-scrollbar overflow-y-auto px-2 pb-2 ${errorSurface === 'banner' ? 'min-h-0 flex-1' : 'h-full'}`}
+      // History keeps DOM focus here while aria-activedescendant moves through
+      // the options. That lets Narrator announce the selected clip and its
+      // aria-posinset position without moving focus away from the list.
+      tabIndex={keyboardNavigation ? 0 : undefined}
+      aria-activedescendant={
+        keyboardNavigation && selectedClipId && clips.some((clip) => clip.id === selectedClipId)
+          ? `clip-option-${selectedClipId}`
+          : undefined
+      }
+      onKeyDown={handleListKeyDown}
+      onMouseDown={(event) => {
+        if (!keyboardNavigation) return;
+        const target = event.target as Element;
+        if (target.closest('button, input, select, textarea, a, [contenteditable="true"]')) return;
+        // A mouse-selected option and the next arrow press must use the same
+        // composite widget. Keep nested controls focusable in their own right.
+        event.currentTarget.focus({ preventScroll: true });
+      }}
+      className={`no-scrollbar overflow-y-auto px-2 pb-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary/70 ${errorSurface === 'banner' ? 'min-h-0 flex-1' : 'h-full'}`}
       onScroll={(event) => {
         if (!hasMore || isLoading) return;
         const element = event.currentTarget;
@@ -187,7 +228,7 @@ export function ClipList({
       >
         <AlertCircle size={14} className="shrink-0 text-destructive" />
         <p className="min-w-0 flex-1 text-xs font-medium text-foreground/90">
-          {t('clipList.refreshFailed')}
+          {'Couldn’t refresh clipboard history'}
         </p>
         <button
           type="button"
@@ -195,7 +236,7 @@ export function ClipList({
           className="flex shrink-0 items-center gap-1.5 rounded-md border border-white/[0.1] bg-white/[0.05] px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-white/[0.09]"
         >
           <RefreshCw size={13} />
-          {t('clipList.retry')}
+          {'Try again'}
         </button>
       </div>
       {list}
