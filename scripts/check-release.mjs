@@ -6,6 +6,7 @@ import { checkPrivilegedActionPins } from '../.github/scripts/check-privileged-a
 import {
   findFileListHistoryClaims,
   findStaleBackupOmissionClaims,
+  findUnqualifiedRemoteHotkeyClaims,
   findWeakerFileRetentionClaim,
 } from './product-page-claims.mjs';
 import { extractDefaultSkipLikelySecrets, evaluateSecretHeuristicsDoc, saysDefaultOff } from './release-check-helpers.mjs';
@@ -286,6 +287,30 @@ for (const [docName, doc] of userFacingHistoryDocs) {
       `${docName} still claims encrypted backups omit HTML/RTF or full-resolution originals: ${claim}`
     );
   }
+}
+
+// SBS-1049: the remote-session hotkey path is the Win+V helper hook.
+// Settings and support once advertised that path without the replacement.
+for (const [docName, doc] of userFacingHistoryDocs) {
+  const [claim] = findUnqualifiedRemoteHotkeyClaims(doc);
+  if (claim) {
+    throw new Error(
+      `${docName} claims the remote hotkey works without Win+V replacement: ${claim}`
+    );
+  }
+}
+
+// The hint is only true while replacement is on. An unconditional render
+// next to Remote session paste restated the Settings lie when the toggle
+// was off.
+if (
+  !/settings\.replace_win_v\s*&&[\s\S]{0,250}settings\.remoteHotkeyHint/.test(
+    settingsPanelSource
+  )
+) {
+  throw new Error(
+    'SettingsPanel must render settings.remoteHotkeyHint only when replace_win_v is on'
+  );
 }
 
 const backupSection = privacyPageDoc.match(

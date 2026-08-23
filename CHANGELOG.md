@@ -6,6 +6,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 
 ### Fixed
 - Flood-dropping a queued self-paste echo no longer leaves the ignore hash swallowing the next real copy of that content (SBS-1039)
+- Settings and the support FAQ no longer say the configured hotkey opens Cubby in remote sessions unless Replace Windows clipboard shortcut is on (SBS-1049)
 - CI now publishes a stable `shipped-windows` check that fails when any SBS-779 `Check <arch> <features>` cargo-check fails. Branch protection on main still requires only `test` until a repo admin adds that name; the docs no longer claim the matrix legs already block merge (SBS-1025)
 
 ## v1.3.3
@@ -323,4 +324,3 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 
 ### Fixed
 - Removed white/alpha border around settings window in dark mode
-
