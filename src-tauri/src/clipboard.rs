@@ -382,13 +382,12 @@ fn enqueue_listener_event(
     event_tx: &snapshot_channel::Sender<ClipboardListenerEvent>,
     event: ClipboardListenerEvent,
 ) -> Result<(), ()> {
-    match event_tx.send(event) {
+    match event_tx.send(event, release_ignore_for_dropped_events) {
         Ok(snapshot_queue::EnqueueOutcome::QueuedAfterDrop {
             dropped,
             dropped_bytes,
-            evicted,
+            ..
         }) => {
-            release_ignore_for_dropped_events(&evicted);
             log::warn!(
                 "CLIPBOARD: Snapshot queue evicted {dropped} older pending capture(s) ({dropped_bytes} bytes) under flood (SBS-1032)"
             );

@@ -70,12 +70,24 @@ pub(super) fn channel<T: SizedPayload>() -> (Sender<T>, Receiver<T>) {
 }
 
 impl<T: SizedPayload> Sender<T> {
-    pub(super) fn send(&self, item: T) -> Result<EnqueueOutcome<T>, ()> {
+    /// Queue an item and handle evictions before the receiver is woken.
+    ///
+    /// The ordering matters for clipboard ignore state: waking first lets the
+    /// consumer process a later same-hash item before an evicted echo releases
+    /// its ignore generation (SBS-1039).
+    pub(super) fn send(
+        &self,
+        item: T,
+        on_evicted: impl FnOnce(&[T]),
+    ) -> Result<EnqueueOutcome<T>, ()> {
         let mut inner = self.shared.inner.lock();
         if inner.receiver_gone {
             return Err(());
         }
         let outcome = inner.push(item);
+        if let EnqueueOutcome::QueuedAfterDrop { evicted, .. } = &outcome {
+            on_evicted(evicted);
+        }
         drop(inner);
         self.shared.notify.notify_one();
         Ok(outcome)
@@ -137,14 +149,14 @@ mod tests {
     fn send_fails_after_the_receiver_is_dropped() {
         let (tx, rx) = channel::<FakeSnapshot>();
         drop(rx);
-        assert_eq!(tx.send(fake(1, 1)), Err(()));
+        assert_eq!(tx.send(fake(1, 1), |_| {}), Err(()));
     }
 
     #[tokio::test]
     async fn recv_delivers_enqueued_items_in_order() {
         let (tx, rx) = channel();
-        assert_eq!(tx.send(fake(1, 4)), Ok(EnqueueOutcome::Queued));
-        assert_eq!(tx.send(fake(2, 4)), Ok(EnqueueOutcome::Queued));
+        assert_eq!(tx.send(fake(1, 4), |_| {}), Ok(EnqueueOutcome::Queued));
+        assert_eq!(tx.send(fake(2, 4), |_| {}), Ok(EnqueueOutcome::Queued));
         assert_eq!(rx.recv().await, Some(fake(1, 4)));
         assert_eq!(rx.recv().await, Some(fake(2, 4)));
     }
@@ -161,7 +173,7 @@ mod tests {
         let (tx, rx) = channel();
         let flood = SNAPSHOT_QUEUE_CAPACITY + 5;
         for id in 0..flood {
-            tx.send(fake(id as u32, 1))
+            tx.send(fake(id as u32, 1), |_| {})
                 .expect("receiver is still alive");
         }
         let first = rx.recv().await.expect("the newest window must remain");
@@ -179,12 +191,15 @@ mod tests {
         let (tx, _rx) = channel();
         for id in 0..SNAPSHOT_QUEUE_CAPACITY {
             assert_eq!(
-                tx.send(fake(id as u32, 1)),
+                tx.send(fake(id as u32, 1), |_| {}),
                 Ok(EnqueueOutcome::Queued),
                 "the first {SNAPSHOT_QUEUE_CAPACITY} items must fit"
             );
         }
-        match tx.send(fake(SNAPSHOT_QUEUE_CAPACITY as u32, 1)) {
+        let mut handled = Vec::new();
+        match tx.send(fake(SNAPSHOT_QUEUE_CAPACITY as u32, 1), |evicted| {
+            handled.extend(evicted.iter().map(|item| item.id));
+        }) {
             Ok(EnqueueOutcome::QueuedAfterDrop {
                 evicted, dropped, ..
             }) => {
@@ -196,5 +211,6 @@ mod tests {
             }
             other => panic!("expected eviction of the oldest item, got {other:?}"),
         }
+        assert_eq!(handled, vec![0]);
     }
 }
