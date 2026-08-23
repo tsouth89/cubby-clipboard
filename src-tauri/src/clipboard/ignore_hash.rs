@@ -174,7 +174,6 @@ pub(crate) fn consume_ignore_marker_after_self_paste(
     let ignored_via_queued = queued.is_some_and(|bound| {
         bound.hash == clip_hash && Some(bound.generation) != *consumed_generation
     });
-    let bound_hash_matches = queued.is_some_and(|bound| bound.hash == clip_hash);
     let owns_this_marker = queued.is_some_and(|bound| {
         live.as_ref()
             .is_some_and(|marker| bound.generation == marker.generation)
@@ -191,7 +190,7 @@ pub(crate) fn consume_ignore_marker_after_self_paste(
         return;
     }
 
-    if ignored_via_live && !bound_hash_matches {
+    if ignored_via_live && !ignored_via_queued {
         if let Some(marker) = live.as_ref() {
             *consumed_generation = Some(marker.generation);
         }
@@ -552,5 +551,47 @@ mod tests {
             ),
             "fail-without-fix: second same-hash snapshot bound to gen 1 is still swallowed"
         );
+    }
+
+    #[test]
+    fn spent_queued_generation_still_consumes_a_live_ttl_match() {
+        // Gen 1 echo consumed. A later same-hash snapshot still carries gen 1,
+        // but a new paste (gen 2) is live within TTL. We ignore via live TTL
+        // (queued arm is spent). Leaving gen 2 in place would swallow later
+        // real copies of A until the clock expires.
+        let now = Instant::now();
+        let first = marker("hash-a", now, 1);
+        let echo = bind_ignore_hash_for_queued_work(Some(&first), now, IGNORE_HASH_TTL);
+        let recopy = bind_ignore_hash_for_queued_work(Some(&first), now, IGNORE_HASH_TTL);
+        let gen2_at = now + Duration::from_millis(50);
+        let gen2 = marker("hash-a", gen2_at, 2);
+
+        let mut state = IgnoreState {
+            marker: Some(first),
+            consumed_generation: None,
+        };
+        assert!(state.ignore_and_consume_self_paste(
+            echo.as_ref(),
+            "hash-a",
+            now + Duration::from_millis(10),
+            IGNORE_HASH_TTL,
+        ));
+        assert_eq!(state.consumed_generation, Some(1));
+
+        state.marker = Some(gen2);
+        assert!(
+            state.ignore_and_consume_self_paste(
+                recopy.as_ref(),
+                "hash-a",
+                gen2_at + Duration::from_millis(50),
+                IGNORE_HASH_TTL,
+            ),
+            "recopy is ignored via the live gen-2 TTL, not the spent gen-1 binding"
+        );
+        assert!(
+            state.marker.is_none(),
+            "fail-without-fix: leftover gen-2 live marker swallows later real copies"
+        );
+        assert_eq!(state.consumed_generation, Some(2));
     }
 }
