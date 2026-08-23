@@ -4,6 +4,9 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 
 ## Unreleased
 
+### Security
+- Paste and copy no longer emit the full decrypted clip body to the WebView on a `clipboard-write` event that has no frontend listener (SBS-1042)
+
 ### Fixed
 - CI now publishes a stable `shipped-windows` check that fails when any SBS-779 `Check <arch> <features>` cargo-check fails. Branch protection on main still requires only `test` until a repo admin adds that name; the docs no longer claim the matrix legs already block merge (SBS-1025)
 

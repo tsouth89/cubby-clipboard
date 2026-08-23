@@ -21,6 +21,11 @@ mod clip_list;
 mod clipboard;
 mod clipboard_miss;
 mod clipboard_policy;
+// SBS-1042: restore/copy must not emit decrypted bodies to the WebView.
+// Compiled for tests so the source pin runs on every `cargo test`; a release
+// build does not include it.
+#[cfg(test)]
+mod clipboard_write_ipc;
 mod commands;
 // SBS-408 compatibility-matrix model. Compiled under `test` as well as
 // `dev-harness` on purpose: CI runs `cargo test --all-targets` without the
