@@ -12,6 +12,10 @@ export const REQUIRED_LEGS = [
   { arch: 'arm64', target: 'aarch64-pc-windows-msvc', features: 'app-store' },
 ];
 
+/** SBS-1025: stable check name for branch protection; aggregates the matrix. */
+export const AGGREGATOR_JOB_ID = 'shipped-windows';
+export const AGGREGATOR_CHECK_NAME = 'shipped-windows';
+
 function stripQuote(value) {
   const trimmed = (value ?? '').trim();
   if (
@@ -137,6 +141,83 @@ function classifyLeg(item) {
   return { arch, target, features, extraArgs, issues, ok: issues.length === 0 };
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function jobNeeds(body, id) {
+  const escaped = escapeRegExp(id);
+  if (new RegExp(`^\\s+needs:\\s*${escaped}\\s*$`, 'm').test(body)) {
+    return true;
+  }
+  if (new RegExp(`^\\s+needs:\\s*\\[[^\\]]*\\b${escaped}\\b`, 'm').test(body)) {
+    return true;
+  }
+  const lines = body.split('\n');
+  let inNeeds = false;
+  let needsIndent = 0;
+  for (const line of lines) {
+    const header = line.match(/^(\s+)needs:\s*$/);
+    if (header) {
+      inNeeds = true;
+      needsIndent = header[1].length;
+      continue;
+    }
+    if (inNeeds) {
+      const indent = lineIndent(line);
+      if (line.trim() && indent <= needsIndent) {
+        inNeeds = false;
+      } else if (new RegExp(`^\\s+-\\s+${escaped}\\s*$`).test(line)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * SBS-1025: the matrix cannot be the required check (four generated names).
+ * A job named `shipped-windows` must always run and fail when any leg fails.
+ */
+export function evaluateShippedWindowsAggregator(jobs, checkJobs) {
+  const problems = [];
+  const job = jobs.find((item) => item.id === AGGREGATOR_JOB_ID);
+  if (!job) {
+    return [`missing ${AGGREGATOR_JOB_ID} aggregator job`];
+  }
+
+  const body = job.lines.filter((line) => !line.trim().startsWith('#')).join('\n');
+  const name = stripQuote(firstMatch(job.lines, /^\s+name:\s*(.+)$/));
+  if (name !== AGGREGATOR_CHECK_NAME) {
+    problems.push(
+      `${AGGREGATOR_JOB_ID}: job name must be ${AGGREGATOR_CHECK_NAME} (the stable required-check name), got ${name || 'empty'}`,
+    );
+  }
+  if (!/if:\s*(?:\$\{\{\s*)?always\(\)/.test(body)) {
+    problems.push(
+      `${AGGREGATOR_JOB_ID}: must use if: always() so a failed matrix reports failure instead of a skipped check`,
+    );
+  }
+
+  const checkJobIds = checkJobs.map((item) => item.id);
+  if (checkJobIds.length === 0) {
+    problems.push(`${AGGREGATOR_JOB_ID}: no cargo-check matrix job to aggregate`);
+    return problems;
+  }
+  if (!checkJobIds.some((id) => jobNeeds(body, id))) {
+    problems.push(
+      `${AGGREGATOR_JOB_ID}: must need the cargo-check matrix job (${checkJobIds.join(', ')})`,
+    );
+  }
+  if (!checkJobIds.some((id) => new RegExp(`needs\\.${id}\\.result`).test(body))) {
+    problems.push(`${AGGREGATOR_JOB_ID}: must inspect needs.<matrix-job>.result`);
+  }
+  if (!/\bsuccess\b/.test(body)) {
+    problems.push(`${AGGREGATOR_JOB_ID}: must fail when the matrix result is not success`);
+  }
+  return problems;
+}
+
 function jobProblems(job) {
   const body = job.lines.filter((line) => !line.trim().startsWith('#')).join('\n');
   const problems = [];
@@ -205,7 +286,10 @@ export function evaluateShippedWindowsCi(text) {
       reason: 'no CI job runs cargo check',
       missing: REQUIRED_LEGS,
       matched,
-      jobLevelProblems: ['no CI job runs cargo check'],
+      jobLevelProblems: [
+        'no CI job runs cargo check',
+        ...evaluateShippedWindowsAggregator(jobs, checkJobs),
+      ],
     };
   }
 
@@ -223,6 +307,8 @@ export function evaluateShippedWindowsCi(text) {
       matched.push({ job: job.id, ...classifyLeg(item) });
     }
   }
+
+  jobLevelProblems.push(...evaluateShippedWindowsAggregator(jobs, checkJobs));
 
   const missing = REQUIRED_LEGS.filter(
     (required) =>

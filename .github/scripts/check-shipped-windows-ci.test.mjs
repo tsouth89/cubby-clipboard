@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import {
+  AGGREGATOR_CHECK_NAME,
+  AGGREGATOR_JOB_ID,
   CI_WORKFLOW,
   REQUIRED_LEGS,
   checkShippedWindowsCi,
@@ -56,13 +58,24 @@ jobs:
           key: \${{ runner.os }}-cargo-check-\${{ matrix.target }}-\${{ matrix.features }}-lock
       - run: mkdir dist
       - run: cargo check --manifest-path src-tauri/Cargo.toml --target \${{ matrix.target }} --all-targets \${{ matrix.extra_args }}
+  shipped-windows:
+    name: shipped-windows
+    if: always()
+    needs:
+      - check-shipped-windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          MATRIX_RESULT: \${{ needs.check-shipped-windows.result }}
+        run: if [ "$MATRIX_RESULT" != "success" ]; then exit 1; fi
 `;
 
 test('parser splits top-level jobs and ignores deeper keys', () => {
   const jobs = parseTopLevelJobs(VALID_JOB);
   assert.deepEqual(
     jobs.map((job) => job.id),
-    ['test', 'check-shipped-windows'],
+    ['test', 'check-shipped-windows', 'shipped-windows'],
   );
 });
 
@@ -225,6 +238,64 @@ test('a valid four-leg cargo check matrix passes', () => {
   assert.equal(result.matched.length, 4);
 });
 
+/** Pins SBS-1025: the matrix alone is not a merge gate; the aggregator must exist. */
+test('a complete matrix without the shipped-windows aggregator is rejected', () => {
+  const result = evaluateShippedWindowsCi(
+    VALID_JOB.replace(
+      `
+  shipped-windows:
+    name: shipped-windows
+    if: always()
+    needs:
+      - check-shipped-windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          MATRIX_RESULT: \${{ needs.check-shipped-windows.result }}
+        run: if [ "$MATRIX_RESULT" != "success" ]; then exit 1; fi
+`,
+      '',
+    ),
+  );
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.jobLevelProblems.some((problem) => problem.includes('missing shipped-windows')),
+    result.jobLevelProblems.join('; '),
+  );
+});
+
+test('an aggregator that skips when the matrix fails is rejected', () => {
+  const result = evaluateShippedWindowsCi(VALID_JOB.replace('if: always()', 'if: success()'));
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.jobLevelProblems.some((problem) => problem.includes('if: always()')),
+    result.jobLevelProblems.join('; '),
+  );
+});
+
+test('an aggregator that does not need the matrix job is rejected', () => {
+  const result = evaluateShippedWindowsCi(
+    VALID_JOB.replace('      - check-shipped-windows\n', '      - test\n'),
+  );
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.jobLevelProblems.some((problem) => problem.includes('must need')),
+    result.jobLevelProblems.join('; '),
+  );
+});
+
+test('an aggregator whose check name is not shipped-windows is rejected', () => {
+  const result = evaluateShippedWindowsCi(
+    VALID_JOB.replace('    name: shipped-windows\n', '    name: windows-matrix\n'),
+  );
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.jobLevelProblems.some((problem) => problem.includes(AGGREGATOR_CHECK_NAME)),
+    result.jobLevelProblems.join('; '),
+  );
+});
+
 test('unparseable workflow fails closed instead of reporting full coverage', () => {
   const result = evaluateShippedWindowsCi('name: CI\n');
   assert.equal(result.ok, false);
@@ -247,6 +318,15 @@ test('ci.yml runs the shipped-Windows checker and its tests', async () => {
   const source = await readFile(path.join(repoRoot, CI_WORKFLOW), 'utf8');
   assert.match(source, /check-shipped-windows-ci\.mjs/);
   assert.match(source, /check-shipped-windows-ci\.test\.mjs/);
+});
+
+/** Pins SBS-1025: ci.yml must expose the stable aggregator check name. */
+test('ci.yml aggregates the shipped-Windows matrix as shipped-windows', async () => {
+  const source = await readFile(path.join(repoRoot, CI_WORKFLOW), 'utf8');
+  assert.match(source, new RegExp(`^  ${AGGREGATOR_JOB_ID}:\\s*$`, 'm'));
+  assert.match(source, /^\s+name:\s+shipped-windows\s*$/m);
+  assert.match(source, /^\s+if:\s+always\(\)\s*$/m);
+  assert.match(source, /needs\.check-shipped-windows\.result/);
 });
 
 test('checker fails a temp repo whose ci.yml still only tests the host default', async () => {

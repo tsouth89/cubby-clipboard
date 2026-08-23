@@ -2,6 +2,11 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
+## Unreleased
+
+### Fixed
+- CI now publishes a stable `shipped-windows` check that fails when any SBS-779 `Check <arch> <features>` cargo-check fails. Branch protection on main still requires only `test` until a repo admin adds that name; the docs no longer claim the matrix legs already block merge (SBS-1025)
+
 ## v1.3.3
 
 ### Security
