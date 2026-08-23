@@ -967,9 +967,29 @@ async fn perform_rolling_backup_refresh_with(
     let temporary_for_rename = temporary.clone();
     let backup_for_rename = backup.clone();
     let installed = tokio::task::spawn_blocking(move || {
-        install(&temporary_for_rename, &backup_for_rename).inspect_err(|_| {
-            let _ = std::fs::remove_file(&temporary_for_rename);
-        })
+        if let Err(error) = install(&temporary_for_rename, &backup_for_rename) {
+            // On exFAT/FAT, replace is delete-then-rename. A failure after dest
+            // is gone leaves the temp as the only remaining recovery copy, so
+            // deleting it would wipe both (SBS-1051). Same dest-gone fallback
+            // as settings.json, `.cubbybak` persist, and image `{uuid}.cubby`.
+            if crate::settings_load::recover_or_discard_replace_temp(
+                &temporary_for_rename,
+                &backup_for_rename,
+            ) {
+                log::warn!(
+                    "STORAGE: replacing rolling backup failed ({error}); the new copy was renamed into place instead"
+                );
+                return Ok(());
+            }
+            if !backup_for_rename.is_file() {
+                log::error!(
+                    "STORAGE: replacing rolling backup failed ({error}) and the destination is not a file; leaving {}",
+                    temporary_for_rename.display()
+                );
+            }
+            return Err(error);
+        }
+        Ok(())
     })
     .await;
     match installed {
@@ -1665,10 +1685,11 @@ mod tests {
     use super::{
         apply_database_health, backup_is_fresh_as_of, classify_sqlite_health_failure,
         copy_backup_snapshot, count_clips_in_file, join_distinct_notes,
-        perform_rolling_backup_refresh, prepare_database_file, quarantine_database_files,
-        replace_backup_atomically, rolling_backup_path, sanitize_storage_diagnostic,
-        should_skip_backup_refresh, sqlite_failure_is_corruption, verify_database_quick_check,
-        ContentHashDedup, Database, DatabaseHealth, RollingBackupScheduler, RollingBackupTick,
+        perform_rolling_backup_refresh, perform_rolling_backup_refresh_with, prepare_database_file,
+        quarantine_database_files, replace_backup_atomically, rolling_backup_path,
+        sanitize_storage_diagnostic, should_skip_backup_refresh, sqlite_failure_is_corruption,
+        verify_database_quick_check, BackupRefreshOutcome, ContentHashDedup, Database,
+        DatabaseHealth, RollingBackupScheduler, RollingBackupTick,
     };
     use crate::crypto::CryptoManager;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -2940,6 +2961,22 @@ mod tests {
         Err(std::io::Error::other("simulated install failure"))
     }
 
+    /// FAT/exFAT `MoveFileExW(REPLACE_EXISTING)` is delete-then-rename. This
+    /// stand-in deletes dest and then fails, leaving the temp as the only copy.
+    fn simulate_fat_dest_gone_backup_replace(
+        source: &std::path::Path,
+        dest: &std::path::Path,
+    ) -> Result<(), std::io::Error> {
+        let _ = std::fs::remove_file(dest);
+        assert!(
+            source.exists(),
+            "the staged backup temp must still be the only remaining copy"
+        );
+        Err(std::io::Error::other(
+            "simulated FAT dest-gone replace failure",
+        ))
+    }
+
     fn modified_time(path: &std::path::Path) -> SystemTime {
         std::fs::metadata(path).unwrap().modified().unwrap()
     }
@@ -3254,6 +3291,54 @@ mod tests {
         assert!(
             after_modified > before_modified,
             "backup mtime must move when the in-session refresh installs a new copy"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// SBS-1051: FAT dest-gone mid-replace leaves the temp as the only copy.
+    /// `inspect_err` used to delete that temp, wiping the recovery copy.
+    /// Recovering it into place is success.
+    #[tokio::test]
+    async fn dest_gone_mid_replace_recovers_the_rolling_backup() {
+        let directory = temp_dir();
+        let database_path = directory.join("cubby.db");
+        write_history_marker(&database_path, "known-good").await;
+        perform_rolling_backup_refresh(&database_path)
+            .await
+            .expect("seed backup should write");
+
+        let backup = rolling_backup_path(&database_path);
+        write_history_marker(&database_path, "newer").await;
+
+        let outcome = perform_rolling_backup_refresh_with(
+            &database_path,
+            simulate_fat_dest_gone_backup_replace,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            Ok(BackupRefreshOutcome::Installed),
+            "dest-gone must recover the staged backup, not fail the install: {outcome:?}"
+        );
+        assert!(
+            backup.exists(),
+            "the rolling bak must exist after dest-gone recovery"
+        );
+        assert_eq!(
+            read_history_marker(&backup).await,
+            "newer",
+            "the recovered bak must hold the new snapshot, not be wiped"
+        );
+        let leftover_temps: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp"))
+            .collect();
+        assert!(
+            leftover_temps.is_empty(),
+            "recovery consumes the temp so cleanup has nothing to delete: {leftover_temps:?}"
         );
         let _ = std::fs::remove_dir_all(directory);
     }
