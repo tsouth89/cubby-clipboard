@@ -191,6 +191,9 @@ function App() {
       unlisten.then((f) => f());
       unlistenDemo.then((fs) => fs.forEach((f) => f()));
     };
+    // DEV listeners are registered once. Their live folder comes from the ref,
+    // and re-registering them when loadClips changes would duplicate handlers.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Startup shortcut recovery happens before the webview loads, so pull the
@@ -479,7 +482,7 @@ function App() {
         if (perfId === loadPerfIdRef.current) setIsLoading(false);
       }
     },
-    []
+    [perfLogEnabled, t]
   );
 
   const loadFolders = useCallback(async () => {
