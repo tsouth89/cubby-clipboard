@@ -1227,9 +1227,11 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                             </span>
                           </button>
                         </div>
-                        <p className="mt-3 text-xs text-muted-foreground">
-                          {t('settings.remoteHotkeyHint')}
-                        </p>
+                        {settings.replace_win_v && (
+                          <p className="mt-3 text-xs text-muted-foreground">
+                            {t('settings.remoteHotkeyHint')}
+                          </p>
+                        )}
                       </Row>
                       <Row
                         title={t('settings.remoteClipboardRelay')}
