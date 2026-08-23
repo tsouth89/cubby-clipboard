@@ -383,15 +383,13 @@ mod tests {
         );
 
         let staged = stage_full_image_file(&crypto, &image_dir, uuid, b"retry-full-res");
-        assert!(
-            staged.is_err(),
-            "restaging must refuse to open the existing leave-temp: {staged:?}"
-        );
-        let error = staged.unwrap_err();
+        let error = match staged {
+            Ok(_) => panic!("restaging must refuse to open the existing leave-temp"),
+            Err(error) => error,
+        };
         assert!(
             error.contains("refusing to overwrite"),
-            "the error should describe the staging-file conflict: {}",
-            error
+            "the error should describe the staging-file conflict: {error}"
         );
         assert_eq!(
             std::fs::read(&temp_path).expect("leave-temp must still exist"),
@@ -429,7 +427,7 @@ mod tests {
         let staged = stage_full_image_file(&crypto, &image_dir, uuid, b"retry-full-res");
         assert!(
             staged.is_err(),
-            "restaging must refuse to open an existing staging file: {staged:?}"
+            "restaging must refuse to open an existing staging file"
         );
         assert_eq!(read_original(&crypto, &live_path), b"previous-full-res");
         assert_eq!(
