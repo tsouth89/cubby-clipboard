@@ -61,9 +61,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// Hash of a clipboard write Cubby made itself, with the time it was written.
 /// A snapshot queued while this marker is live carries the hash and generation
 /// so a backed-up consumer still ignores the echo after the wall-clock TTL
-/// (SBS-1022) without consuming a later paste of the same content.
-static IGNORE_HASH: Lazy<parking_lot::Mutex<Option<ignore_hash::IgnoreMarker>>> =
-    Lazy::new(|| parking_lot::Mutex::new(None));
+/// (SBS-1022) without consuming a later paste of the same content. Consumed
+/// generation lives next to the marker so a same-hash re-copy that bound the
+/// same generation is not swallowed after the echo is ignored.
+static IGNORE_HASH: Lazy<parking_lot::Mutex<ignore_hash::IgnoreState>> =
+    Lazy::new(|| parking_lot::Mutex::new(ignore_hash::IgnoreState::default()));
 static LAST_STABLE_HASH: Lazy<parking_lot::Mutex<Option<String>>> =
     Lazy::new(|| parking_lot::Mutex::new(None));
 /// Most recent accepted capture, used to forget extension password copies when
@@ -109,10 +111,7 @@ use forget_on_clear::{
 };
 use snapshot_queue::SizedPayload;
 mod ignore_hash;
-use ignore_hash::{
-    bind_ignore_hash_for_queued_work, consume_ignore_marker_after_self_paste,
-    should_ignore_queued_self_paste, IGNORE_HASH_TTL,
-};
+use ignore_hash::{bind_ignore_hash_for_queued_work, IGNORE_HASH_TTL};
 
 /// Pure helper for SOU-316 unit tests: only empty clears within the window
 /// forget the last clip. A later clear must leave history alone.
@@ -171,13 +170,19 @@ pub struct ClipboardCaptureStatus {
 
 pub fn set_ignore_hash(hash: String) {
     let mut lock = IGNORE_HASH.lock();
-    *lock = Some(ignore_hash::IgnoreMarker::new(hash));
+    // A new paste is a new generation. Leave consumed_generation in place so
+    // old queued echos still see their generation as already spent.
+    lock.marker = Some(ignore_hash::IgnoreMarker::new(hash));
 }
 
 pub(crate) fn clear_ignore_hash_if_matches(hash: &str) {
     let mut lock = IGNORE_HASH.lock();
-    if lock.as_ref().is_some_and(|marked| marked.hash == hash) {
-        lock.take();
+    if lock
+        .marker
+        .as_ref()
+        .is_some_and(|marked| marked.hash == hash)
+    {
+        lock.marker.take();
     }
 }
 
@@ -836,7 +841,7 @@ fn capture_one_bound_sequence(
     if let Some(MaterializeAttempt::Captured(content, formats)) = materialized {
         note_clipboard_event(sequence);
         let ignore = bind_ignore_hash_for_queued_work(
-            IGNORE_HASH.lock().as_ref(),
+            IGNORE_HASH.lock().marker.as_ref(),
             Instant::now(),
             IGNORE_HASH_TTL,
         );
@@ -2112,31 +2117,18 @@ async fn process_clipboard_snapshot(
     // The work item carries the hash that was live at enqueue. Honour that
     // even when the 5s wall-clock TTL has elapsed: a backed-up snapshot
     // queue must not persist the echo and bump created_at/source_app
-    // (SBS-1022). The live-marker check still covers a write whose snapshot
-    // was queued in the same window the paste path set the hash.
-    {
-        let mut lock = IGNORE_HASH.lock();
-        if should_ignore_queued_self_paste(
-            queued_ignore.as_ref(),
-            lock.as_ref(),
-            clip_hash.as_str(),
-            Instant::now(),
-            IGNORE_HASH_TTL,
-        ) {
-            // Only consume the marker this work item owns (same generation),
-            // or a live TTL match that is not from the queued binding.
-            // Clearing by hash alone would drop a newer paste of the same
-            // content.
-            consume_ignore_marker_after_self_paste(
-                &mut lock,
-                queued_ignore.as_ref(),
-                clip_hash.as_str(),
-                Instant::now(),
-                IGNORE_HASH_TTL,
-            );
-            log::info!("CLIPBOARD: Ignoring self-paste (own clipboard write)");
-            return;
-        }
+    // (SBS-1022). Consume is one-shot per generation so a genuine re-copy
+    // that bound the same generation is still captured. The live-marker
+    // check still covers a write whose snapshot was queued in the same
+    // window the paste path set the hash.
+    if IGNORE_HASH.lock().ignore_and_consume_self_paste(
+        queued_ignore.as_ref(),
+        clip_hash.as_str(),
+        Instant::now(),
+        IGNORE_HASH_TTL,
+    ) {
+        log::info!("CLIPBOARD: Ignoring self-paste (own clipboard write)");
+        return;
     }
 
     // Source app info was captured at event time (before debounce) to avoid race conditions
@@ -3474,7 +3466,7 @@ mod tests {
             ],
             materialize_ms: 0,
             sensitive: SensitiveMarkers::default(),
-            ignore_hash: None,
+            ignore: None,
         });
         assert_eq!(event.payload_bytes(), 1000 + 64 + 200 + 50);
         assert_eq!(
@@ -4056,13 +4048,14 @@ mod tests {
         assert_eq!(
             IGNORE_HASH
                 .lock()
+                .marker
                 .as_ref()
                 .map(|marked| marked.hash.as_str()),
             Some("expected")
         );
 
         clear_ignore_hash_if_matches("expected");
-        assert!(IGNORE_HASH.lock().is_none());
+        assert!(IGNORE_HASH.lock().marker.is_none());
     }
 
     #[test]

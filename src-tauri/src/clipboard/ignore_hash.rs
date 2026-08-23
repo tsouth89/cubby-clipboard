@@ -4,6 +4,8 @@
 //! Windows crate. A 5s marker that expires before a queued echo is processed
 //! used to persist that echo and bump `created_at`/`source_app`. The work item
 //! now carries the hash (and marker generation) that was live at enqueue.
+//! Queued ignore is one-shot per generation: consuming an echo must not
+//! swallow a later same-hash snapshot that bound the same generation.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -46,6 +48,47 @@ impl IgnoreMarker {
 pub(crate) struct QueuedIgnore {
     pub hash: String,
     pub generation: u64,
+}
+
+/// Live marker and the generation last consumed from a self-paste ignore.
+/// Stored together so enqueue binding and process-time consume stay consistent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct IgnoreState {
+    pub marker: Option<IgnoreMarker>,
+    pub consumed_generation: Option<u64>,
+}
+
+impl IgnoreState {
+    /// Whether this snapshot is a self-paste echo, and if so consume that
+    /// generation. Process-time storage uses this so the mutex guard is not
+    /// split-borrowed across the two helpers.
+    pub(crate) fn ignore_and_consume_self_paste(
+        &mut self,
+        queued: Option<&QueuedIgnore>,
+        clip_hash: &str,
+        now: Instant,
+        ttl: Duration,
+    ) -> bool {
+        if !should_ignore_queued_self_paste(
+            queued,
+            self.marker.as_ref(),
+            clip_hash,
+            now,
+            ttl,
+            self.consumed_generation,
+        ) {
+            return false;
+        }
+        consume_ignore_marker_after_self_paste(
+            &mut self.marker,
+            queued,
+            clip_hash,
+            now,
+            ttl,
+            &mut self.consumed_generation,
+        );
+        true
+    }
 }
 
 /// Whether a self-write marker still applies to `hash`.
@@ -92,18 +135,22 @@ pub(crate) fn bind_ignore_hash_for_queued_work(
 /// Whether this queued snapshot is Cubby's own write and must not be persisted.
 ///
 /// The work item's bound hash stays effective for the snapshot's lifetime,
-/// even when the live marker has outlived [`IGNORE_HASH_TTL`]. The live-marker
-/// check still covers a write whose snapshot was queued in the same window
-/// the paste path set the hash.
+/// even when the live marker has outlived [`IGNORE_HASH_TTL`]. That binding
+/// is one-shot per generation: after that generation is consumed, a later
+/// same-hash snapshot that bound the same generation is a real copy.
+/// The live-marker check still covers a write whose snapshot was queued in
+/// the same window the paste path set the hash.
 pub(crate) fn should_ignore_queued_self_paste(
     queued: Option<&QueuedIgnore>,
     live_marker: Option<&IgnoreMarker>,
     clip_hash: &str,
     now: Instant,
     ttl: Duration,
+    consumed_generation: Option<u64>,
 ) -> bool {
-    queued.is_some_and(|bound| bound.hash == clip_hash)
-        || ignore_marker_applies(live_marker, clip_hash, now, ttl)
+    queued.is_some_and(|bound| {
+        bound.hash == clip_hash && Some(bound.generation) != consumed_generation
+    }) || ignore_marker_applies(live_marker, clip_hash, now, ttl)
 }
 
 /// Drop the live marker only if this work item owns it, or we ignored via the
@@ -113,23 +160,41 @@ pub(crate) fn should_ignore_queued_self_paste(
 /// a delayed echo is still draining. Requiring `queued` to be `None` would
 /// leave a live marker after an unrelated binding was ignored via TTL, so a
 /// later real copy of that content could be swallowed until the clock expires.
+/// Honouring a queued hash after its generation was consumed would swallow
+/// a genuine re-copy that bound the same generation while the queue was backed
+/// up.
 pub(crate) fn consume_ignore_marker_after_self_paste(
     live: &mut Option<IgnoreMarker>,
     queued: Option<&QueuedIgnore>,
     clip_hash: &str,
     now: Instant,
     ttl: Duration,
+    consumed_generation: &mut Option<u64>,
 ) {
-    let Some(marker) = live.as_ref() else {
-        return;
-    };
-    if marker.hash != clip_hash {
+    let ignored_via_queued = queued.is_some_and(|bound| {
+        bound.hash == clip_hash && Some(bound.generation) != *consumed_generation
+    });
+    let bound_hash_matches = queued.is_some_and(|bound| bound.hash == clip_hash);
+    let owns_this_marker = queued.is_some_and(|bound| {
+        live.as_ref()
+            .is_some_and(|marker| bound.generation == marker.generation)
+    });
+    let ignored_via_live = ignore_marker_applies(live.as_ref(), clip_hash, now, ttl);
+
+    if ignored_via_queued {
+        if let Some(bound) = queued {
+            *consumed_generation = Some(bound.generation);
+        }
+        if owns_this_marker {
+            live.take();
+        }
         return;
     }
-    let ignored_via_queued = queued.is_some_and(|bound| bound.hash == clip_hash);
-    let owns_this_marker = queued.is_some_and(|bound| bound.generation == marker.generation);
-    let ignored_via_live = ignore_marker_applies(live.as_ref(), clip_hash, now, ttl);
-    if owns_this_marker || (ignored_via_live && !ignored_via_queued) {
+
+    if ignored_via_live && !bound_hash_matches {
+        if let Some(marker) = live.as_ref() {
+            *consumed_generation = Some(marker.generation);
+        }
         live.take();
     }
 }
@@ -138,8 +203,8 @@ pub(crate) fn consume_ignore_marker_after_self_paste(
 mod tests {
     use super::{
         bind_ignore_hash_for_queued_work, consume_ignore_marker_after_self_paste,
-        ignore_marker_applies, should_ignore_queued_self_paste, IgnoreMarker, QueuedIgnore,
-        IGNORE_HASH_TTL,
+        ignore_marker_applies, should_ignore_queued_self_paste, IgnoreMarker, IgnoreState,
+        QueuedIgnore, IGNORE_HASH_TTL,
     };
     use std::time::{Duration, Instant};
 
@@ -228,7 +293,8 @@ mod tests {
             Some(&marked),
             "hash-a",
             later,
-            IGNORE_HASH_TTL
+            IGNORE_HASH_TTL,
+            None,
         ));
     }
 
@@ -257,7 +323,8 @@ mod tests {
             Some(&marked),
             "hash-a",
             later,
-            IGNORE_HASH_TTL
+            IGNORE_HASH_TTL,
+            None,
         ));
     }
 
@@ -271,7 +338,8 @@ mod tests {
             Some(&marked),
             "hash-b",
             now,
-            IGNORE_HASH_TTL
+            IGNORE_HASH_TTL,
+            None,
         ));
     }
 
@@ -290,14 +358,16 @@ mod tests {
             Some(&replaced),
             "hash-a",
             later,
-            IGNORE_HASH_TTL
+            IGNORE_HASH_TTL,
+            None,
         ));
         assert!(!should_ignore_queued_self_paste(
             queued.as_ref(),
             Some(&replaced),
             "hash-b",
             later,
-            IGNORE_HASH_TTL
+            IGNORE_HASH_TTL,
+            None,
         ));
     }
 
@@ -310,7 +380,8 @@ mod tests {
             Some(&marked),
             "hash-a",
             now + Duration::from_millis(50),
-            IGNORE_HASH_TTL
+            IGNORE_HASH_TTL,
+            None,
         ));
     }
 
@@ -331,17 +402,21 @@ mod tests {
             Some(&refreshed),
             "hash-a",
             later,
-            IGNORE_HASH_TTL
+            IGNORE_HASH_TTL,
+            None,
         ));
 
         let mut live = Some(refreshed.clone());
+        let mut consumed = None;
         consume_ignore_marker_after_self_paste(
             &mut live,
             queued.as_ref(),
             "hash-a",
             later,
             IGNORE_HASH_TTL,
+            &mut consumed,
         );
+        assert_eq!(consumed, Some(1));
         assert_eq!(
             live.as_ref().map(|marked| marked.generation),
             Some(2),
@@ -352,7 +427,8 @@ mod tests {
             live.as_ref(),
             "hash-a",
             refreshed_at + Duration::from_millis(50),
-            IGNORE_HASH_TTL
+            IGNORE_HASH_TTL,
+            consumed,
         ));
     }
 
@@ -362,28 +438,34 @@ mod tests {
         let marked = marker("hash-a", now, 1);
         let queued = bind_ignore_hash_for_queued_work(Some(&marked), now, IGNORE_HASH_TTL);
         let mut live = Some(marked);
+        let mut consumed = None;
         consume_ignore_marker_after_self_paste(
             &mut live,
             queued.as_ref(),
             "hash-a",
             now + IGNORE_HASH_TTL + Duration::from_millis(1),
             IGNORE_HASH_TTL,
+            &mut consumed,
         );
         assert!(live.is_none());
+        assert_eq!(consumed, Some(1));
     }
 
     #[test]
     fn consume_via_live_ttl_clears_an_unbound_marker() {
         let now = Instant::now();
         let mut live = Some(marker("hash-a", now, 1));
+        let mut consumed = None;
         consume_ignore_marker_after_self_paste(
             &mut live,
             None,
             "hash-a",
             now + Duration::from_millis(50),
             IGNORE_HASH_TTL,
+            &mut consumed,
         );
         assert!(live.is_none());
+        assert_eq!(consumed, Some(1));
     }
 
     #[test]
@@ -402,20 +484,73 @@ mod tests {
             Some(&live_b),
             "hash-b",
             now + Duration::from_millis(50),
-            IGNORE_HASH_TTL
+            IGNORE_HASH_TTL,
+            None,
         ));
 
         let mut live = Some(live_b);
+        let mut consumed = None;
         consume_ignore_marker_after_self_paste(
             &mut live,
             Some(&queued_other),
             "hash-b",
             now + Duration::from_millis(50),
             IGNORE_HASH_TTL,
+            &mut consumed,
         );
         assert!(
             live.is_none(),
             "fail-without-fix: leftover live marker swallows later real copies"
+        );
+        assert_eq!(consumed, Some(2));
+    }
+
+    #[test]
+    fn queued_same_hash_binding_is_one_shot_per_generation() {
+        // Paste A (gen 1). While the queue is backed up, both the self-paste
+        // echo and a genuine re-copy of A bind gen 1. After TTL, consuming
+        // the echo must not leave the second snapshot immortal.
+        let now = Instant::now();
+        let paste_a = marker("hash-a", now, 1);
+        let echo = bind_ignore_hash_for_queued_work(Some(&paste_a), now, IGNORE_HASH_TTL);
+        let recopy = bind_ignore_hash_for_queued_work(Some(&paste_a), now, IGNORE_HASH_TTL);
+        let later = now + IGNORE_HASH_TTL + Duration::from_millis(1);
+
+        assert!(
+            should_ignore_queued_self_paste(
+                echo.as_ref(),
+                Some(&paste_a),
+                "hash-a",
+                later,
+                IGNORE_HASH_TTL,
+                None,
+            ),
+            "fail-without-fix: first queued echo after TTL must still be ignored (SBS-1022)"
+        );
+
+        let mut state = IgnoreState {
+            marker: Some(paste_a),
+            consumed_generation: None,
+        };
+        assert!(state.ignore_and_consume_self_paste(
+            echo.as_ref(),
+            "hash-a",
+            later,
+            IGNORE_HASH_TTL
+        ));
+        assert_eq!(state.consumed_generation, Some(1));
+        assert!(state.marker.is_none());
+
+        assert!(
+            !should_ignore_queued_self_paste(
+                recopy.as_ref(),
+                None,
+                "hash-a",
+                later,
+                IGNORE_HASH_TTL,
+                state.consumed_generation,
+            ),
+            "fail-without-fix: second same-hash snapshot bound to gen 1 is still swallowed"
         );
     }
 }
