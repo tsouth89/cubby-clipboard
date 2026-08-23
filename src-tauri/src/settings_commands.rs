@@ -73,35 +73,17 @@ pub async fn save_settings(
 ) -> Result<(), String> {
     let manager = app.state::<Arc<SettingsManager>>();
 
-    // Deserialize incoming settings (Frontend sends full object except ignored_apps)
-    let mut new_settings: crate::models::AppSettings =
-        serde_json::from_value(settings).map_err(|e| e.to_string())?;
-
-    // Preserve server-owned privacy list state. The frontend does not round-trip
-    // ignored apps or the one-time seed flag; trusting a missing/false seed flag
-    // would re-insert default password managers on the next startup.
     let current = manager.get();
-    new_settings.ignored_apps = current.ignored_apps.clone();
-    new_settings.default_sensitive_apps_seeded = current.default_sensitive_apps_seeded;
-
-    // Newer frontends identify the exact fields involved in this save. Keep a
-    // value comparison fallback for older callers, but avoid touching Windows
-    // startup state for unrelated settings when the changed fields are known.
-    let startup_setting_changed = changed_keys
-        .as_ref()
-        .map(|keys| keys.iter().any(|key| key == "startup_with_windows"))
-        .unwrap_or(new_settings.startup_with_windows != current.startup_with_windows);
-
     let portable = crate::portable_data_dir().is_some();
-    if portable || cfg!(feature = "app-store") {
-        // Never persist a capability the current build cannot apply. This also
-        // clears a stale installed-build preference after switching channels.
-        new_settings.startup_with_windows = false;
-    } else if !startup_setting_changed {
-        // The OS is authoritative for display, but the persisted fallback must
-        // not be rewritten from an unrelated save or an unavailable read.
-        new_settings.startup_with_windows = current.startup_with_windows;
-    }
+    let app_store_build = cfg!(feature = "app-store");
+
+    let (new_settings, startup_setting_changed) = prepare_settings_for_save(
+        settings,
+        changed_keys.as_deref(),
+        &current,
+        portable,
+        app_store_build,
+    )?;
 
     #[cfg(not(feature = "app-store"))]
     let autostart_transition = if portable || !startup_setting_changed {
@@ -270,11 +252,31 @@ pub async fn complete_onboarding(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Trims and validates before inserting. Returns whether the set actually changed, so the
+/// caller only persists when there is something new to save.
+fn apply_add_ignored_app(app_name: &str, current: &mut crate::models::AppSettings) -> bool {
+    let trimmed = app_name.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    current.ignored_apps.insert(trimmed.to_string())
+}
+
+/// Mirrors `apply_add_ignored_app`'s trimming so "  testapp  " removes the same entry
+/// "testapp" added.
+fn apply_remove_ignored_app(app_name: &str, current: &mut crate::models::AppSettings) -> bool {
+    let trimmed = app_name.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    current.ignored_apps.remove(trimmed)
+}
+
 #[tauri::command]
 pub async fn add_ignored_app(app_name: String, app: AppHandle) -> Result<(), String> {
     let manager = app.state::<Arc<SettingsManager>>();
     let mut current = manager.get();
-    if current.ignored_apps.insert(app_name) {
+    if apply_add_ignored_app(&app_name, &mut current) {
         manager.save(current)?;
     }
     Ok(())
@@ -284,7 +286,7 @@ pub async fn add_ignored_app(app_name: String, app: AppHandle) -> Result<(), Str
 pub async fn remove_ignored_app(app_name: String, app: AppHandle) -> Result<(), String> {
     let manager = app.state::<Arc<SettingsManager>>();
     let mut current = manager.get();
-    if current.ignored_apps.remove(&app_name) {
+    if apply_remove_ignored_app(&app_name, &mut current) {
         manager.save(current)?;
     }
     Ok(())
@@ -296,4 +298,118 @@ pub async fn get_ignored_apps(app: AppHandle) -> Result<Vec<String>, String> {
     let mut apps: Vec<String> = manager.get().ignored_apps.into_iter().collect();
     apps.sort();
     Ok(apps)
+}
+
+fn prepare_settings_for_save(
+    settings: serde_json::Value,
+    changed_keys: Option<&[String]>,
+    current: &crate::models::AppSettings,
+    portable: bool,
+    app_store_build: bool,
+) -> Result<(crate::models::AppSettings, bool), String> {
+    let mut new_settings: crate::models::AppSettings =
+        serde_json::from_value(settings).map_err(|e| e.to_string())?;
+
+    new_settings.ignored_apps = current.ignored_apps.clone();
+    new_settings.default_sensitive_apps_seeded = current.default_sensitive_apps_seeded;
+
+    let startup_setting_changed = changed_keys
+        .map(|keys| keys.iter().any(|key| key == "startup_with_windows"))
+        .unwrap_or(new_settings.startup_with_windows != current.startup_with_windows);
+
+    if portable || app_store_build {
+        new_settings.startup_with_windows = false;
+    } else if !startup_setting_changed {
+        new_settings.startup_with_windows = current.startup_with_windows;
+    }
+
+    Ok((new_settings, startup_setting_changed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::AppSettings;
+
+    #[test]
+    fn test_ignored_apps_add() {
+        let mut current = AppSettings::default();
+
+        assert!(apply_add_ignored_app("testapp", &mut current));
+        assert!(current.ignored_apps.contains("testapp"));
+
+        // Duplicate
+        assert!(!apply_add_ignored_app("testapp", &mut current));
+
+        // Whitespace and empty
+        assert!(!apply_add_ignored_app("   ", &mut current));
+        assert!(!apply_add_ignored_app("", &mut current));
+
+        // Trimming
+        assert!(apply_add_ignored_app("  app2  ", &mut current));
+        assert!(current.ignored_apps.contains("app2"));
+    }
+
+    #[test]
+    fn test_ignored_apps_remove() {
+        let mut current = AppSettings::default();
+        current.ignored_apps.insert("testapp".to_string());
+
+        assert!(apply_remove_ignored_app("testapp", &mut current));
+        assert!(!current.ignored_apps.contains("testapp"));
+
+        // Does not exist
+        assert!(!apply_remove_ignored_app("testapp", &mut current));
+
+        // Whitespace and empty
+        assert!(!apply_remove_ignored_app("   ", &mut current));
+        assert!(!apply_remove_ignored_app("", &mut current));
+    }
+
+    #[test]
+    fn test_prepare_settings_for_save_roundtrip() {
+        let current = AppSettings::default();
+        let new_settings = AppSettings {
+            theme: "dark".to_string(),
+            startup_with_windows: true,
+            ..AppSettings::default()
+        };
+
+        let json = serde_json::to_value(&new_settings).unwrap();
+
+        // Normal save
+        let (saved, changed) =
+            prepare_settings_for_save(json.clone(), None, &current, false, false).unwrap();
+        assert_eq!(saved.theme, "dark");
+        assert!(saved.startup_with_windows);
+        assert!(changed);
+
+        // Portable prevents startup
+        let (saved_port, _) =
+            prepare_settings_for_save(json.clone(), None, &current, true, false).unwrap();
+        assert!(!saved_port.startup_with_windows);
+
+        // Store build prevents startup
+        let (saved_store, _) =
+            prepare_settings_for_save(json.clone(), None, &current, false, true).unwrap();
+        assert!(!saved_store.startup_with_windows);
+    }
+
+    #[test]
+    fn test_prepare_settings_for_save_preserves_server_owned_privacy_state() {
+        // The frontend does not round-trip ignored_apps or the seed flag, so a save must not
+        // let their absence from the incoming JSON erase them -- a missing/false seed flag
+        // would re-insert default password managers on the next startup.
+        let mut current = AppSettings::default();
+        current.ignored_apps.insert("keepass".to_string());
+        current.default_sensitive_apps_seeded = true;
+
+        // The frontend's own default omits both fields entirely.
+        let incoming = AppSettings::default();
+        let json = serde_json::to_value(&incoming).unwrap();
+
+        let (saved, _) = prepare_settings_for_save(json, None, &current, false, false).unwrap();
+        assert!(saved.ignored_apps.contains("keepass"));
+        assert!(saved.default_sensitive_apps_seeded);
+    }
 }

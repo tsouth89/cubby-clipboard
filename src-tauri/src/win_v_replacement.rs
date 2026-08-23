@@ -143,26 +143,28 @@ impl WinVReplacementManager {
             .state
             .lock()
             .map_err(|_| "Win+V helper state is unavailable".to_string())?;
-        let hotkey_changed = state.hotkey != hotkey;
+
+        let action = compute_helper_action(&state, enabled, hotkey.as_deref());
+
         state.desired = enabled;
         state.hotkey = hotkey;
 
-        if !enabled {
+        if action.needs_stop {
             stop_child(&mut state.child);
-            log::info!("WIN_V: Replacement helper stopped");
-            return Ok(());
+            if !enabled {
+                log::info!("WIN_V: Replacement helper stopped");
+                return Ok(());
+            }
         }
 
-        // Restart a running helper so it re-parses the new activation hotkey.
-        if hotkey_changed {
-            stop_child(&mut state.child);
+        if action.needs_start {
+            ensure_child_running(
+                &mut state,
+                self.inner.activation_port,
+                &self.inner.activation_token,
+            )?;
         }
 
-        ensure_child_running(
-            &mut state,
-            self.inner.activation_port,
-            &self.inner.activation_token,
-        )?;
         drop(state);
         self.start_watchdog();
         Ok(())
@@ -289,9 +291,27 @@ pub fn shortcut_save_blocked(channel_available: bool, newly_enabled: bool) -> bo
     !channel_available && newly_enabled
 }
 
+struct HelperAction {
+    needs_stop: bool,
+    needs_start: bool,
+}
+
+fn compute_helper_action(state: &HelperState, enabled: bool, hotkey: Option<&str>) -> HelperAction {
+    let hotkey_changed = state.hotkey.as_deref() != hotkey;
+    let needs_stop = !enabled || hotkey_changed;
+    // Always start if enabled, ensure_child_running is a no-op if it's already running.
+    // If it was stopped due to hotkey_changed, it will actually start.
+    let needs_start = enabled;
+
+    HelperAction {
+        needs_stop,
+        needs_start,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{shortcut_save_blocked, WinVReplacementManager};
+    use super::*;
 
     #[test]
     fn missing_channel_refuses_enable_and_allows_disable() {
@@ -313,5 +333,54 @@ mod tests {
         assert!(!shortcut_save_blocked(false, false));
         assert!(!shortcut_save_blocked(true, true));
         assert!(!shortcut_save_blocked(true, false));
+    }
+
+    #[test]
+    fn test_compute_helper_action_enable() {
+        let state = HelperState::default();
+
+        let action = compute_helper_action(&state, true, Some("Win+Alt+V"));
+        // not previously enabled, so hotkey_changed is true too
+        assert!(action.needs_stop);
+        assert!(action.needs_start);
+    }
+
+    #[test]
+    fn test_compute_helper_action_disable() {
+        let state = HelperState {
+            child: None,
+            desired: true,
+            hotkey: Some("Win+Alt+V".to_string()),
+        };
+
+        let action = compute_helper_action(&state, false, Some("Win+Alt+V"));
+        assert!(action.needs_stop);
+        assert!(!action.needs_start);
+    }
+
+    #[test]
+    fn test_compute_helper_action_change_hotkey() {
+        let state = HelperState {
+            child: None,
+            desired: true,
+            hotkey: Some("Win+Alt+V".to_string()),
+        };
+
+        let action = compute_helper_action(&state, true, Some("Win+Shift+V"));
+        assert!(action.needs_stop);
+        assert!(action.needs_start);
+    }
+
+    #[test]
+    fn test_compute_helper_action_no_change() {
+        let state = HelperState {
+            child: None,
+            desired: true,
+            hotkey: Some("Win+Alt+V".to_string()),
+        };
+
+        let action = compute_helper_action(&state, true, Some("Win+Alt+V"));
+        assert!(!action.needs_stop);
+        assert!(action.needs_start); // ensure_child_running will safely verify it's running
     }
 }
