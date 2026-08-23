@@ -64,6 +64,29 @@ pub(crate) enum EnqueueOutcome {
     },
 }
 
+/// Flood eviction can remove the content that separated two retained clears.
+/// Collapse any newly adjacent replacements so alternating clear/content
+/// traffic cannot grow the retained portion beyond the queue bound.
+fn coalesce_adjacent_replacements<T: SizedPayload>(
+    queue: &mut VecDeque<T>,
+    queued_bytes: &mut usize,
+) -> usize {
+    let mut index = 0;
+    let mut removed_bytes = 0usize;
+    while index + 1 < queue.len() {
+        if queue[index + 1].replaces_queued(&queue[index]) {
+            if let Some(old) = queue.remove(index) {
+                let old_bytes = old.payload_bytes();
+                *queued_bytes = queued_bytes.saturating_sub(old_bytes);
+                removed_bytes = removed_bytes.saturating_add(old_bytes);
+            }
+        } else {
+            index += 1;
+        }
+    }
+    removed_bytes
+}
+
 /// Apply the SBS-1032 bound. `capacity` and `max_bytes` are parameters so a
 /// test can prove the refusal without allocating the production 64 MiB budget.
 pub(crate) fn enqueue<T: SizedPayload>(
@@ -110,6 +133,7 @@ pub(crate) fn enqueue<T: SizedPayload>(
             *queued_bytes = queued_bytes.saturating_sub(old_bytes);
             dropped += 1;
             dropped_bytes += old_bytes;
+            let _ = coalesce_adjacent_replacements(queue, queued_bytes);
         }
     } else {
         // Counted bytes skip an already-accepted oversize resident so a
@@ -139,6 +163,8 @@ pub(crate) fn enqueue<T: SizedPayload>(
                 }
                 dropped += 1;
                 dropped_bytes += old_bytes;
+                let coalesced_bytes = coalesce_adjacent_replacements(queue, queued_bytes);
+                counted_bytes = counted_bytes.saturating_sub(coalesced_bytes);
             } else if let Some(index) = queue
                 .iter()
                 .position(|queued| !queued.retain_on_flood() && queued.payload_bytes() <= max_bytes)
@@ -151,6 +177,8 @@ pub(crate) fn enqueue<T: SizedPayload>(
                 counted_bytes = counted_bytes.saturating_sub(old_bytes);
                 dropped += 1;
                 dropped_bytes += old_bytes;
+                let coalesced_bytes = coalesce_adjacent_replacements(queue, queued_bytes);
+                counted_bytes = counted_bytes.saturating_sub(coalesced_bytes);
             } else {
                 break;
             }
@@ -602,6 +630,21 @@ mod tests {
         }
         assert_eq!(ids(&queue), vec![199]);
         assert!(queue.front().is_some_and(|item| item.retain));
+    }
+
+    /// Evicting the content between retained clears makes those clears
+    /// equivalent. They must then coalesce or alternating traffic can grow
+    /// the retained queue past its configured capacity.
+    #[test]
+    fn alternating_clear_and_content_flood_stays_count_bounded() {
+        let mut queue = VecDeque::new();
+        let mut bytes = 0usize;
+        for id in 0..500 {
+            enqueue(&mut queue, &mut bytes, cleared(id * 2), 8, 20);
+            enqueue(&mut queue, &mut bytes, fake(id * 2 + 1, 8), 8, 20);
+            assert!(queue.len() <= 8, "queue grew to {} items", queue.len());
+            assert!(bytes <= 20, "queue grew to {bytes} bytes");
+        }
     }
 
     #[test]
