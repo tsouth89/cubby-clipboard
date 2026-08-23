@@ -99,10 +99,23 @@ impl IgnoreState {
         &mut self,
         queued: Option<&QueuedIgnore>,
         clip_hash: &str,
-        now: Instant,
-        ttl: Duration,
     ) -> bool {
-        self.ignore_and_consume_self_paste(queued, clip_hash, now, ttl)
+        let Some(bound) = queued else {
+            return false;
+        };
+        if bound.hash != clip_hash || Some(bound.generation) == self.consumed_generation {
+            return false;
+        }
+
+        self.consumed_generation = Some(bound.generation);
+        if self
+            .marker
+            .as_ref()
+            .is_some_and(|marker| marker.generation == bound.generation)
+        {
+            self.marker.take();
+        }
+        true
     }
 }
 
@@ -644,7 +657,7 @@ mod tests {
             consumed_generation: None,
         };
         assert!(
-            state.release_dropped_queued_work(echo.as_ref(), "hash-a", now, IGNORE_HASH_TTL),
+            state.release_dropped_queued_work(echo.as_ref(), "hash-a"),
             "the dropped work was the self-paste echo and must spend that generation"
         );
         assert!(state.marker.is_none());
@@ -674,12 +687,7 @@ mod tests {
             marker: Some(paste_a),
             consumed_generation: None,
         };
-        assert!(!state.release_dropped_queued_work(
-            passenger.as_ref(),
-            "hash-b",
-            now,
-            IGNORE_HASH_TTL
-        ));
+        assert!(!state.release_dropped_queued_work(passenger.as_ref(), "hash-b"));
         assert_eq!(state.consumed_generation, None);
         assert!(
             should_ignore_queued_self_paste(
@@ -692,5 +700,24 @@ mod tests {
             ),
             "fail-without-fix: dropping B spent A's ignore, so the remaining echo would persist"
         );
+    }
+
+    #[test]
+    fn dropping_unbound_same_hash_work_does_not_spend_the_live_marker() {
+        let now = Instant::now();
+        let paste_a = marker("hash-a", now, 1);
+        let echo = bind_ignore_hash_for_queued_work(Some(&paste_a), now, IGNORE_HASH_TTL);
+        let mut state = IgnoreState {
+            marker: Some(paste_a),
+            consumed_generation: None,
+        };
+
+        assert!(!state.release_dropped_queued_work(None, "hash-a"));
+        assert_eq!(state.consumed_generation, None);
+        assert!(
+            state.marker.is_some(),
+            "the live marker must remain for its bound echo"
+        );
+        assert!(state.ignore_and_consume_self_paste(echo.as_ref(), "hash-a", now, IGNORE_HASH_TTL,));
     }
 }

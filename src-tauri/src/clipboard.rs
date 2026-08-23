@@ -421,17 +421,11 @@ fn captured_clip_hash(content: &CapturedContent, formats: &[CapturedFormat]) -> 
 /// after persist, so a dropped snapshot never stamped consecutive-dedup and
 /// [`reset_capture_dedup`] is the history-delete path, not this one.
 fn release_ignore_for_dropped_events(evicted: &[ClipboardListenerEvent]) {
-    let now = Instant::now();
     let mut lock = IGNORE_HASH.lock();
     for event in evicted {
         if let ClipboardListenerEvent::Content(snapshot) = event {
             let clip_hash = captured_clip_hash(&snapshot.content, &snapshot.formats);
-            if lock.release_dropped_queued_work(
-                snapshot.ignore.as_ref(),
-                clip_hash.as_str(),
-                now,
-                IGNORE_HASH_TTL,
-            ) {
+            if lock.release_dropped_queued_work(snapshot.ignore.as_ref(), clip_hash.as_str()) {
                 log::info!(
                     "CLIPBOARD: Released self-paste ignore after snapshot was dropped under flood (SBS-1039)"
                 );
