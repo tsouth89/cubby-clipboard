@@ -191,6 +191,8 @@ export function findStaleBackupOmissionClaims(source) {
  * trigger, and an open/available verb, without also naming the hook.
  * A negation in the same clause before that verb is a disclaimer, the
  * same way the file-list detectors treat "does not store file lists".
+ * Each open/available match is judged on its own clause so an earlier
+ * disclaimer cannot hide a later claim.
  */
 const REMOTE_SESSION = /\bremote(?:[\s-]session)?s?\b/i;
 const HOTKEY_OR_TRIGGER = /\b(?:hotkeys?|(?:remote[\s-]+session\s+)?triggers?)\b/i;
@@ -198,13 +200,16 @@ const OPENS_OR_AVAILABLE = /\b(?:opens?\s+cubby|open\s+cubby|available)\b/i;
 const WIN_V_REPLACEMENT_DEPENDENCY =
   /\b(?:win\s*\+\s*v\s+replacement|replace(?:s|ment)?\s+windows\s+clipboard|helper\s+hook|replacement\s+(?:mode|must|is\s+on|enabled))\b/i;
 
-function isNegatedOpenOrAvailable(segment) {
-  const open = segment.search(OPENS_OR_AVAILABLE);
-  if (open === -1) {
-    return false;
+function hasUnnegatedOpenOrAvailable(segment) {
+  const pattern = new RegExp(OPENS_OR_AVAILABLE.source, 'gi');
+  let match;
+  while ((match = pattern.exec(segment)) !== null) {
+    const before = segment.slice(0, match.index);
+    if (lastMatchIndex(NEGATION, before.slice(lastClauseStart(before))) === -1) {
+      return true;
+    }
   }
-  const before = segment.slice(0, open);
-  return lastMatchIndex(NEGATION, before.slice(lastClauseStart(before))) !== -1;
+  return false;
 }
 
 export function findUnqualifiedRemoteHotkeyClaims(source) {
@@ -216,13 +221,10 @@ export function findUnqualifiedRemoteHotkeyClaims(source) {
     if (!HOTKEY_OR_TRIGGER.test(segment)) {
       continue;
     }
-    if (!OPENS_OR_AVAILABLE.test(segment)) {
-      continue;
-    }
     if (WIN_V_REPLACEMENT_DEPENDENCY.test(segment)) {
       continue;
     }
-    if (isNegatedOpenOrAvailable(segment)) {
+    if (!hasUnnegatedOpenOrAvailable(segment)) {
       continue;
     }
     claims.push(segment);
