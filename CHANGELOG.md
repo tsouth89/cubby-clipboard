@@ -2,23 +2,6 @@
 
 All notable Cubby Clipboard changes are documented here. PastePaw entries below Cubby's first beta are retained as upstream history and attribution.
 
-## Unreleased
-
-### Security
-- Paste and copy no longer emit the full decrypted clip body to the WebView on a `clipboard-write` event that has no frontend listener (SBS-1042)
-
-### Fixed
-- Auto-paste now re-checks that the remembered target still has focus after the settle delay, and leaves the clip on the clipboard instead of synthesizing Ctrl+V if focus moved (SBS-1066)
-- Release `submit-store` now waits for `validate` before `msstore submission publish`, matching the GitHub undraft gate so a red or still-running cargo test / clippy / `release:check` cannot reach Partner Center (SBS-1068)
-- A Settings change no longer overwrites the only recoverable preferences file when an interrupted write could not be promoted (#303)
-- History bulk Copy now includes recognized text from selected images, including images whose full-resolution original has expired
-- Encrypted backup exports now flush a complete sibling temp file before replacing an existing backup, preserving the prior file on write or install failure (#189)
-- Flood-dropping a queued self-paste echo no longer leaves the ignore hash swallowing the next real copy of that content (SBS-1039)
-- Recover a dest-gone rolling `cubby.db.bak` replace on FAT/exFAT instead of deleting the only remaining copy (SBS-1051)
-- Settings and the support FAQ no longer say the configured hotkey opens Cubby in remote sessions unless Replace Windows clipboard shortcut is on (SBS-1049)
-- Privacy and Settings no longer say skip-sensitive and skip-likely-secrets leave remote-session relay running (SBS-1071)
-- CI now publishes a stable `shipped-windows` check that fails when any SBS-779 `Check <arch> <features>` cargo-check fails. Branch protection on main still requires only `test` until a repo admin adds that name; the docs no longer claim the matrix legs already block merge (SBS-1025)
-
 ## v1.3.3
 
 ### Security
@@ -29,8 +12,27 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Encrypted backup now overwrites the passphrase, the key derived from it, and the in-memory JSON history when export or import returns, instead of leaving them in freed heap (SBS-983)
 - Search no longer ships full decrypted clip bodies on every keystroke; flyout and History search rows use the same preview-only contract as the list (SBS-912)
 - The opener release gate now models glob the way tauri-plugin-opener does (star and question-mark match slash) and refuses a host pattern that contains a wildcard, so a dropped-slash glob fails the release check instead of shipping (SBS-997)
+- Paste and copy no longer emit the full decrypted clip body to the WebView when no `clipboard-write` listener is present (SBS-1042)
+- Revealed plaintext is cleared when a clip is deleted, the flyout hides, or History loses focus (SBS-1005)
+- Clipboard items carrying supported do-not-retain markers are no longer stored, and large likely-secret values are checked before capture (SBS-922, SBS-1000, SBS-1001, SBS-1002)
+
+### Changed
+- Cubby is consistently English-only until complete, supported localization is ready; the previous partial German, French, Japanese, and Chinese UI was removed (#148)
+- Window-specific frontend code is loaded only when that window opens, reducing the initial flyout bundle (#289)
+- Encrypted backups now include HTML and RTF content and require a passphrase of at least 12 characters (SBS-978)
+- Pull requests now run broader Rust and frontend regression coverage, React hooks linting, privileged-action pin checks, and a stable `shipped-windows` result that aggregates x64 and ARM64 compile checks (#270, #278, #287, #294)
+- Store publishing now waits for the full release validation job, so a failed or running test, Clippy, or release check cannot reach Partner Center (SBS-1068)
 
 ### Fixed
+- Auto-paste re-checks that the remembered target still has focus after the settle delay and leaves the clip on the clipboard when focus moved (SBS-1066)
+- The clipboard snapshot queue is bounded without losing clear events, and queued self-paste ignore state is released correctly when work is dropped (SBS-1022, SBS-1032, SBS-1039, SBS-1045)
+- Image and rolling-database replacements recover their only remaining temp file on FAT/exFAT instead of deleting it when the destination disappears (SBS-1030, SBS-1051)
+- A Settings change no longer overwrites the only recoverable preferences file when an interrupted write could not be promoted (#303)
+- Encrypted backup export flushes a complete sibling temp file before replacing an existing backup, preserving the prior file on write or install failure (#189)
+- History bulk Copy includes recognized text from selected images, including images whose full-resolution original has expired (#290)
+- Keyboard shortcuts no longer intercept keys intended for focused controls, including text fields, selects, and buttons (#291)
+- Settings selects use native accessible controls, backup passphrase prompts are modal, bulk History deletes require confirmation, and the History list exposes a single keyboard focus model (#187, #292, #293, #295)
+- History Shift-click selection follows clip IDs after list changes, and IME Escape no longer closes the window while composition is active (SBS-1007)
 - Folder and History context menus are announced as folder or history actions, not as clip actions (SBS-1013)
 - Shift+wheel and Ctrl+wheel on a zoomed screenshot no longer also run the browser's native scroll, which had been panning twice and jumping the zoom anchor; React 19 registers `onWheel` as passive, so the viewer now attaches its own non-passive listener (SBS-1011)
 - Backup import no longer drops notes, source app, or OCR text on an encryption error, and no longer marks OCR completed for a clip it did not store (SBS-980)
@@ -46,7 +48,16 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Skip-likely-secrets now scans the first 8 KiB of a large paste, so a 9 KiB log or PEM starting with a known token or `-----BEGIN` marker is skipped instead of stored (SBS-922)
 - A failed clip reload no longer looks like a healthy current list: same-filter refresh shows a retry banner, superseded loads are not treated as success, and folder / app / count reloads toast instead of staying silent (SBS-805)
 - Portable first-run can install `storage.key` on FAT/exFAT: CreateHardLinkW is NTFS-only, and the previous hard-link-only install deleted the temp key and panicked (SBS-908)
-- German, French, Japanese, and Chinese users no longer see English for load-more, list-refresh, blocked Settings links, the portable-update note, or clip-actions (SBS-1014)
+- Portable logs stay in the portable data directory instead of `%LOCALAPPDATA%` (SBS-776)
+- Cubby starts and keeps listening if the Win+V activation channel cannot bind, hotkey setting saves survive a dead activation channel, and an oversized UDP datagram no longer kills the listener (SBS-989, SBS-991)
+- A panicking flyout worker no longer leaves its latch permanently set, which could block later shows (SBS-990)
+- Clipboard-owner lookup closes its Windows process handle after reading the executable name (SBS-1004)
+- Malformed CF_HTML offsets no longer discard otherwise usable clipboard content (SBS-999)
+- Clearing unpinned history resets capture dedup, and forget-on-clear retries keep the original capture until deletion succeeds (SBS-995, SBS-1003)
+- Duplicate merging keeps readable originals, completed OCR, distinct notes, and accurate discarded-folder counts (SBS-985, SBS-988)
+- Startup no longer rebuilds the content-hash index on every launch and removes abandoned image staging files left by interrupted writes (SBS-986, SBS-998)
+- Settings and support copy no longer overstate remote hotkey behavior, remote relay privacy gates, copied-file retention, or encrypted-backup contents (SBS-776, SBS-832, SBS-1028, SBS-1049, SBS-1071)
+- Release checks now verify every Settings web link against the opener allowlist and keep generated capabilities in sync (SBS-1016)
 
 ## v1.3.2
 
