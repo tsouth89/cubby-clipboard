@@ -33,8 +33,8 @@ mod windows_matrix {
         RowOutcome, RowResult, SkipReason, Step,
     };
     use cubby::paste_engine::{
-        paste_settle_delay, restore_previous_foreground_window, send_paste_input,
-        set_previous_target, PasteStrategy,
+        restore_previous_foreground_window, send_settled_paste_input, set_previous_target,
+        PasteStrategy,
     };
     use std::env;
     use std::path::{Path, PathBuf};
@@ -341,12 +341,11 @@ mod windows_matrix {
     }
 
     fn send_paste(strategy: PasteStrategy) -> Result<(), String> {
-        thread::sleep(paste_settle_delay(strategy));
-        let sent = send_paste_input(strategy);
-        if sent != 4 {
-            return Err(format!("SendInput accepted {sent} of 4 paste events"));
+        match send_settled_paste_input(strategy) {
+            Some(4) => Ok(()),
+            Some(sent) => Err(format!("SendInput accepted {sent} of 4 paste events")),
+            None => Err("target lost focus during settle delay".to_string()),
         }
-        Ok(())
     }
 
     fn paste_into(hwnd: HWND, strategy: PasteStrategy) -> Result<(), String> {
