@@ -19,6 +19,7 @@ import { shortcutsSuspended } from '../utils/flyoutSearch';
 import { ClipDetails } from '../utils/clipPreviewState';
 import { customRange, DATE_PRESET_LABELS, DatePreset, presetRange } from '../utils/dateRange';
 import { folderSelectionAfterReload } from '../utils/folderSelection';
+import { classifyKeyboardTarget } from '../utils/keyboardTarget';
 import { clipListPageArgs, nextPageCursor } from '../utils/clipListPage';
 import {
   clipLoadAnnouncesSuccess,
@@ -756,15 +757,15 @@ export function HistoryWindow() {
       // buttons. App.tsx stands down the same way with useKeyboard's disabled
       // flag.
       if (shortcutsSuspended(event, bulkDeleteOpen)) return;
-      const target = event.target as HTMLElement | null;
-      const isEditing =
-        target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
+      const { isEditing, isInteractive, isSearch } = classifyKeyboardTarget(
+        event.target,
+        '[data-el="history-search-input"]'
+      );
 
       if (event.key === 'Escape') {
         // Search is an INPUT, so isEditing is true there; Escape still clears
         // the query / closes. Notes and other fields must not close the window
         // even if they forget to stopPropagation (SBS-1008).
-        const isSearch = target?.getAttribute('data-el') === 'history-search-input';
         if (isEditing && !isSearch) return;
         if (searchQuery) {
           setSearchQuery('');
@@ -781,7 +782,7 @@ export function HistoryWindow() {
       // Arrow keys move the list selection, but not while the caret is in the
       // search box — there they belong to the input, or typing becomes
       // unworkable without a mouse.
-      if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !isEditing) {
+      if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !isInteractive) {
         const list = clipsRef.current;
         if (list.length === 0) return;
         event.preventDefault();
@@ -793,7 +794,7 @@ export function HistoryWindow() {
         setSelectedClipId(list[nextIndex].id);
         return;
       }
-      if (isEditing) return;
+      if (isInteractive) return;
       if (event.key === 'Enter' && selectedClipId) {
         event.preventDefault();
         handleCopy(selectedClipId, event.shiftKey);
