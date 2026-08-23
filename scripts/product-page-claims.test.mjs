@@ -8,6 +8,7 @@ import {
   claimSegments,
   findFileListHistoryClaims,
   findStaleBackupOmissionClaims,
+  findUnqualifiedRemoteHotkeyClaims,
   findWeakerFileRetentionClaim,
 } from './product-page-claims.mjs';
 
@@ -332,4 +333,94 @@ test('live privacy.html does not claim backups omit formats', async () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const source = await readFile(path.join(root, 'product_pages/privacy.html'), 'utf8');
   assert.deepEqual(findStaleBackupOmissionClaims(source), []);
+});
+
+// SBS-1049: Settings and support said the configured hotkey opens Cubby
+// in remote sessions whenever keyboard forwarding is off. That path is
+// the Win+V helper hook, so replacement must be named.
+
+test('the original Settings remote-hotkey hint is a claim', () => {
+  const sentence =
+    'Your hotkey opens Cubby inside remote sessions when the remote client\'s keyboard forwarding is off.';
+  const claims = findUnqualifiedRemoteHotkeyClaims(sentence);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0], /hotkey opens Cubby/);
+});
+
+test('the original support FAQ trigger sentence is a claim', () => {
+  const sentence =
+    'A remote-session trigger is also available for workflows where the remote client intercepts Windows shortcuts.';
+  const claims = findUnqualifiedRemoteHotkeyClaims(sentence);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0], /remote-session trigger/);
+});
+
+test('a restated remote-hotkey claim without replacement is reported', () => {
+  assert.equal(
+    findUnqualifiedRemoteHotkeyClaims(
+      'Your configured hotkey can open Cubby inside a remote session if keyboard forwarding is off.'
+    ).length,
+    1
+  );
+});
+
+test('a negated remote-hotkey sentence is not a claim', () => {
+  for (const sentence of [
+    'The configured hotkey does not open Cubby in remote sessions.',
+    'A remote-session trigger is not available when keyboard forwarding is off.',
+    'Your hotkey never opens Cubby inside a remote session.',
+  ]) {
+    assert.deepEqual(findUnqualifiedRemoteHotkeyClaims(sentence), [], sentence);
+  }
+});
+
+test('a later negation does not hide an earlier remote-hotkey claim', () => {
+  assert.equal(
+    findUnqualifiedRemoteHotkeyClaims(
+      'Your hotkey opens Cubby inside remote sessions, not from the tray.'
+    ).length,
+    1
+  );
+});
+
+test('an earlier negated clause does not hide a later remote-hotkey claim', () => {
+  assert.equal(
+    findUnqualifiedRemoteHotkeyClaims(
+      'A remote-session trigger is not available locally, and your hotkey opens Cubby inside remote sessions.'
+    ).length,
+    1
+  );
+});
+
+test('naming Win+V replacement qualifies the remote-hotkey sentence', () => {
+  for (const sentence of [
+    'When Replace Windows clipboard shortcut is on, your hotkey opens Cubby inside remote sessions if keyboard forwarding is off.',
+    'Win+V replacement also lets your hotkey open Cubby inside remote sessions.',
+    'The helper hook opens Cubby in a remote session when forwarding is off.',
+    'The trigger is available in a remote session only while replacement mode is enabled.',
+  ]) {
+    assert.deepEqual(findUnqualifiedRemoteHotkeyClaims(sentence), [], sentence);
+  }
+});
+
+test('remote paste and tray fallback copy are not remote-hotkey claims', () => {
+  for (const sentence of [
+    'With forwarding on, open Cubby from the tray icon.',
+    'RDP and third-party remote tools decide whether Windows shortcuts stay local.',
+    'Cubby includes a remote-session workflow for this reason.',
+    'Cubby is designed to use Win+V as its primary shortcut.',
+  ]) {
+    assert.deepEqual(findUnqualifiedRemoteHotkeyClaims(sentence), [], sentence);
+  }
+});
+
+test('live Settings and support copy name the Win+V replacement dependency', async () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  for (const relative of [
+    'frontend/src/i18n/locales/en.json',
+    'product_pages/support.html',
+  ]) {
+    const source = await readFile(path.join(root, relative), 'utf8');
+    assert.deepEqual(findUnqualifiedRemoteHotkeyClaims(source), [], relative);
+  }
 });
