@@ -1321,12 +1321,8 @@ async fn restore_clip(
                     .state::<Arc<crate::settings_manager::SettingsManager>>()
                     .get()
                     .remote_paste_mode;
-                let content = if clip.clip_type == "image" {
-                    "[Image]".to_string()
-                } else {
-                    String::from_utf8_lossy(&clip.content).to_string()
-                };
-                let _ = window.emit("clipboard-write", &content);
+                // Do not emit the decrypted body to the WebView. A former
+                // `clipboard-write` event had no frontend listener (SBS-1042).
 
                 if should_paste {
                     crate::animate_window_hide(
@@ -1399,8 +1395,8 @@ async fn restore_recognized_text(
     hash_material.extend_from_slice(text.as_bytes());
     let content_hash = crate::clipboard::calculate_hash(&hash_material);
     crate::clipboard::set_ignore_hash(content_hash.clone());
-    if let Err(error) = ClipboardContext::new()
-        .and_then(|context| context.set(vec![ClipboardContent::Text(text.clone())]))
+    if let Err(error) =
+        ClipboardContext::new().and_then(|context| context.set(vec![ClipboardContent::Text(text)]))
     {
         crate::clipboard::clear_ignore_hash_if_matches(&content_hash);
         return Err(format!("Failed to copy recognized text: {error}"));
@@ -1410,7 +1406,8 @@ async fn restore_recognized_text(
         .bind(id)
         .execute(&db.pool)
         .await;
-    let _ = window.emit("clipboard-write", &text);
+    // Recognized text is already on the OS clipboard. Do not also emit it
+    // to the WebView; there is no `clipboard-write` listener (SBS-1042).
 
     if should_paste {
         let remote_paste_mode = window
@@ -2995,7 +2992,7 @@ pub async fn get_source_apps(
 /// same ignore-hash discipline as the other copy paths so Cubby's own capture
 /// loop doesn't treat the write as a fresh copy and duplicate it.
 #[tauri::command]
-pub async fn copy_selected_text(text: String, window: tauri::WebviewWindow) -> Result<(), String> {
+pub async fn copy_selected_text(text: String) -> Result<(), String> {
     if text.is_empty() {
         return Err("Nothing selected".to_string());
     }
@@ -3005,14 +3002,15 @@ pub async fn copy_selected_text(text: String, window: tauri::WebviewWindow) -> R
     hash_material.extend_from_slice(text.as_bytes());
     let content_hash = crate::clipboard::calculate_hash(&hash_material);
     crate::clipboard::set_ignore_hash(content_hash.clone());
-    if let Err(error) = ClipboardContext::new()
-        .and_then(|context| context.set(vec![ClipboardContent::Text(text.clone())]))
+    if let Err(error) =
+        ClipboardContext::new().and_then(|context| context.set(vec![ClipboardContent::Text(text)]))
     {
         crate::clipboard::clear_ignore_hash_if_matches(&content_hash);
         return Err(format!("Failed to copy the selection: {error}"));
     }
 
-    let _ = window.emit("clipboard-write", &text);
+    // The selection is already in the renderer (the user highlighted it).
+    // Do not emit it back on `clipboard-write`; there is no listener (SBS-1042).
     Ok(())
 }
 
