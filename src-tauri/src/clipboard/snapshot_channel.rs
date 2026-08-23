@@ -23,7 +23,7 @@ struct Inner<T> {
 impl<T: SizedPayload> Inner<T> {
     // Methods take `&mut self` so we do not split-borrow a MutexGuard
     // (parking_lot's DerefMut is not disjoint-field aware).
-    fn push(&mut self, item: T) -> EnqueueOutcome {
+    fn push(&mut self, item: T) -> EnqueueOutcome<T> {
         enqueue(
             &mut self.items,
             &mut self.bytes,
@@ -70,7 +70,7 @@ pub(super) fn channel<T: SizedPayload>() -> (Sender<T>, Receiver<T>) {
 }
 
 impl<T: SizedPayload> Sender<T> {
-    pub(super) fn send(&self, item: T) -> Result<EnqueueOutcome, ()> {
+    pub(super) fn send(&self, item: T) -> Result<EnqueueOutcome<T>, ()> {
         let mut inner = self.shared.inner.lock();
         if inner.receiver_gone {
             return Err(());
@@ -172,5 +172,29 @@ mod tests {
             last = item;
         }
         assert_eq!(last.id, flood as u32 - 1);
+    }
+
+    #[test]
+    fn send_returns_evicted_items_on_count_flood() {
+        let (tx, _rx) = channel();
+        for id in 0..SNAPSHOT_QUEUE_CAPACITY {
+            assert_eq!(
+                tx.send(fake(id as u32, 1)),
+                Ok(EnqueueOutcome::Queued),
+                "the first {SNAPSHOT_QUEUE_CAPACITY} items must fit"
+            );
+        }
+        match tx.send(fake(SNAPSHOT_QUEUE_CAPACITY as u32, 1)) {
+            Ok(EnqueueOutcome::QueuedAfterDrop {
+                evicted, dropped, ..
+            }) => {
+                assert_eq!(dropped, 1);
+                assert_eq!(
+                    evicted[0].id, 0,
+                    "fail-without-fix: send discarded the evicted item (SBS-1039)"
+                );
+            }
+            other => panic!("expected eviction of the oldest item, got {other:?}"),
+        }
     }
 }
