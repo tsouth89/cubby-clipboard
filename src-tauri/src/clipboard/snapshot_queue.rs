@@ -4,17 +4,23 @@
 //! hand them to the async consumer over an unbounded channel. A copy flood
 //! then held every pending snapshot in RAM until persist caught up.
 //!
-//! Policy (drop-oldest):
+//! Policy (drop-oldest, with a retain exception):
 //! - At most [`SNAPSHOT_QUEUE_CAPACITY`] events may wait.
 //! - Non-oversize queued payloads may hold at most
 //!   [`SNAPSHOT_QUEUE_MAX_BYTES`] in total. An accepted oversize capture is
 //!   excluded from that sum so a later small event does not evict it, but
 //!   follow-ups that themselves fit the budget are still RAM-bounded.
-//! - Count overflow evicts FIFO from the front (even an oversize resident).
-//!   Byte overflow evicts the oldest non-oversize item.
-//! - A single event larger than the byte budget is still accepted after the
-//!   queue is emptied: we never refuse the current clipboard, we refuse an
-//!   unbounded backlog. A later oversized event replaces that capture.
+//! - Count overflow evicts the oldest droppable item (even an oversize
+//!   resident). Byte overflow evicts the oldest droppable non-oversize item.
+//! - [`SizedPayload::retain_on_flood`] items (clipboard `Cleared`) are not
+//!   evicted to make room. A 0-byte clear used to be the first byte-budget
+//!   victim, which skipped credential forget-on-clear (SBS-1045).
+//! - Adjacent retain items that [`SizedPayload::replaces_queued`] accepts
+//!   collapse into one slot so an OS clear flood cannot fill the queue.
+//! - A single event larger than the byte budget is still accepted after
+//!   droppable items are evicted: we never refuse the current clipboard, we
+//!   refuse an unbounded backlog. A later oversized event replaces that
+//!   capture. Retained clears stay in place.
 //! - A 100-copy text burst (the reliability contract) stays under both
 //!   budgets, so capture order is preserved under normal load.
 //!
@@ -34,6 +40,19 @@ pub(crate) const SNAPSHOT_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 pub(crate) trait SizedPayload {
     fn payload_bytes(&self) -> usize;
+
+    /// Stay queued when flood eviction needs a slot or byte-budget room.
+    /// `Cleared` is the only production case (SBS-1045).
+    fn retain_on_flood(&self) -> bool {
+        false
+    }
+
+    /// Replace `older` at the back instead of taking another slot.
+    /// Adjacent `Cleared` events coalesce so an OS clear flood cannot fill
+    /// the queue with retain items (SBS-1045).
+    fn replaces_queued(&self, _older: &Self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,14 +77,35 @@ pub(crate) fn enqueue<T: SizedPayload>(
         capacity >= 1,
         "SBS-1032: the queue must be able to hold the current capture"
     );
+
+    // Adjacent retain items (repeated Cleared) share one slot so an OS
+    // clear flood cannot crowd out the 100-copy burst (SBS-1045).
+    if queue
+        .back()
+        .is_some_and(|older| item.replaces_queued(older))
+    {
+        if let Some(old) = queue.pop_back() {
+            *queued_bytes = queued_bytes.saturating_sub(old.payload_bytes());
+        }
+    }
+
     let item_bytes = item.payload_bytes();
     let mut dropped = 0;
     let mut dropped_bytes = 0;
 
     if item_bytes > max_bytes {
         // Newest oversized capture wins: refuse an unbounded backlog of
-        // large payloads, never the current clipboard.
-        while let Some(old) = queue.pop_front() {
+        // large payloads, never the current clipboard. Keep retain items
+        // so a password-manager clear is not discarded (SBS-1045).
+        let mut index = 0;
+        while index < queue.len() {
+            if queue[index].retain_on_flood() {
+                index += 1;
+                continue;
+            }
+            let Some(old) = queue.remove(index) else {
+                break;
+            };
             let old_bytes = old.payload_bytes();
             *queued_bytes = queued_bytes.saturating_sub(old_bytes);
             dropped += 1;
@@ -82,7 +122,14 @@ pub(crate) fn enqueue<T: SizedPayload>(
                 break;
             }
             if !count_ok {
-                let Some(old) = queue.pop_front() else {
+                // Skip retain items so a fronted Cleared is not the FIFO
+                // victim (SBS-1045). If the queue is retain-only, stop:
+                // coalescing should have prevented that, and we still
+                // accept the current clipboard below.
+                let Some(index) = queue.iter().position(|queued| !queued.retain_on_flood()) else {
+                    break;
+                };
+                let Some(old) = queue.remove(index) else {
                     break;
                 };
                 let old_bytes = old.payload_bytes();
@@ -94,7 +141,7 @@ pub(crate) fn enqueue<T: SizedPayload>(
                 dropped_bytes += old_bytes;
             } else if let Some(index) = queue
                 .iter()
-                .position(|queued| queued.payload_bytes() <= max_bytes)
+                .position(|queued| !queued.retain_on_flood() && queued.payload_bytes() <= max_bytes)
             {
                 let Some(old) = queue.remove(index) else {
                     break;
@@ -152,16 +199,41 @@ mod tests {
     struct FakeSnapshot {
         id: u32,
         bytes: usize,
+        retain: bool,
+        kind: u8,
     }
 
     impl SizedPayload for FakeSnapshot {
         fn payload_bytes(&self) -> usize {
             self.bytes
         }
+
+        fn retain_on_flood(&self) -> bool {
+            self.retain
+        }
+
+        fn replaces_queued(&self, older: &Self) -> bool {
+            self.retain && older.retain && self.kind == older.kind
+        }
     }
 
     fn fake(id: u32, bytes: usize) -> FakeSnapshot {
-        FakeSnapshot { id, bytes }
+        FakeSnapshot {
+            id,
+            bytes,
+            retain: false,
+            kind: 0,
+        }
+    }
+
+    /// 0-byte retain item: the production `Cleared` shape (SBS-1045).
+    fn cleared(id: u32) -> FakeSnapshot {
+        FakeSnapshot {
+            id,
+            bytes: 0,
+            retain: true,
+            kind: 1,
+        }
     }
 
     fn ids(queue: &VecDeque<FakeSnapshot>) -> Vec<u32> {
@@ -446,5 +518,137 @@ mod tests {
                 "the reliability contract captures a 100-copy burst; the queue must hold it"
             )
         };
+    }
+
+    /// Fail-without-fix for SBS-1045: count overflow used `pop_front`, so a
+    /// Cleared sitting at the head was discarded and forget-on-clear never
+    /// ran. Evict the oldest droppable item instead.
+    #[test]
+    fn a_retained_clear_survives_count_overflow() {
+        let mut queue = VecDeque::new();
+        let mut bytes = 0usize;
+        enqueue(&mut queue, &mut bytes, cleared(0), 3, 1_000);
+        enqueue(&mut queue, &mut bytes, fake(1, 1), 3, 1_000);
+        enqueue(&mut queue, &mut bytes, fake(2, 1), 3, 1_000);
+        let outcome = enqueue(&mut queue, &mut bytes, fake(3, 1), 3, 1_000);
+        assert_eq!(
+            outcome,
+            EnqueueOutcome::QueuedAfterDrop {
+                dropped: 1,
+                dropped_bytes: 1
+            }
+        );
+        assert_eq!(ids(&queue), vec![0, 2, 3]);
+        assert!(queue.front().is_some_and(|item| item.retain));
+        assert_eq!(bytes, 2);
+    }
+
+    /// Fail-without-fix for SBS-1045: byte overflow evicted the oldest
+    /// non-oversize item, and a 0-byte Cleared always qualified first.
+    #[test]
+    fn a_retained_clear_survives_byte_overflow() {
+        let mut queue = VecDeque::new();
+        let mut bytes = 0usize;
+        enqueue(&mut queue, &mut bytes, cleared(0), 8, 20);
+        enqueue(&mut queue, &mut bytes, fake(1, 8), 8, 20);
+        enqueue(&mut queue, &mut bytes, fake(2, 8), 8, 20);
+        assert_eq!(ids(&queue), vec![0, 1, 2]);
+        let outcome = enqueue(&mut queue, &mut bytes, fake(3, 8), 8, 20);
+        assert_eq!(
+            outcome,
+            EnqueueOutcome::QueuedAfterDrop {
+                dropped: 1,
+                dropped_bytes: 8
+            }
+        );
+        assert_eq!(ids(&queue), vec![0, 2, 3]);
+        assert!(queue.iter().any(|item| item.retain && item.id == 0));
+        assert_eq!(bytes, 16);
+    }
+
+    /// An oversized follow-up may replace the capture backlog, not the
+    /// pending clear that still has to drive forget-on-clear.
+    #[test]
+    fn a_retained_clear_survives_an_oversize_replacement() {
+        let mut queue = VecDeque::new();
+        let mut bytes = 0usize;
+        enqueue(&mut queue, &mut bytes, fake(1, 10), 8, 20);
+        enqueue(&mut queue, &mut bytes, cleared(2), 8, 20);
+        enqueue(&mut queue, &mut bytes, fake(3, 10), 8, 20);
+        let outcome = enqueue(&mut queue, &mut bytes, fake(4, 50), 8, 20);
+        assert_eq!(
+            outcome,
+            EnqueueOutcome::QueuedAfterDrop {
+                dropped: 2,
+                dropped_bytes: 20
+            }
+        );
+        assert_eq!(ids(&queue), vec![2, 4]);
+        assert!(queue.front().is_some_and(|item| item.retain));
+        assert_eq!(bytes, 50);
+    }
+
+    /// Fail-without-fix: an OS clear flood used to occupy every slot with
+    /// 0-byte Cleared events. Adjacent clears collapse to the newest.
+    #[test]
+    fn adjacent_retained_clears_coalesce_instead_of_filling_the_queue() {
+        let mut queue = VecDeque::new();
+        let mut bytes = 0usize;
+        for id in 0..200 {
+            let outcome = enqueue(&mut queue, &mut bytes, cleared(id), 8, 20);
+            assert_eq!(outcome, EnqueueOutcome::Queued);
+            assert_eq!(queue.len(), 1);
+            assert_eq!(bytes, 0);
+        }
+        assert_eq!(ids(&queue), vec![199]);
+        assert!(queue.front().is_some_and(|item| item.retain));
+    }
+
+    #[test]
+    fn a_retained_clear_does_not_steal_the_100_copy_burst() {
+        let mut queue = VecDeque::new();
+        let mut bytes = 0usize;
+        enqueue(
+            &mut queue,
+            &mut bytes,
+            cleared(0),
+            SNAPSHOT_QUEUE_CAPACITY,
+            SNAPSHOT_QUEUE_MAX_BYTES,
+        );
+        for id in 1..=100 {
+            let outcome = enqueue(
+                &mut queue,
+                &mut bytes,
+                fake(id, 64),
+                SNAPSHOT_QUEUE_CAPACITY,
+                SNAPSHOT_QUEUE_MAX_BYTES,
+            );
+            assert_eq!(outcome, EnqueueOutcome::Queued);
+        }
+        assert_eq!(queue.len(), 101);
+        assert!(queue
+            .front()
+            .is_some_and(|item| item.retain && item.id == 0));
+        assert_eq!(
+            ids(&queue),
+            std::iter::once(0).chain(1..=100).collect::<Vec<u32>>()
+        );
+    }
+
+    #[test]
+    fn a_clear_between_content_is_not_moved_behind_later_copies() {
+        let mut queue = VecDeque::new();
+        let mut bytes = 0usize;
+        enqueue(&mut queue, &mut bytes, fake(1, 1), 3, 1_000);
+        enqueue(&mut queue, &mut bytes, cleared(2), 3, 1_000);
+        enqueue(&mut queue, &mut bytes, fake(3, 1), 3, 1_000);
+        enqueue(&mut queue, &mut bytes, fake(4, 1), 3, 1_000);
+        // Evict the oldest droppable (id 1), leave Cleared ahead of id 3.
+        // Rotating Cleared to the back would let a later copy overwrite
+        // LAST_ACCEPTED_CAPTURE before forget-on-clear runs.
+        assert_eq!(ids(&queue), vec![2, 3, 4]);
+        assert!(queue
+            .front()
+            .is_some_and(|item| item.retain && item.id == 2));
     }
 }
