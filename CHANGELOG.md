@@ -14,6 +14,7 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Flood-dropping a queued self-paste echo no longer leaves the ignore hash swallowing the next real copy of that content (SBS-1039)
 - Recover a dest-gone rolling `cubby.db.bak` replace on FAT/exFAT instead of deleting the only remaining copy (SBS-1051)
 - Settings and the support FAQ no longer say the configured hotkey opens Cubby in remote sessions unless Replace Windows clipboard shortcut is on (SBS-1049)
+- Privacy and Settings no longer say skip-sensitive and skip-likely-secrets leave remote-session relay running (SBS-1071)
 - CI now publishes a stable `shipped-windows` check that fails when any SBS-779 `Check <arch> <features>` cargo-check fails. Branch protection on main still requires only `test` until a repo admin adds that name; the docs no longer claim the matrix legs already block merge (SBS-1025)
 
 ## v1.3.3

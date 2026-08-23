@@ -1226,7 +1226,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                       <Row
                         title={'Sync clipboard between remote sessions'}
                         desc={
-                          'Re-announce anything copied inside a remote session so your other remote sessions pick it up. Copy in one session, Ctrl+V in another.'
+                          'Re-announce a copy from a remote session so your other remote sessions pick it up. Copies skipped as sensitive or as likely secrets are not relayed. Copy in one session, Ctrl+V in another.'
                         }
                         control={
                           <Toggle
@@ -1274,7 +1274,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                       <Row
                         title={'Skip passwords and sensitive copies'}
                         desc={
-                          "When an app such as a password manager marks a copy as sensitive, Cubby won't save it (Windows' own clipboard history does the same). Turn this off to capture everything, including passwords."
+                          "When an app such as a password manager marks a copy as sensitive, Cubby won't save it (Windows' own clipboard history does the same) and won't relay it between remote sessions. Turn this off to capture everything, including passwords."
                         }
                         control={
                           <Toggle
@@ -1289,7 +1289,7 @@ export function SettingsPanel({ settings: initialSettings, onClose }: SettingsPa
                       <Row
                         title={'Skip likely secrets in text'}
                         desc={
-                          "Don't save text that looks like API tokens, private keys, or payment card numbers. Off by default. Turn it on if you'd rather keep these out of your history (the matching is conservative, but it can skip a clip you meant to keep). Large pastes are still checked: Cubby scans the first 8 KB, which is enough to catch those markers at the start of a log or key."
+                          "Don't save text that looks like API tokens, private keys, or payment card numbers, and don't relay those clips between remote sessions. Off by default. Turn it on if you'd rather keep these out of your history (the matching is conservative, but it can skip a clip you meant to keep). Large pastes are still checked: Cubby scans the first 8 KB, which is enough to catch those markers at the start of a log or key."
                         }
                         control={
                           <Toggle
