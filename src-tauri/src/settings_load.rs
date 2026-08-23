@@ -15,11 +15,43 @@
 //! on a Linux box that cannot compile the Windows crate.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Same sibling name `SettingsManager::save` writes before replace.
 pub fn settings_tmp_path(canonical: &Path) -> PathBuf {
     canonical.with_extension("json.tmp")
+}
+
+/// Write the next settings file without overwriting a lone recovery temp.
+/// When the canonical file exists it remains the fallback, so a stale temp is
+/// safe to replace. Without that file, an existing temp is the only disk copy
+/// of the user's preferences and must stay untouched.
+pub fn write_settings_temp(canonical: &Path, tmp: &Path, bytes: &[u8]) -> Result<(), String> {
+    if canonical.is_file() {
+        return fs::write(tmp, bytes).map_err(|error| error.to_string());
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                format!(
+                    "refusing to overwrite settings recovery temp {}",
+                    tmp.display()
+                )
+            } else {
+                error.to_string()
+            }
+        })?;
+    if let Err(error) = file.write_all(bytes) {
+        drop(file);
+        let _ = fs::remove_file(tmp);
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +186,38 @@ mod tests {
         let source = resolve_settings_disk_source(&canonical);
         assert_eq!(source, SettingsDiskSource::Missing);
         assert!(may_persist_first_run_defaults(source));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn later_save_does_not_overwrite_a_lone_recovery_temp() {
+        let dir = test_dir();
+        let canonical = dir.join("settings.json");
+        let tmp = settings_tmp_path(&canonical);
+        let recovered = b"{\"auto_delete_days\":0}";
+        fs::write(&tmp, recovered).unwrap();
+
+        let error = write_settings_temp(&canonical, &tmp, b"{\"auto_delete_days\":30}")
+            .expect_err("a lone recovery temp must not be overwritten");
+
+        assert!(error.contains("refusing to overwrite"));
+        assert_eq!(fs::read(&tmp).unwrap(), recovered);
+        assert!(!canonical.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_temp_can_be_rewritten_when_canonical_settings_exist() {
+        let dir = test_dir();
+        let canonical = dir.join("settings.json");
+        let tmp = settings_tmp_path(&canonical);
+        fs::write(&canonical, b"last-good-settings").unwrap();
+        fs::write(&tmp, b"stale-temp").unwrap();
+
+        write_settings_temp(&canonical, &tmp, b"next-settings").unwrap();
+
+        assert_eq!(fs::read(&canonical).unwrap(), b"last-good-settings");
+        assert_eq!(fs::read(&tmp).unwrap(), b"next-settings");
         let _ = fs::remove_dir_all(&dir);
     }
 
