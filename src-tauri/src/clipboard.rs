@@ -107,9 +107,12 @@ struct RecentCapture {
 }
 
 mod forget_on_clear;
+mod snapshot_channel;
+mod snapshot_queue;
 use forget_on_clear::{
     next_forget_attempts, select_forget_attempt, ForgetAttempt, ForgetClipLookup,
 };
+use snapshot_queue::SizedPayload;
 
 /// Pure helper for SOU-316 unit tests: only empty clears within the window
 /// forget the last clip. A later clear must leave history alone.
@@ -256,7 +259,9 @@ pub fn get_clipboard_capture_status() -> ClipboardCaptureStatus {
 
 pub fn init(app: &AppHandle, db: Arc<Database>) {
     crate::ocr_queue::init(app.clone(), db.clone());
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    // SBS-1032: snapshots carry full PNG/HTML/RTF bytes. The queue is
+    // bounded (drop-oldest); see `snapshot_queue` for the policy.
+    let (event_tx, event_rx) = snapshot_channel::channel();
     let app_for_consumer = app.clone();
     let db_for_consumer = db.clone();
 
@@ -347,6 +352,57 @@ enum ClipboardListenerEvent {
     Cleared {
         sequence: u32,
     },
+}
+
+impl SizedPayload for ClipboardListenerEvent {
+    fn payload_bytes(&self) -> usize {
+        match self {
+            Self::Cleared { .. } => 0,
+            Self::Content(snapshot) => snapshot.payload_bytes(),
+        }
+    }
+}
+
+impl ClipboardSnapshot {
+    /// Bytes that sit in RAM while this snapshot waits on the consumer.
+    /// HTML and RTF live in `formats`; PNG lives in `content`.
+    fn payload_bytes(&self) -> usize {
+        let content = match &self.content {
+            CapturedContent::Text {
+                content,
+                preview,
+                hash,
+            } => content.len() + preview.len() + hash.len(),
+            CapturedContent::Image {
+                png_bytes, hash, ..
+            } => png_bytes.len() + hash.len(),
+        };
+        let formats = self
+            .formats
+            .iter()
+            .map(|format| format.content.len())
+            .sum::<usize>();
+        content + formats
+    }
+}
+
+fn enqueue_listener_event(
+    event_tx: &snapshot_channel::Sender<ClipboardListenerEvent>,
+    event: ClipboardListenerEvent,
+) -> Result<(), ()> {
+    match event_tx.send(event) {
+        Ok(snapshot_queue::EnqueueOutcome::QueuedAfterDrop {
+            dropped,
+            dropped_bytes,
+        }) => {
+            log::warn!(
+                "CLIPBOARD: Snapshot queue evicted {dropped} older pending capture(s) ({dropped_bytes} bytes) under flood (SBS-1032)"
+            );
+            Ok(())
+        }
+        Ok(snapshot_queue::EnqueueOutcome::Queued) => Ok(()),
+        Err(()) => Err(()),
+    }
 }
 
 /// Which do-not-retain markers the current clipboard contents carry.
@@ -682,7 +738,7 @@ fn deferral_decision(
 #[cfg(target_os = "windows")]
 fn capture_clipboard_update(
     mut sequence: u32,
-    event_tx: &tokio::sync::mpsc::UnboundedSender<ClipboardListenerEvent>,
+    event_tx: &snapshot_channel::Sender<ClipboardListenerEvent>,
 ) -> Result<CaptureAttempt, ()> {
     let read_sequence =
         || unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
@@ -730,7 +786,7 @@ impl From<SequenceBindError> for BoundCaptureFailure {
 fn capture_one_bound_sequence(
     mut sequence: u32,
     read_sequence: &impl Fn() -> u32,
-    event_tx: &tokio::sync::mpsc::UnboundedSender<ClipboardListenerEvent>,
+    event_tx: &snapshot_channel::Sender<ClipboardListenerEvent>,
 ) -> Result<CaptureAttempt, BoundCaptureFailure> {
     let started = Instant::now();
     let live = read_sequence();
@@ -800,8 +856,7 @@ fn capture_one_bound_sequence(
             materialize_ms: started.elapsed().as_millis(),
             sensitive,
         };
-        return event_tx
-            .send(ClipboardListenerEvent::Content(snapshot))
+        return enqueue_listener_event(event_tx, ClipboardListenerEvent::Content(snapshot))
             .map(|_| CaptureAttempt::Handled)
             .map_err(|_| BoundCaptureFailure::ConsumerGone);
     }
@@ -813,8 +868,7 @@ fn capture_one_bound_sequence(
         if clipboard_is_cleared() {
             persist_if_sequence_holds(sequence, read_sequence(), ())?;
             note_clipboard_event(sequence);
-            return event_tx
-                .send(ClipboardListenerEvent::Cleared { sequence })
+            return enqueue_listener_event(event_tx, ClipboardListenerEvent::Cleared { sequence })
                 .map(|_| CaptureAttempt::Handled)
                 .map_err(|_| BoundCaptureFailure::ConsumerGone);
         }
@@ -845,8 +899,7 @@ fn capture_one_bound_sequence(
         // the password-manager auto-clear signal; never treat a new
         // non-empty copy as a clear.
         note_clipboard_event(sequence);
-        return event_tx
-            .send(ClipboardListenerEvent::Cleared { sequence })
+        return enqueue_listener_event(event_tx, ClipboardListenerEvent::Cleared { sequence })
             .map(|_| CaptureAttempt::Handled)
             .map_err(|_| BoundCaptureFailure::ConsumerGone);
     }
@@ -1021,7 +1074,7 @@ fn clipboard_has_image_format() -> bool {
 #[cfg(target_os = "windows")]
 fn run_listener_session(
     monitor: &mut Monitor,
-    event_tx: &tokio::sync::mpsc::UnboundedSender<ClipboardListenerEvent>,
+    event_tx: &snapshot_channel::Sender<ClipboardListenerEvent>,
 ) -> ListenerSessionExit {
     loop {
         match monitor.recv() {
@@ -1157,7 +1210,7 @@ fn clipboard_only_has_placeholder_text_formats() -> bool {
 ///   those copies are ingested late rather than lost.
 /// - Consumer channel close stops the supervisor (process teardown).
 #[cfg(target_os = "windows")]
-fn run_native_listener(event_tx: tokio::sync::mpsc::UnboundedSender<ClipboardListenerEvent>) {
+fn run_native_listener(event_tx: snapshot_channel::Sender<ClipboardListenerEvent>) {
     spawn_listener_watchdog();
 
     let mut backoff = INITIAL_LISTENER_BACKOFF;
@@ -1233,7 +1286,7 @@ fn run_native_listener(event_tx: tokio::sync::mpsc::UnboundedSender<ClipboardLis
 }
 
 #[cfg(not(target_os = "windows"))]
-fn run_native_listener(_event_tx: tokio::sync::mpsc::UnboundedSender<ClipboardListenerEvent>) {
+fn run_native_listener(_event_tx: snapshot_channel::Sender<ClipboardListenerEvent>) {
     set_capture_state(CAPTURE_STATE_STOPPED);
     record_capture_error("clipboard capture requires Windows");
 }
@@ -3380,11 +3433,47 @@ mod tests {
         is_remote_client_owner, is_remote_client_process, likely_secret_decision,
         next_listener_backoff, relayed_clip_hash, rgba_to_cf_dib, set_ignore_hash,
         should_forget_recent_capture, should_relay_capture, should_skip_sensitive_capture,
-        CapturedContent, CapturedFormat, LikelySecretDecision, SensitiveMarkers,
-        CAPTURE_STATE_LISTENING, CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED,
-        CLIPBOARD_CLEAR_FORGET_WINDOW, IGNORE_HASH, IGNORE_HASH_TTL,
+        CapturedContent, CapturedFormat, ClipboardListenerEvent, ClipboardSnapshot,
+        LikelySecretDecision, SensitiveMarkers, SizedPayload, CAPTURE_STATE_LISTENING,
+        CAPTURE_STATE_RESTARTING, CAPTURE_STATE_STOPPED, CLIPBOARD_CLEAR_FORGET_WINDOW,
+        IGNORE_HASH, IGNORE_HASH_TTL,
     };
     use std::time::{Duration, Instant};
+
+    /// SBS-1032: the queue's RAM budget must count the PNG/HTML/RTF bytes
+    /// that used to sit on the unbounded channel, not just a slot count.
+    #[test]
+    fn snapshot_payload_bytes_count_png_html_and_rtf() {
+        let event = ClipboardListenerEvent::Content(ClipboardSnapshot {
+            sequence: 1,
+            source_app_identity: None,
+            content: CapturedContent::Image {
+                png_bytes: vec![0; 1000],
+                width: 2,
+                height: 2,
+                hash: "h".repeat(64),
+                decode_ms: 0,
+                source_type: "png",
+            },
+            formats: vec![
+                CapturedFormat {
+                    name: "html",
+                    content: vec![0; 200],
+                },
+                CapturedFormat {
+                    name: "rtf",
+                    content: vec![0; 50],
+                },
+            ],
+            materialize_ms: 0,
+            sensitive: SensitiveMarkers::default(),
+        });
+        assert_eq!(event.payload_bytes(), 1000 + 64 + 200 + 50);
+        assert_eq!(
+            ClipboardListenerEvent::Cleared { sequence: 2 }.payload_bytes(),
+            0
+        );
+    }
 
     #[cfg(target_os = "windows")]
     #[test]
