@@ -7,9 +7,9 @@
 //! the leftover temp.
 //!
 //! `recover_dest_gone_replace` is the shared dest-gone fallback: settings save,
-//! backup persist, and image `{uuid}.cubby` replace (SBS-1030) all call it
-//! after a failed replace so Drop/cleanup cannot delete the only remaining
-//! copy.
+//! backup persist, image `{uuid}.cubby` replace (SBS-1030), and rolling
+//! `cubby.db.bak` install (SBS-1051) all call it after a failed replace so
+//! Drop/cleanup cannot delete the only remaining copy.
 //!
 //! This file has no crate dependencies so `rustc --test` can pin the contract
 //! on a Linux box that cannot compile the Windows crate.
@@ -62,6 +62,23 @@ pub fn promote_interrupted_tmp(canonical: &Path) -> Result<(), String> {
 /// in place instead of deleting the only copy (same idea as `backup.rs`).
 pub fn recover_dest_gone_replace(tmp: &Path, dest: &Path) -> bool {
     !dest.exists() && tmp.exists() && fs::rename(tmp, dest).is_ok()
+}
+
+/// After a failed replace: recover dest-gone, else delete the temp only when
+/// dest still exists. Returns true when the temp was promoted onto dest
+/// (caller should treat the replace as succeeded).
+///
+/// Rolling `cubby.db.bak` install used `inspect_err` to always delete the
+/// temp (SBS-1051). That wipes the only remaining recovery copy after a FAT
+/// dest-gone mid-replace.
+pub fn recover_or_discard_replace_temp(tmp: &Path, dest: &Path) -> bool {
+    if recover_dest_gone_replace(tmp, dest) {
+        return true;
+    }
+    if dest.is_file() {
+        let _ = fs::remove_file(tmp);
+    }
+    false
 }
 
 #[cfg(test)]
@@ -165,6 +182,46 @@ mod tests {
         assert!(tmp.exists());
         let on_disk = parse_auto_delete_days(&fs::read_to_string(&dest).unwrap()).unwrap();
         assert_eq!(on_disk, 365);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// SBS-1051: rolling backup install used to `inspect_err`-delete the temp
+    /// after a dest-gone replace. Recover first; cleanup then finds no temp.
+    #[test]
+    fn rolling_backup_dest_gone_recovers_instead_of_deleting_the_only_copy() {
+        let dir = test_dir();
+        let dest = dir.join("cubby.db.bak");
+        let tmp = dir.join("cubby.db.bak.1.uuid.tmp");
+        fs::write(&tmp, b"new-rolling-backup").unwrap();
+        assert!(!dest.exists());
+
+        let recovered = recover_or_discard_replace_temp(&tmp, &dest);
+        if !recovered && tmp.exists() {
+            // Old inspect_err after a failed replace_backup_atomically.
+            let _ = fs::remove_file(&tmp);
+        }
+
+        assert!(recovered, "dest-gone must put the staged backup in place");
+        assert!(dest.exists(), "the rolling bak path must exist again");
+        assert!(!tmp.exists(), "recovery consumes the temp");
+        assert_eq!(fs::read(&dest).unwrap(), b"new-rolling-backup");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_replace_that_left_dest_discards_the_temp() {
+        let dir = test_dir();
+        let dest = dir.join("cubby.db.bak");
+        let tmp = dir.join("cubby.db.bak.1.uuid.tmp");
+        fs::write(&dest, b"old-rolling-backup").unwrap();
+        fs::write(&tmp, b"new-rolling-backup").unwrap();
+
+        assert!(!recover_or_discard_replace_temp(&tmp, &dest));
+        assert_eq!(fs::read(&dest).unwrap(), b"old-rolling-backup");
+        assert!(
+            !tmp.exists(),
+            "a dest that survived must still drop the temp"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
