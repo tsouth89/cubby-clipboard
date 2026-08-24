@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 $previousRepository = $env:GITHUB_REPOSITORY
 $previousToken = $env:GH_TOKEN
 $assetFile = New-TemporaryFile
-$script:requests = [System.Collections.Generic.List[object]]::new()
+$global:uploadRequests = [System.Collections.Generic.List[object]]::new()
 
 function Invoke-RestMethod {
     param(
@@ -17,7 +17,7 @@ function Invoke-RestMethod {
         [string]$InFile
     )
 
-    $script:requests.Add([pscustomobject]@{
+    $global:uploadRequests.Add([pscustomobject]@{
         Uri         = $Uri
         Method      = $Method
         ContentType = $ContentType
@@ -41,16 +41,16 @@ try {
 
     ./scripts/upload-release-asset.ps1 -ReleaseId 42 -AssetPath $assetFile
 
-    if ($script:requests.Count -ne 2) {
-        throw "Expected an empty asset-list request followed by one upload, got $($script:requests.Count) requests."
+    if ($global:uploadRequests.Count -ne 2) {
+        throw "Expected an empty asset-list request followed by one upload, got $($global:uploadRequests.Count) requests."
     }
-    if ($script:requests[0].Uri.AbsoluteUri -ne "https://api.github.com/repos/tsouth89/cubby-clipboard/releases/42/assets?per_page=100") {
+    if ($global:uploadRequests[0].Uri.AbsoluteUri -ne "https://api.github.com/repos/tsouth89/cubby-clipboard/releases/42/assets?per_page=100") {
         throw "The helper did not list assets by release ID."
     }
-    if ($script:requests[1].Uri.Host -ne "uploads.github.com") {
+    if ($global:uploadRequests[1].Uri.Host -ne "uploads.github.com") {
         throw "The helper did not use GitHub's release upload host."
     }
-    if ($script:requests[1].ContentType -ne "application/octet-stream") {
+    if ($global:uploadRequests[1].ContentType -ne "application/octet-stream") {
         throw "The helper did not upload the asset as binary data."
     }
 
@@ -58,5 +58,6 @@ try {
 } finally {
     $env:GITHUB_REPOSITORY = $previousRepository
     $env:GH_TOKEN = $previousToken
+    Remove-Variable -Name uploadRequests -Scope Global -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $assetFile -Force
 }
