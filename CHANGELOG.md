@@ -59,6 +59,9 @@ All notable Cubby Clipboard changes are documented here. PastePaw entries below 
 - Settings and support copy no longer overstate remote hotkey behavior, remote relay privacy gates, copied-file retention, or encrypted-backup contents (SBS-776, SBS-832, SBS-1028, SBS-1049, SBS-1071)
 - Release checks now verify every Settings web link against the opener allowlist and keep generated capabilities in sync (SBS-1016)
 
+### Thanks
+- Thanks to [Harshvardhan Agrawal](https://github.com/harshvardhan60792) for expanding Settings and Win+V replacement test coverage (#270)
+
 ## v1.3.2
 
 ### Security
