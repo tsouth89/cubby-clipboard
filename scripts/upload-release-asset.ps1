@@ -25,7 +25,7 @@ $assetListUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/$R
 
 foreach ($pathValue in $AssetPath) {
     $file = Get-Item -LiteralPath $pathValue
-    $assets = @(Invoke-RestMethod -Uri $assetListUri -Headers $apiHeaders)
+    $assets = @(Invoke-RestMethod -Uri $assetListUri -Headers $apiHeaders | Where-Object { $null -ne $_ })
 
     foreach ($asset in $assets | Where-Object { $_.name -eq $file.Name }) {
         $deleteUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$($asset.id)"
