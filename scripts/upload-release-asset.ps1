@@ -25,9 +25,16 @@ $assetListUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/$R
 
 foreach ($pathValue in $AssetPath) {
     $file = Get-Item -LiteralPath $pathValue
-    $assets = @(Invoke-RestMethod -Uri $assetListUri -Headers $apiHeaders | Where-Object { $null -ne $_ })
+    $assets = @(Invoke-RestMethod -Uri $assetListUri -Headers $apiHeaders)
 
-    foreach ($asset in $assets | Where-Object { $_.name -eq $file.Name }) {
+    foreach ($asset in $assets) {
+        if ($null -eq $asset) {
+            continue
+        }
+        $nameProperty = $asset.PSObject.Properties["name"]
+        if ($null -eq $nameProperty -or $nameProperty.Value -ne $file.Name) {
+            continue
+        }
         $deleteUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$($asset.id)"
         Invoke-RestMethod -Uri $deleteUri -Method Delete -Headers $apiHeaders | Out-Null
     }
