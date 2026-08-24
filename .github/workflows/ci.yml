@@ -66,6 +66,9 @@ jobs:
       - name: Embedded installer signature rules
         shell: pwsh
         run: ./scripts/test-verify-installer-signature.ps1
+      - name: Release asset upload rules
+        shell: pwsh
+        run: ./scripts/test-upload-release-asset.ps1
       # Compiling cargo-audit from source took 5m55s of a 9m17s job, to then run
       # for 7 seconds. Cache the built binary instead. The key pins the exact
       # version, so the only way to get a stale tool is to change the pin, which
