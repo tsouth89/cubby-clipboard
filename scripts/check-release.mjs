@@ -50,6 +50,7 @@ const [
   verifyInstallerSignature,
   libSource,
   logTargetsSource,
+  releaseAssetUploader,
 ] = await Promise.all([
   read('package.json'),
   read('src-tauri/tauri.conf.json'),
@@ -75,6 +76,7 @@ const [
   read('scripts/verify-installer-signature.ps1'),
   read('src-tauri/src/lib.rs'),
   read('src-tauri/src/log_targets.rs'),
+  read('scripts/upload-release-asset.ps1'),
 ]);
 
 const packageVersion = JSON.parse(packageText).version;
@@ -155,6 +157,25 @@ if (jobNeeds(createReleaseJob, 'validate')) {
   throw new Error(
     'create-release must stay independent of validate so the draft release can be created in parallel'
   );
+}
+
+// A real release draft uses the same name as its existing Git tag. GitHub's
+// tag-based release commands cannot resolve that private draft, so every asset
+// operation and the final publish must use create-release's numeric ID.
+if (/\bgh release (?:upload|download|edit)\b/.test(releaseWorkflow)) {
+  throw new Error('Release workflow must address private drafts by release ID, not tag');
+}
+if (!releaseWorkflow.includes('needs.create-release.outputs.release_id')) {
+  throw new Error('Release workflow must pass create-release release_id to draft consumers');
+}
+for (const requiredUploadGate of [
+  'https://uploads.github.com/repos/',
+  '/releases/$ReleaseId/assets?name=',
+  'application/octet-stream',
+]) {
+  if (!releaseAssetUploader.includes(requiredUploadGate)) {
+    throw new Error(`Release asset uploader is missing: ${requiredUploadGate}`);
+  }
 }
 
 // SBS-777: a signed outer Store installer is not enough. Publication and
