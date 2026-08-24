@@ -25,7 +25,9 @@ function Invoke-RestMethod {
     })
 
     if ($Uri.Host -eq "api.github.com") {
-        return @()
+        # PowerShell can preserve an empty JSON array as an object with no
+        # `name` property instead of returning $null.
+        return [pscustomobject]@{}
     }
     if ($Uri.Host -eq "uploads.github.com") {
         return [pscustomobject]@{ id = 123 }
