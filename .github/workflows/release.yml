@@ -45,7 +45,7 @@ jobs:
 
       # Install a prebuilt cargo-audit binary instead of compiling it from source
       # (cargo install cargo-audit) on every run.
-      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
           tool: cargo-audit
 
@@ -232,7 +232,7 @@ jobs:
       # credentials to Invoke-ArtifactSigning, via its DefaultAzureCredential
       # chain.
       - name: Sign in to Azure with GitHub OIDC
-        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
