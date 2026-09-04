@@ -24,7 +24,7 @@ const PRODUCT_URLS = [
   'https://www.cubbyclipboard.com',
   'https://www.cubbyclipboard.com/',
   'https://www.cubbyclipboard.com/privacy',
-  'https://github.com/tsouth89/cubby-clipboard',
+  'https://github.com/btsouth/cubby-clipboard',
 ];
 
 const BLOCKED_URLS = [
@@ -34,7 +34,7 @@ const BLOCKED_URLS = [
   'https://notcubbyclipboard.com/privacy',
 ];
 
-const GITHUB_ONLY = ['https://github.com/tsouth89/cubby-clipboard'];
+const GITHUB_ONLY = ['https://github.com/btsouth/cubby-clipboard'];
 
 test('rust glob star and question-mark cross slash, matching Pattern::matches defaults', () => {
   // SBS-997: the previous assertion that * / ? do not cross slash modeled
@@ -83,7 +83,7 @@ test('github-only allowlist still blocks the product website and privacy', () =>
   ]) {
     assert.equal(isUrlAllowed(url, GITHUB_ONLY), false, url);
   }
-  assert.equal(isUrlAllowed('https://github.com/tsouth89/cubby-clipboard', GITHUB_ONLY), true);
+  assert.equal(isUrlAllowed('https://github.com/btsouth/cubby-clipboard', GITHUB_ONLY), true);
 });
 
 test('host-wildcard patterns are treated as opening the entire web', () => {
@@ -94,7 +94,7 @@ test('host-wildcard patterns are treated as opening the entire web', () => {
   assert.equal(isPatternWideOpen('https://'), true);
   assert.equal(isPatternWideOpen('https://cubbyclipboard.com/*'), false);
   assert.equal(isPatternWideOpen('https://cubbyclipboard.com'), false);
-  assert.equal(isPatternWideOpen('https://github.com/tsouth89/cubby-clipboard/*'), false);
+  assert.equal(isPatternWideOpen('https://github.com/btsouth/cubby-clipboard/*'), false);
   assert.throws(() => assertAllowlistNotWideOpen(['https://*']), /entire web/);
 });
 
@@ -125,12 +125,12 @@ test('Settings const URL assignments reach the allowlist check', () => {
   // is the layer that has to see them. extractOpenedUrls deliberately does not
   // -- it runs over all of frontend/src, where the same shape is test fixtures.
   const source = [
-    "const GITHUB_URL = 'https://github.com/tsouth89/cubby-clipboard';",
+    "const GITHUB_URL = 'https://github.com/btsouth/cubby-clipboard';",
     "const WEBSITE_URL = 'https://cubbyclipboard.com';",
     "const PRIVACY_URL = 'https://cubbyclipboard.com/privacy';",
   ].join('\n');
   assert.deepEqual(extractHttpUrlLiterals(source), [
-    'https://github.com/tsouth89/cubby-clipboard',
+    'https://github.com/btsouth/cubby-clipboard',
     'https://cubbyclipboard.com',
     'https://cubbyclipboard.com/privacy',
   ]);
@@ -155,13 +155,13 @@ test('a Settings link is found whatever the constant is named or indented', () =
   // settingsOpenedUrls non-empty. extractHttpUrlLiterals catches all of them
   // by not caring about the binding at all.
   const source = [
-    "const GITHUB_URL = 'https://github.com/tsouth89/cubby-clipboard';",
+    "const GITHUB_URL = 'https://github.com/btsouth/cubby-clipboard';",
     "  const DISCORD_LINK = 'https://discord.gg/cubby';",
     "export const SUPPORT_HREF = \"https://cubbyclipboard.com/support\";",
     "let DOCS_PAGE = 'https://cubbyclipboard.com/docs';",
   ].join('\n');
   assert.deepEqual(extractHttpUrlLiterals(source), [
-    'https://github.com/tsouth89/cubby-clipboard',
+    'https://github.com/btsouth/cubby-clipboard',
     'https://discord.gg/cubby',
     'https://cubbyclipboard.com/support',
     'https://cubbyclipboard.com/docs',
@@ -197,7 +197,7 @@ test('live SettingsPanel quoted URLs are the three product links', async () => {
     'utf8'
   );
   assert.deepEqual(extractHttpUrlLiterals(source), [
-    'https://github.com/tsouth89/cubby-clipboard',
+    'https://github.com/btsouth/cubby-clipboard',
     'https://cubbyclipboard.com',
     'https://cubbyclipboard.com/privacy',
   ]);

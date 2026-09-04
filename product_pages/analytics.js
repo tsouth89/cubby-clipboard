@@ -1,5 +1,5 @@
 const ENDPOINT = "/api/events";
-const REPOSITORY_URL = "https://github.com/tsouth89/cubby-clipboard";
+const REPOSITORY_URL = "https://github.com/btsouth/cubby-clipboard";
 
 /**
  * True when `href` points at this project's GitHub repository.

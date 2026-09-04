@@ -38,7 +38,7 @@ function Invoke-RestMethod {
 
 try {
     Set-Content -LiteralPath $assetFile -Value "x" -NoNewline
-    $env:GITHUB_REPOSITORY = "tsouth89/cubby-clipboard"
+    $env:GITHUB_REPOSITORY = "btsouth/cubby-clipboard"
     $env:GH_TOKEN = "test-token"
 
     ./scripts/upload-release-asset.ps1 -ReleaseId 42 -AssetPath $assetFile
@@ -46,7 +46,7 @@ try {
     if ($global:uploadRequests.Count -ne 2) {
         throw "Expected an empty asset-list request followed by one upload, got $($global:uploadRequests.Count) requests."
     }
-    if ($global:uploadRequests[0].Uri.AbsoluteUri -ne "https://api.github.com/repos/tsouth89/cubby-clipboard/releases/42/assets?per_page=100") {
+    if ($global:uploadRequests[0].Uri.AbsoluteUri -ne "https://api.github.com/repos/btsouth/cubby-clipboard/releases/42/assets?per_page=100") {
         throw "The helper did not list assets by release ID."
     }
     if ($global:uploadRequests[1].Uri.Host -ne "uploads.github.com") {

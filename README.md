@@ -4,13 +4,13 @@
   <p><strong>Keep what you copy. Find it when you need it.</strong></p>
   <p>A fast, private clipboard history replacement built for Windows 11.</p>
 
-  [![Latest release](https://img.shields.io/github/v/release/tsouth89/cubby-clipboard?display_name=tag&sort=semver)](https://github.com/tsouth89/cubby-clipboard/releases/latest)
-  [![CI](https://github.com/tsouth89/cubby-clipboard/actions/workflows/ci.yml/badge.svg)](https://github.com/tsouth89/cubby-clipboard/actions/workflows/ci.yml)
+  [![Latest release](https://img.shields.io/github/v/release/btsouth/cubby-clipboard?display_name=tag&sort=semver)](https://github.com/btsouth/cubby-clipboard/releases/latest)
+  [![CI](https://github.com/btsouth/cubby-clipboard/actions/workflows/ci.yml/badge.svg)](https://github.com/btsouth/cubby-clipboard/actions/workflows/ci.yml)
   [![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white)](https://cubbyclipboard.com/start.html)
-  [![GPL-3.0](https://img.shields.io/github/license/tsouth89/cubby-clipboard)](LICENSE)
+  [![GPL-3.0](https://img.shields.io/github/license/btsouth/cubby-clipboard)](LICENSE)
   [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/Xsn27MxdBA)
 
-  [Download](https://github.com/tsouth89/cubby-clipboard/releases/latest) · [Getting started](https://cubbyclipboard.com/start.html) · [Website](https://cubbyclipboard.com) · [Report an issue](https://github.com/tsouth89/cubby-clipboard/issues)
+  [Download](https://github.com/btsouth/cubby-clipboard/releases/latest) · [Getting started](https://cubbyclipboard.com/start.html) · [Website](https://cubbyclipboard.com) · [Report an issue](https://github.com/btsouth/cubby-clipboard/issues)
 </div>
 
 ![Cubby Clipboard website and Windows 11 flyout](docs/images/cubby-website.png)
@@ -40,7 +40,7 @@ Copy a screenshot and Cubby reads the text inside it using the built-in Windows 
 
 Cubby supports Windows 11 on x64 and ARM64.
 
-1. Download the installer for your PC from the [latest release](https://github.com/tsouth89/cubby-clipboard/releases/latest).
+1. Download the installer for your PC from the [latest release](https://github.com/btsouth/cubby-clipboard/releases/latest).
 2. Run the `*-setup.exe` file. Windows may ask you to confirm the publisher during early releases.
 3. Open Cubby from the tray, finish the short setup, then use `Win+V`.
 
@@ -88,7 +88,7 @@ The React/TypeScript frontend lives in `frontend/`; Rust clipboard, storage, win
 
 ## Contributing
 
-Bug reports, focused feature proposals, documentation fixes, and code contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and look for [`good first issue`](https://github.com/tsouth89/cubby-clipboard/labels/good%20first%20issue) or [`help wanted`](https://github.com/tsouth89/cubby-clipboard/labels/help%20wanted).
+Bug reports, focused feature proposals, documentation fixes, and code contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and look for [`good first issue`](https://github.com/btsouth/cubby-clipboard/labels/good%20first%20issue) or [`help wanted`](https://github.com/btsouth/cubby-clipboard/labels/help%20wanted).
 
 Cubby is Windows-only. Please do not add macOS or Linux product work.
 

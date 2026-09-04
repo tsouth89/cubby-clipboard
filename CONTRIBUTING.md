@@ -49,4 +49,4 @@ By contributing, you agree that your work is provided under the repository's GPL
 
 ## Community
 
-Be kind, specific, and constructive. See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Security vulnerabilities belong in a private [GitHub security advisory](https://github.com/tsouth89/cubby-clipboard/security/advisories/new), not a public issue.
+Be kind, specific, and constructive. See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Security vulnerabilities belong in a private [GitHub security advisory](https://github.com/btsouth/cubby-clipboard/security/advisories/new), not a public issue.

@@ -6,7 +6,7 @@ import { buildEventPayload, classifyLinkClick, isRepositoryUrl } from "./analyti
 test("installer links report the installer asset", () => {
   assert.deepEqual(
     classifyLinkClick({
-      href: "https://github.com/tsouth89/cubby-clipboard/releases/download/v1.2.6/setup.exe",
+      href: "https://github.com/btsouth/cubby-clipboard/releases/download/v1.2.6/setup.exe",
       isLatestInstaller: true,
       isLatestRelease: false,
     }),
@@ -17,7 +17,7 @@ test("installer links report the installer asset", () => {
 test("release-page links report the release-page asset", () => {
   assert.deepEqual(
     classifyLinkClick({
-      href: "https://github.com/tsouth89/cubby-clipboard/releases/latest",
+      href: "https://github.com/btsouth/cubby-clipboard/releases/latest",
       isLatestInstaller: false,
       isLatestRelease: true,
     }),
@@ -30,7 +30,7 @@ test("the installer marker wins when a link carries both", () => {
   // points at GitHub too, and the more specific intent is the installer.
   assert.deepEqual(
     classifyLinkClick({
-      href: "https://github.com/tsouth89/cubby-clipboard/releases/latest",
+      href: "https://github.com/btsouth/cubby-clipboard/releases/latest",
       isLatestInstaller: true,
       isLatestRelease: true,
     }),
@@ -40,10 +40,10 @@ test("the installer marker wins when a link carries both", () => {
 
 test("repository links without a download marker report a github click", () => {
   for (const href of [
-    "https://github.com/tsouth89/cubby-clipboard",
-    "https://github.com/tsouth89/cubby-clipboard/issues/45",
-    "https://github.com/tsouth89/cubby-clipboard?tab=readme",
-    "https://github.com/tsouth89/cubby-clipboard#install",
+    "https://github.com/btsouth/cubby-clipboard",
+    "https://github.com/btsouth/cubby-clipboard/issues/45",
+    "https://github.com/btsouth/cubby-clipboard?tab=readme",
+    "https://github.com/btsouth/cubby-clipboard#install",
   ]) {
     assert.deepEqual(
       classifyLinkClick({ href, isLatestInstaller: false, isLatestRelease: false }),
@@ -71,10 +71,10 @@ test("unrelated links are not tracked", () => {
 
 test("a repository whose name merely shares our prefix is not our repository", () => {
   // A bare startsWith would count these as clicks on this project.
-  assert.equal(isRepositoryUrl("https://github.com/tsouth89/cubby-clipboard-docs"), false);
-  assert.equal(isRepositoryUrl("https://github.com/tsouth89/cubby-clipboardx"), false);
-  assert.equal(isRepositoryUrl("https://github.com/tsouth89/cubby-clipboard"), true);
-  assert.equal(isRepositoryUrl("https://github.com/tsouth89/cubby-clipboard/"), true);
+  assert.equal(isRepositoryUrl("https://github.com/btsouth/cubby-clipboard-docs"), false);
+  assert.equal(isRepositoryUrl("https://github.com/btsouth/cubby-clipboardx"), false);
+  assert.equal(isRepositoryUrl("https://github.com/btsouth/cubby-clipboard"), true);
+  assert.equal(isRepositoryUrl("https://github.com/btsouth/cubby-clipboard/"), true);
 });
 
 test("isRepositoryUrl tolerates a missing or non-string href", () => {

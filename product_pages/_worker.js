@@ -1,5 +1,5 @@
 
-const REPO = "tsouth89/cubby-clipboard";
+const REPO = "btsouth/cubby-clipboard";
 const CACHE_SECONDS = 300;
 const SESSION_MAX_AGE = 60 * 60 * 24 * 7;
 const SESSION_MESSAGE = "cubby-admin-session-v1";

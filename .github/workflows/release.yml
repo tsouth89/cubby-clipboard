@@ -520,7 +520,7 @@ jobs:
           TAG: ${{ needs.create-release.outputs.tag }}
           VERSION: ${{ needs.create-release.outputs.version }}
         run: |
-          REPO="tsouth89/cubby-clipboard"
+          REPO="btsouth/cubby-clipboard"
           NAME_X64="Cubby.Clipboard_${VERSION}_x64-setup.exe"
           NAME_ARM="Cubby.Clipboard_${VERSION}_arm64-setup.exe"
           BASE="https://github.com/${REPO}/releases/download/${TAG}"

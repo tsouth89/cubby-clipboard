@@ -5,7 +5,7 @@ The website lives in `product_pages` and is deployed from this repository with C
 ## Cloudflare Pages project
 
 1. In Cloudflare, open **Workers & Pages** and choose **Create application → Pages → Connect to Git**.
-2. Authorize only `tsouth89/cubby-clipboard` when possible.
+2. Authorize only `btsouth/cubby-clipboard` when possible.
 3. Use these build settings:
    - Production branch: `main`
    - Framework preset: None

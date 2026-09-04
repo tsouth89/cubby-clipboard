@@ -39,7 +39,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/tsouth89/cubby-clipboard/releases/latest/download/latest.json"
+        "https://github.com/btsouth/cubby-clipboard/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ3QjY4N0RBNzk3NkREODIKUldTQzNYWjUyb2UyUjdVZkNqUlhlR1laTVlWcFhmemFmZVUvVVRRNDZIanpORStaYWh0MVR6b2sK"
     }

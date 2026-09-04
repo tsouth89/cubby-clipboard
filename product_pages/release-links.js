@@ -1,7 +1,7 @@
 (() => {
-  const releasesUrl = "https://github.com/tsouth89/cubby-clipboard/releases";
+  const releasesUrl = "https://github.com/btsouth/cubby-clipboard/releases";
   const releasesApi =
-    "https://api.github.com/repos/tsouth89/cubby-clipboard/releases?per_page=10";
+    "https://api.github.com/repos/btsouth/cubby-clipboard/releases?per_page=10";
   const cacheKey = "cubby-latest-release-v1";
   const cacheLifetimeMs = 60 * 60 * 1000;
 
@@ -100,7 +100,7 @@
 
   // The star count only renders once it is social proof rather than an
   // admission of obscurity; below the threshold the button stays a plain CTA.
-  const repoApi = "https://api.github.com/repos/tsouth89/cubby-clipboard";
+  const repoApi = "https://api.github.com/repos/btsouth/cubby-clipboard";
   const starCacheKey = "cubby-star-count-v1";
   const minStarsToShow = 75;
 

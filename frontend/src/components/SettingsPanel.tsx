@@ -42,7 +42,7 @@ interface SettingsPanelProps {
 
 type Tab = 'general' | 'privacy' | 'folders' | 'about';
 
-const GITHUB_URL = 'https://github.com/tsouth89/cubby-clipboard';
+const GITHUB_URL = 'https://github.com/btsouth/cubby-clipboard';
 const WEBSITE_URL = 'https://cubbyclipboard.com';
 const PRIVACY_URL = 'https://cubbyclipboard.com/privacy';
 

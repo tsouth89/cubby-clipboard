@@ -23,10 +23,10 @@
       "identifier": "opener:allow-open-url",
       "allow": [
         {
-          "url": "https://github.com/tsouth89/cubby-clipboard"
+          "url": "https://github.com/btsouth/cubby-clipboard"
         },
         {
-          "url": "https://github.com/tsouth89/cubby-clipboard/*"
+          "url": "https://github.com/btsouth/cubby-clipboard/*"
         },
         {
           "url": "https://cubbyclipboard.com"
